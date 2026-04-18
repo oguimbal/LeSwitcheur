@@ -19,6 +19,7 @@ settings:
   show_all_spaces_hint: "Quando attivo, il commutatore include le finestre degli altri Spazi. Disattivato per impostazione predefinita — viene mostrato solo lo Spazio attuale. Richiede l'autorizzazione Registrazione Schermo per leggere i titoli delle finestre di altri Spazi."
   show_all_spaces_needs_permission: "Questa opzione richiede l'autorizzazione Registrazione Schermo."
   open_screen_recording_settings: "Concedi autorizzazione"
+  screen_recording_permission_granted: "Autorizzazione concessa"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Tieni premuto Fn e digita per aprire il commutatore con quel testo. Richiede l'autorizzazione Monitoraggio Input."
   replace_cmd_tab: "Sostituisci Cmd+Tab"

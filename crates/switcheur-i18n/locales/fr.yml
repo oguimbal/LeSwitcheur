@@ -19,6 +19,7 @@ settings:
   show_all_spaces_hint: "Lorsqu'activé, le commutateur inclut les fenêtres des autres bureaux. Désactivé par défaut — seul le bureau actuel est affiché. Nécessite la permission Screen Recording pour lire les titres des fenêtres cross-bureau."
   show_all_spaces_needs_permission: "Cette option nécessite la permission Screen Recording."
   open_screen_recording_settings: "Accorder la permission"
+  screen_recording_permission_granted: "Permission accordée"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Maintenez Fn et tapez pour ouvrir le commutateur avec ce texte. Nécessite l'autorisation Surveillance de la saisie."
   replace_cmd_tab: "Remplacer Cmd+Tab"

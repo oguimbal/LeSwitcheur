@@ -19,6 +19,7 @@ settings:
   show_all_spaces_hint: "开启后，切换器将包含其他桌面的窗口。默认关闭 — 仅显示当前桌面。读取跨桌面窗口标题需要“屏幕录制”权限。"
   show_all_spaces_needs_permission: "此选项需要“屏幕录制”权限。"
   open_screen_recording_settings: "授予权限"
+  screen_recording_permission_granted: "权限已授予"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "按住 Fn 并输入以使用该文本打开切换器。需要输入监控权限。"
   replace_cmd_tab: "替换 Cmd+Tab"

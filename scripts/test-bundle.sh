@@ -17,7 +17,7 @@ APP="$ROOT/dist/LeSwitcheur.app"
 rm -f "$CONFIG"
 rm -rf "$APP"
 
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-LeSwitcheur Code Signing}" \
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-LeSwitcher Code Signing}" \
     "$ROOT/bundle/bundle.sh"
 
 echo ">> Signature:"

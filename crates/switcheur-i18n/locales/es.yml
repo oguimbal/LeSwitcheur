@@ -19,6 +19,7 @@ settings:
   show_all_spaces_hint: "Cuando está activado, el conmutador incluye ventanas de otros Espacios. Desactivado por defecto — solo se muestra el Espacio actual. Requiere el permiso de Grabación de pantalla para leer los títulos de ventanas entre Espacios."
   show_all_spaces_needs_permission: "Esta opción requiere el permiso de Grabación de pantalla."
   open_screen_recording_settings: "Conceder permiso"
+  screen_recording_permission_granted: "Permiso concedido"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Mantén Fn y escribe para abrir el conmutador con ese texto. Requiere el permiso de Monitorización de Entrada."
   replace_cmd_tab: "Sustituir Cmd+Tab"

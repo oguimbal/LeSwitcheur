@@ -85,10 +85,22 @@ pub fn has_screen_recording_permission() -> bool {
 
 /// Triggers the native macOS Screen Recording dialog on first call; on
 /// subsequent calls it just returns the cached decision (macOS will not
-/// re-show the prompt once the user has chosen). We deliberately do NOT
-/// open System Settings here — the caller's UI keeps the warning visible
-/// and a polling loop catches the toggle once the user grants from
-/// Settings (which they can open themselves from the system dialog).
+/// re-show the prompt once the user has chosen). When the call returns
+/// false we also open System Settings → Privacy → Screen Recording so the
+/// user has a path to flip the toggle even after a previous denial. The
+/// settings-window polling loop catches the grant once it lands.
 pub fn request_screen_recording_permission() -> bool {
-    unsafe { CGRequestScreenCaptureAccess() }
+    let granted = unsafe { CGRequestScreenCaptureAccess() };
+    if !granted {
+        open_screen_recording_settings();
+    }
+    granted
+}
+
+/// Opens System Settings → Privacy & Security → Screen Recording.
+pub fn open_screen_recording_settings() {
+    let url = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+    if let Err(e) = std::process::Command::new("open").arg(url).spawn() {
+        tracing::warn!("failed to open Screen Recording pane: {e:#}");
+    }
 }

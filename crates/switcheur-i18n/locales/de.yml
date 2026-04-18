@@ -19,6 +19,7 @@ settings:
   show_all_spaces_hint: "Wenn aktiviert, zeigt der Umschalter auch Fenster anderer Schreibtische. Standardmäßig deaktiviert — nur der aktuelle Schreibtisch wird angezeigt. Benötigt die Berechtigung Bildschirmaufnahme, um Fenstertitel anderer Schreibtische zu lesen."
   show_all_spaces_needs_permission: "Diese Option benötigt die Berechtigung Bildschirmaufnahme."
   open_screen_recording_settings: "Berechtigung erteilen"
+  screen_recording_permission_granted: "Berechtigung erteilt"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Halte Fn gedrückt und tippe, um den Umschalter mit diesem Text zu öffnen. Benötigt die Berechtigung Eingabeüberwachung."
   replace_cmd_tab: "Cmd+Tab ersetzen"

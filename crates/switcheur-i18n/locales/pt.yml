@@ -19,6 +19,7 @@ settings:
   show_all_spaces_hint: "Quando ativo, o alternador inclui janelas de outros Espaços. Desativado por predefinição — apenas o Espaço atual é mostrado. Requer a permissão de Gravação do Ecrã para ler os títulos de janelas entre Espaços."
   show_all_spaces_needs_permission: "Esta opção requer a permissão de Gravação do Ecrã."
   open_screen_recording_settings: "Conceder permissão"
+  screen_recording_permission_granted: "Permissão concedida"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Mantenha Fn e digite para abrir o alternador com esse texto. Requer a autorização de Monitorização de Entrada."
   replace_cmd_tab: "Substituir Cmd+Tab"

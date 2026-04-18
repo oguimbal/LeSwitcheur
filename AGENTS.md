@@ -93,6 +93,15 @@ Replace SHA in `Cargo.toml` (two entries: `gpui` + `gpui_platform`). Run `cargo 
 - `NSRunningApplication::activateWithOptions` deprecated on macOS 14+ but still work. `activate()` (no options) not yet exposed by `objc2-app-kit 0.3`. Local `#[allow(deprecated)]` fine.
 - `kCGWindowListOptionOnScreenOnly` + friends live in `core_graphics::window` (not `::display`) since core-graphics 0.25.
 - Bundle `Info.plist`: **LSUIElement = true** (no Dock icon) + **NSAccessibilityUsageDescription** required, else system prompt never appear.
+- **Cross-Space / cross-fullscreen window activation** (`macos/activate.rs`): three layers, ALL required.
+  1. `NSRunningApplication.activateFromApplication:options:` — yield-based. Only path crossing Dock "universal owner" gate + macOS 14+ "caller must hold activation" rule. Source must be active.
+  2. SLPS: `_SLPSSetFrontProcessWithOptions` + two `SLPSPostEventRecordTo` with `[0x20..0x30]=0xff*16` (DO NOT omit) — pick specific `CGWindowID`.
+  3. `AXUIElementPerformAction(kAXRaiseAction)` — same-Space z-order. Skip if AX not surface window.
+  Don't write `kAXMain` / `kAXFocused` post-raise — race SLPS, break keyboard focus. Use `WindowRef.id` (captured at enum time); don't re-derive via AX (often hide cross-Space windows at activation time).
+- **LSUIElement + `cx.activate(true)`**: accessory app not "active" from window focus alone. Need explicit `cx.activate(true)`:
+  1. `WindowKind::Normal` / `Floating` (settings, onboarding) — else no foreground.
+  2. `WindowKind::PopUp` that trigger target-app activation on confirm (the switcher) — else yield-based activation above return `NO` silently, cross-Space switch break.
+- **Switcher confirm order**: activate target BEFORE close panel (`handle_view_event`). Close first strip activation → yield no-op. Yield API transfer keyboard focus atomically so late close safe.
 - Karabiner Elements / non-US keyboard layouts: `global-hotkey` map to physical W3C key codes. `Code::Equal` bind to US `=` physical position, sit under different keycaps on AZERTY/QWERTZ. Prefer keys unambiguous across layouts (letters, digits, Space, arrows) for default.
 
 ## User configuration

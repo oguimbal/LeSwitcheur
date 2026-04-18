@@ -51,7 +51,7 @@ const THANKS_HEIGHT: f32 = 380.0;
 /// How many switcher opens between nag cards when unlicensed. The counter
 /// advances on every opening of the panel; when it hits this threshold the
 /// next open renders the in-panel support card instead of the result list.
-const NAG_EVERY_N_USES: u32 = 500;
+const NAG_EVERY_N_USES: u32 = 50;
 /// Public-facing site origin. Used as a base for API endpoints.
 const LICENSE_SITE: &str = "https://leswitcheur.app";
 /// Buy-a-licence page. Opens in the user's browser when they click "Buy a
@@ -878,6 +878,16 @@ fn open_switcher_with_items(
     })?;
 
     let _ = cx.update(|cx| {
+        // LSUIElement + PopUp window ⇒ our NSApp never becomes active on its
+        // own, which breaks the modern yield-based activation path we use on
+        // confirm: `NSRunningApplication.activateFromApplication:` returns
+        // NO unless the source (us) holds activation, and on macOS 14+ that
+        // is enforced — the "old" `activate(ignoringOtherApps:)` fallback
+        // silently no-ops for non-active callers. Calling `cx.activate(true)`
+        // here promotes us to the active app for the duration the switcher
+        // is visible, so the yield on confirm is legitimate and the Space-
+        // switching/cross-fullscreen path works.
+        cx.activate(true);
         let _ = handle.update(cx, |_view, window, _cx| {
             window.activate_window();
         });
@@ -982,19 +992,21 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
         return;
     }
 
-    // Close the panel FIRST so our popup no longer holds keyboard focus when
-    // we tell the target app to take over. Otherwise the target window gets
-    // raised but focus can stay on our (now-dying) panel, forcing the user to
-    // click to actually start typing into the new app.
-    let slot = state.current.borrow_mut().take();
-    if let Some(slot) = slot {
-        let _ = cx.update_window(slot.handle, |_ent, window, _cx| {
-            window.remove_window();
-        });
-    }
-    reset_system_switcher_cycle(state);
-
-    match ev {
+    // Order matters here. Two opposing constraints:
+    //   - If we close the panel *before* activating the target, our process
+    //     loses frontmost status, and on macOS 14+ `activateFromApplication:`
+    //     silently no-ops when the caller doesn't hold activation (that's
+    //     the Sonoma lock-down on external activation). Cross-Space / cross-
+    //     Space-fullscreen switches stop working entirely.
+    //   - If we activate first and *then* close, keyboard focus can briefly
+    //     linger on our dying panel. That was the prior concern.
+    //
+    // The new activation path uses the modern yield-based API
+    // (`activateFromApplication:options:`), which transfers activation
+    // atomically with the source — so as long as our panel is still alive
+    // when the call is made, keyboard focus moves cleanly to the target.
+    // We close the panel *after* the activation call returns.
+    let slot_to_close = match ev {
         SwitcherViewEvent::Confirmed(item) => {
             // Bump recency *before* activating — the OS activation notification
             // will bump it again, but we want the item ranked immediately even
@@ -1030,12 +1042,15 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             if let Err(e) = res {
                 tracing::warn!("activate: {e:#}");
             }
+            state.current.borrow_mut().take()
         }
-        SwitcherViewEvent::Dismissed => {}
+        SwitcherViewEvent::Dismissed => state.current.borrow_mut().take(),
         SwitcherViewEvent::OpenSettings => {
+            let slot = state.current.borrow_mut().take();
             if let Err(e) = open_settings_window(state, cx) {
                 tracing::warn!("open_settings_window: {e:#}");
             }
+            slot
         }
         SwitcherViewEvent::FrameDeltaChanged { .. } => unreachable!("handled above"),
         SwitcherViewEvent::LicenseActivateRequested
@@ -1043,7 +1058,14 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
         | SwitcherViewEvent::CloseWindowRequested(_)
         | SwitcherViewEvent::UpdateDownloadRequested
         | SwitcherViewEvent::UpdateDismissed => unreachable!("handled above"),
+    };
+
+    if let Some(slot) = slot_to_close {
+        let _ = cx.update_window(slot.handle, |_ent, window, _cx| {
+            window.remove_window();
+        });
     }
+    reset_system_switcher_cycle(state);
 }
 
 fn open_onboarding_window(state: &AppState, cx: &mut App) -> Result<()> {

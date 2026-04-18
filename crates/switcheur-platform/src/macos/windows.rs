@@ -19,9 +19,10 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 
 use accessibility_sys::{
-    kAXErrorSuccess, kAXMinimizedAttribute, kAXSubroleAttribute, kAXTitleAttribute,
+    kAXErrorSuccess, kAXMinimizedAttribute, kAXPositionAttribute, kAXSizeAttribute,
+    kAXSubroleAttribute, kAXTitleAttribute, kAXValueTypeCGPoint, kAXValueTypeCGSize,
     kAXWindowsAttribute, AXError, AXUIElementCopyAttributeValue, AXUIElementCreateApplication,
-    AXUIElementRef,
+    AXUIElementRef, AXValueGetType, AXValueGetValue, AXValueRef,
 };
 use anyhow::{anyhow, Result};
 use core_foundation::array::CFArray;
@@ -30,7 +31,7 @@ use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::string::{CFString, CFStringRef};
-use core_graphics::display::CGWindowListCopyWindowInfo;
+use core_graphics::display::{CGDisplay, CGWindowListCopyWindowInfo};
 use core_graphics::window::{
     kCGNullWindowID, kCGWindowListExcludeDesktopElements, kCGWindowListOptionAll,
     kCGWindowListOptionOnScreenOnly,
@@ -45,6 +46,24 @@ type CGWindowID = u32;
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut CGWindowID) -> AXError;
+}
+
+// Private SkyLight helpers. `SLSCopySpacesForWindows` returns the set of
+// Space IDs the given windows live on. Hidden / orderOut windows live on
+// no Space — CG still reports them as valid layer-0 drawables with
+// plausible bounds, so this is the only reliable way to distinguish a
+// genuinely off-Space window from one the app just detached on red-X
+// close. Mask 0x7 means "all Space kinds" (user + fullscreen + tiled).
+// Approach borrowed from AltTab.
+#[link(name = "SkyLight", kind = "framework")]
+extern "C" {
+    fn SLSMainConnectionID() -> i32;
+    fn SLSCopySpacesForWindows(
+        cid: i32,
+        mask: u32,
+        windows: core_foundation::array::CFArrayRef,
+    ) -> core_foundation::array::CFArrayRef;
+    fn SLSGetActiveSpace(cid: i32) -> u64;
 }
 
 pub fn list_windows(show_all_spaces: bool) -> Result<Vec<WindowRef>> {
@@ -71,10 +90,12 @@ pub fn list_windows(show_all_spaces: bool) -> Result<Vec<WindowRef>> {
         .filter(|w| !w.title.is_empty())
         .map(|w| (w.pid, w.title.clone()))
         .collect();
+    let ax_pids: HashSet<i32> = ax_wins.iter().map(|w| w.pid).collect();
     let cg_extra = cg_supplement_windows(
         show_all_spaces,
         &known_ids,
         &known_pid_title,
+        &ax_pids,
     );
     tracing::debug!(
         ax = ax_wins.len(),
@@ -99,6 +120,7 @@ fn cg_supplement_windows(
     show_all_spaces: bool,
     already_have: &HashSet<u64>,
     already_have_pid_title: &HashSet<(i32, String)>,
+    ax_pids: &HashSet<i32>,
 ) -> Vec<WindowRef> {
     let apps_by_pid: HashMap<i32, AppRef> = list_apps()
         .unwrap_or_default()
@@ -120,13 +142,26 @@ fn cg_supplement_windows(
 
     // Titled CG entries go out eagerly, deduped against AX and against
     // each other. Untitled CG entries are the fallback for apps AX knows
-    // nothing about (typically cross-Space windows of non-Chromium apps
-    // without Screen Recording). Each untitled entry is its own row —
-    // collapsing per pid would hide the fact that the user has e.g. ten
-    // Cursor windows open and pick the wrong target on activation.
+    // nothing about (typically cross-Space windows without Screen
+    // Recording, which macOS 14.4+ strips the title from). We collect
+    // untitled candidates here and filter them after the pass once we
+    // know which pids already have titled coverage: if any titled entry
+    // exists for a pid (AX or CG), the untitled siblings are almost
+    // always helper surfaces and get dropped. When a pid has no titled
+    // coverage at all we keep at most one untitled row — we can't tell
+    // real windows apart from OS/app scratch surfaces without a title,
+    // so better to show a single indicative row than flood the list.
     let mut titled_out: Vec<WindowRef> = Vec::new();
     let mut titled_seen: HashSet<(i32, String)> = HashSet::new();
-    let mut untitled_out: Vec<WindowRef> = Vec::new();
+    let mut untitled_candidates: Vec<WindowRef> = Vec::new();
+
+    // Active Space — used to reject `orderOut:` ghosts. When CG lists a
+    // window off-screen whose only Space is the one we're on, the app
+    // closed that window but kept it around internally (classic
+    // Keychain Access / Mail / System Settings behavior). Legitimate
+    // off-Space windows always have at least one non-active Space in
+    // their SkyLight-reported list.
+    let active = active_space_id();
 
     for dict in cf_array.iter() {
         let dict: &CFDictionary = &dict;
@@ -168,6 +203,13 @@ fn cg_supplement_windows(
         if w < 50.0 || h < 50.0 {
             continue;
         }
+        // Ghost filter before touching title-based dedup: a CG entry
+        // that's off-screen and either lives on no Space or only on
+        // the active Space is an `orderOut:` ghost / scratch surface.
+        // Empirically Keychain Access keeps 5-6 such entries per pid.
+        if is_space_ghost(id as CGWindowID, on_screen, active) {
+            continue;
+        }
         let title = cg_get_string(dict, "kCGWindowName").unwrap_or_default();
 
         if !title.is_empty() {
@@ -188,23 +230,21 @@ fn cg_supplement_windows(
                 minimized: false,
             });
         } else {
-            // Untitled entries: the CG-only view of other-Space windows
-            // when Screen Recording isn't granted (14.4+ withholds the
-            // title). The `already_have` id dedup above already rejects
-            // windows AX covered — and since `_AXUIElementGetWindow`
-            // gives AX entries real CGWindowIDs, that dedup is
-            // authoritative even for cross-Space apps that also have
-            // a current-Space window. We just need strict noise
-            // filters: real user windows are near-opaque and a
-            // reasonable size; layer-0 scratch buffers fail at least
-            // one of these.
+            // Untitled entries: only keep strict-looking candidates. We
+            // defer the pid-level filter (no titled coverage) and the
+            // one-per-pid collapse to the post-pass so the decision can
+            // use the *final* titled_out set, not just what we've seen
+            // so far this iteration.
+            if ax_pids.contains(&pid) {
+                continue;
+            }
             if alpha < 0.9 {
                 continue;
             }
             if w < 200.0 || h < 150.0 {
                 continue;
             }
-            untitled_out.push(WindowRef {
+            untitled_candidates.push(WindowRef {
                 id,
                 pid,
                 title: String::new(),
@@ -214,6 +254,25 @@ fn cg_supplement_windows(
                 minimized: false,
             });
         }
+    }
+
+    // Post-pass for untitled: drop any whose pid already has a titled
+    // CG row (same mechanism as the ax_pids filter inside the loop, but
+    // applied after the whole titled set is known). Collapse the rest
+    // to one entry per pid — without a title we can't distinguish the
+    // main window from OS/app scratch surfaces, so a single row is the
+    // least-lying thing to show.
+    let titled_pids: HashSet<i32> = titled_out.iter().map(|w| w.pid).collect();
+    let mut untitled_seen_pids: HashSet<i32> = HashSet::new();
+    let mut untitled_out: Vec<WindowRef> = Vec::new();
+    for u in untitled_candidates {
+        if titled_pids.contains(&u.pid) {
+            continue;
+        }
+        if !untitled_seen_pids.insert(u.pid) {
+            continue;
+        }
+        untitled_out.push(u);
     }
 
     let mut out = titled_out;
@@ -231,9 +290,23 @@ fn list_windows_via_ax(show_all_spaces: bool) -> Result<Vec<WindowRef>> {
     } else {
         Some(current_space_window_ids())
     };
+    // CG's view of "real" drawable layer-0 windows. Apps like Keychain
+    // Access keep internal hidden windows alive after the user closes
+    // their last visible window — AX still surfaces those as
+    // AXStandardWindow so the subrole filter alone can't reject them.
+    // Cross-checking the CGWindowID against CG's layer-0-with-bounds
+    // set drops the ghosts.
+    let valid = valid_cg_window_ids();
+    // Union of active display rects (CG top-left coords). Eclipse RCP
+    // apps (DBeaver, Eclipse) park disposed UI parts in a hidden
+    // "PartRenderingEngine's limbo" NSWindow at coords like
+    // `(-10000, -10000)`. It has a valid CGWindowID and a Space, so
+    // only a geometry check catches it: a real window always has some
+    // overlap with a physical display.
+    let screens = active_display_rects();
     let mut out = Vec::with_capacity(apps.len() * 2);
     for app in apps {
-        match ax_windows_for(&app, on_screen.as_ref()) {
+        match ax_windows_for(&app, on_screen.as_ref(), &valid, &screens) {
             Ok(mut windows) => out.append(&mut windows),
             Err(e) => tracing::debug!(pid = app.pid, "no AX windows: {e:#}"),
         }
@@ -255,6 +328,8 @@ const ALLOWED_SUBROLES: &[&str] = &[
 fn ax_windows_for(
     app: &AppRef,
     on_screen: Option<&HashSet<CGWindowID>>,
+    valid_cg_ids: &HashSet<CGWindowID>,
+    screens: &[Rect],
 ) -> Result<Vec<WindowRef>> {
     let mut out = Vec::new();
     unsafe {
@@ -279,6 +354,59 @@ fn ax_windows_for(
             }
             let minimized = matches!(ax_copy_bool(wref, kAXMinimizedAttribute), Some(true));
             let cg_id = ax_window_id(wref);
+            // Ghost-window filter. Apps often `orderOut:` their windows
+            // on red-X close (Keychain Access, System Settings, Mail's
+            // Viewer window, etc.) — the window is detached from the
+            // display list but stays in AX's `kAXWindows` collection,
+            // and CG still reports it as a valid layer-0 drawable with
+            // plausible bounds/alpha, so neither the subrole nor the
+            // CG-shape check can reject it. The reliable signal is
+            // SkyLight: a hidden window lives on no Space.
+            //
+            // Checks in order of cheapness:
+            //   1. `_AXUIElementGetWindow` returns no id → CG has no
+            //      record at all, clearly bogus.
+            //   2. CG has the id but classifies it as a non-drawable
+            //      (zero bounds / transparent / wrong layer) → bogus.
+            //   3. SkyLight reports no Spaces for the id → the window
+            //      was detached from the display list (orderOut).
+            //
+            // Minimized windows stay on their Space even when hidden
+            // from view, so they pass 3 naturally — we skip the whole
+            // block for them to stay safe against edge-case bookkeeping.
+            if !minimized {
+                match cg_id {
+                    Some(id) if valid_cg_ids.contains(&id) => {
+                        // For AX-surfaced windows we only reject windows
+                        // truly detached from the Space graph. Active-
+                        // Space orderOut detection is unnecessary here:
+                        // if AX still lists the window, the app considers
+                        // it a real member of its window set.
+                        if window_space_ids(id).is_empty() {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
+                // Off-screen "limbo" filter: a real window — even one
+                // parked on another Space — sits somewhere inside a
+                // physical display rect. Eclipse RCP's
+                // `PartRenderingEngine's limbo` shell is stashed at
+                // absurd negative coords (~(-10000, -10000)) and never
+                // intersects a screen; same pattern for any hidden
+                // NSWindow an app moves off-screen as a disposal trick.
+                // AXPosition/AXSize give the definitive geometry
+                // (CG `kCGWindowBounds` agrees but AX is already in
+                // hand so we avoid a second CG dict lookup).
+                let pos = ax_copy_point(wref, kAXPositionAttribute);
+                let size = ax_copy_size(wref, kAXSizeAttribute);
+                if let (Some((x, y)), Some((w, h))) = (pos, size) {
+                    let r = Rect { x, y, w, h };
+                    if !screens.iter().any(|s| rects_overlap(&r, s)) {
+                        continue;
+                    }
+                }
+            }
             if let Some(on_screen) = on_screen {
                 // Current-desktop filter: keep minimized windows (they belong
                 // to the current Space conceptually) and anything whose
@@ -310,6 +438,93 @@ fn ax_windows_for(
     Ok(out)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Rect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+fn rects_overlap(a: &Rect, b: &Rect) -> bool {
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+}
+
+/// Rectangles of every connected display, in CG top-left coords. Used
+/// to check that an AX window's frame lives somewhere visible; windows
+/// stashed entirely off-display are "limbo" shells apps use to park
+/// disposed views.
+fn active_display_rects() -> Vec<Rect> {
+    let ids = match CGDisplay::active_displays() {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!("CGDisplay::active_displays failed (err={e}) — geometry filter disabled");
+            return Vec::new();
+        }
+    };
+    ids.into_iter()
+        .map(|id| {
+            let b = CGDisplay::new(id).bounds();
+            Rect {
+                x: b.origin.x,
+                y: b.origin.y,
+                w: b.size.width,
+                h: b.size.height,
+            }
+        })
+        .collect()
+}
+
+/// Space IDs the given CGWindowID lives on. Empty means the window is
+/// not attached to any Space (pure ghost — WindowServer scratch surface
+/// or detached placeholder). Mask 0x7 asks for all Space kinds (user +
+/// fullscreen + tiled).
+fn window_space_ids(cg_id: CGWindowID) -> Vec<i64> {
+    unsafe {
+        let cid = SLSMainConnectionID();
+        let num = CFNumber::from(cg_id as i64);
+        let arr: CFArray<CFNumber> = CFArray::from_CFTypes(&[num]);
+        let spaces_ref = SLSCopySpacesForWindows(cid, 0x7, arr.as_concrete_TypeRef());
+        if spaces_ref.is_null() {
+            return Vec::new();
+        }
+        let spaces: CFArray<CFNumber> = CFArray::wrap_under_create_rule(spaces_ref as _);
+        let mut out = Vec::with_capacity(spaces.len() as usize);
+        for i in 0..spaces.len() {
+            if let Some(n) = spaces.get(i) {
+                if let Some(v) = n.to_i64() {
+                    out.push(v);
+                }
+            }
+        }
+        out
+    }
+}
+
+fn active_space_id() -> i64 {
+    unsafe { SLSGetActiveSpace(SLSMainConnectionID()) as i64 }
+}
+
+/// Ghost classification. An off-screen CG entry is a ghost when:
+///   - it lives on no Space at all (empty `spaces`), or
+///   - every Space it lives on is the currently-active one (the window
+///     was `orderOut:`-ed from the active Space; a legitimate cross-
+///     Space window always has at least one non-active Space in its
+///     list).
+/// `on_screen` should come from CG's `kCGWindowIsOnscreen` — the
+/// active-Space rule only fires when the window is also off-screen, so
+/// a visible focused window isn't mistaken for a ghost.
+fn is_space_ghost(cg_id: CGWindowID, on_screen: bool, active: i64) -> bool {
+    let spaces = window_space_ids(cg_id);
+    if spaces.is_empty() {
+        return true;
+    }
+    if !on_screen && spaces.iter().all(|s| *s == active) {
+        return true;
+    }
+    false
+}
+
 unsafe fn ax_window_id(elem: AXUIElementRef) -> Option<CGWindowID> {
     let mut id: CGWindowID = 0;
     let err = _AXUIElementGetWindow(elem, &mut id);
@@ -318,6 +533,43 @@ unsafe fn ax_window_id(elem: AXUIElementRef) -> Option<CGWindowID> {
     } else {
         None
     }
+}
+
+/// CGWindowIDs of windows CG considers real layer-0 drawables — non-zero
+/// bounds, non-zero alpha. Used to reject AX "ghost" windows (apps like
+/// Keychain Access retain invisible placeholder windows internally; AX
+/// still reports them with subrole `AXStandardWindow`, but CG exposes
+/// them with zero size / zero alpha / a non-normal layer, if at all).
+/// Pulls from `kCGWindowListOptionAll` so off-Space windows are kept.
+fn valid_cg_window_ids() -> HashSet<CGWindowID> {
+    let options = kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements;
+    let raw = unsafe { CGWindowListCopyWindowInfo(options, kCGNullWindowID) };
+    if raw.is_null() {
+        return HashSet::new();
+    }
+    let cf_array: CFArray<CFDictionary> = unsafe { CFArray::wrap_under_create_rule(raw) };
+    let mut ids = HashSet::with_capacity(cf_array.len() as usize);
+    for dict in cf_array.iter() {
+        let dict: &CFDictionary = &dict;
+        let layer = cg_get_i64(dict, "kCGWindowLayer").unwrap_or(-1);
+        if layer != 0 {
+            continue;
+        }
+        let alpha = cg_get_f64(dict, "kCGWindowAlpha").unwrap_or(1.0);
+        if alpha < 0.01 {
+            continue;
+        }
+        let (w, h) = cg_get_bounds_size(dict).unwrap_or((0.0, 0.0));
+        if w < 50.0 || h < 50.0 {
+            continue;
+        }
+        if let Some(id) = cg_get_i64(dict, "kCGWindowNumber") {
+            if id >= 0 {
+                ids.insert(id as CGWindowID);
+            }
+        }
+    }
+    ids
 }
 
 /// CGWindowIDs of on-screen windows — i.e. windows on the user's active Space.
@@ -453,6 +705,46 @@ unsafe fn ax_copy_bool(elem: AXUIElementRef, attr: &str) -> Option<bool> {
 unsafe fn ax_copy_array(elem: AXUIElementRef, attr: &str) -> Option<CFArray<CFType>> {
     let raw = ax_copy_raw(elem, attr)?;
     Some(CFArray::wrap_under_create_rule(raw as _))
+}
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct CgPoint {
+    x: f64,
+    y: f64,
+}
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct CgSize {
+    width: f64,
+    height: f64,
+}
+
+unsafe fn ax_copy_point(elem: AXUIElementRef, attr: &str) -> Option<(f64, f64)> {
+    let raw = ax_copy_raw(elem, attr)?;
+    let axv = raw as AXValueRef;
+    if AXValueGetType(axv) != kAXValueTypeCGPoint {
+        return None;
+    }
+    let mut p = CgPoint::default();
+    if !AXValueGetValue(axv, kAXValueTypeCGPoint, &mut p as *mut _ as *mut c_void) {
+        return None;
+    }
+    Some((p.x, p.y))
+}
+
+unsafe fn ax_copy_size(elem: AXUIElementRef, attr: &str) -> Option<(f64, f64)> {
+    let raw = ax_copy_raw(elem, attr)?;
+    let axv = raw as AXValueRef;
+    if AXValueGetType(axv) != kAXValueTypeCGSize {
+        return None;
+    }
+    let mut s = CgSize::default();
+    if !AXValueGetValue(axv, kAXValueTypeCGSize, &mut s as *mut _ as *mut c_void) {
+        return None;
+    }
+    Some((s.width, s.height))
 }
 
 // --- CG dict helpers ---

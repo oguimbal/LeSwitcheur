@@ -462,12 +462,17 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Update the cached Screen Recording grant status. If it just flipped
-    /// to true, also clear any lingering permission warning.
+    /// Update the cached Screen Recording grant status. When the permission
+    /// just flipped to true while the user was waiting (warning visible), we
+    /// keep the row visible — its rendering swaps from a "Grant permission"
+    /// button to a green "Permission granted" indicator — and auto-enable
+    /// the show-all-Spaces toggle the user originally tried to flip on.
     pub fn set_screen_recording_granted(&mut self, granted: bool, cx: &mut Context<Self>) {
+        let was_pending = self.show_all_spaces_needs_permission && !self.screen_recording_granted;
         self.screen_recording_granted = granted;
-        if granted {
-            self.show_all_spaces_needs_permission = false;
+        if granted && was_pending && !self.show_all_spaces {
+            self.show_all_spaces = true;
+            cx.emit(SettingsViewEvent::ShowAllSpacesChanged(true));
         }
         cx.notify();
     }
@@ -1251,6 +1256,32 @@ impl SettingsView {
 
     fn render_screen_recording_warning(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
+        if self.screen_recording_granted {
+            // Green tick replaces the button so the user gets explicit
+            // feedback that the permission landed and the toggle now works.
+            let granted_color = gpui::rgb(0x22c55e);
+            let badge = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .border_1()
+                .border_color(granted_color)
+                .text_color(granted_color)
+                .child("✓")
+                .child(tr("settings.screen_recording_permission_granted"));
+            return div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .pl(px(48.0))
+                .child(badge)
+                .into_any_element();
+        }
         let message = div()
             .flex_1()
             .text_size(px(12.0))
