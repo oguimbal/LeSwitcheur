@@ -1,0 +1,149 @@
+window:
+  settings_title: "LeSwitcheur-Einstellungen"
+  license_title: "LeSwitcheur unterstützen"
+  onboarding_title: "Willkommen bei LeSwitcheur"
+
+settings:
+  header: "Einstellungen"
+  tab_general: "Allgemein"
+  tab_shortcuts: "Tastenkürzel"
+  tab_exclusions: "Ausschlüsse"
+  launch_at_startup: "Beim Start öffnen"
+  search_apps: "Anwendungen suchen"
+  search_apps_hint: "Wenn aktiviert, zeigt die Eingabe passende installierte Apps in einer Leiste über der Umschalterliste."
+  ask_llm: "Ein LLM fragen"
+  ask_llm_hint: "Wenn keine Fenster oder App zur Anfrage passen, werden „Claude / ChatGPT / … fragen“-Verknüpfungen unten in der Liste angezeigt."
+  include_minimized: "Minimierte Fenster einbeziehen"
+  include_minimized_hint: "Minimierte Fenster zeigen ein kleines Abzeichen auf ihrem Symbol."
+  show_all_spaces: "Fenster aus allen Schreibtischen anzeigen"
+  show_all_spaces_hint: "Wenn aktiviert, zeigt der Umschalter auch Fenster anderer Schreibtische. Standardmäßig deaktiviert — nur der aktuelle Schreibtisch wird angezeigt. Benötigt die Berechtigung Bildschirmaufnahme, um Fenstertitel anderer Schreibtische zu lesen."
+  show_all_spaces_needs_permission: "Diese Option benötigt die Berechtigung Bildschirmaufnahme."
+  open_screen_recording_settings: "Berechtigung erteilen"
+  quick_type: "Quick Type (Fn)"
+  quick_type_hint: "Halte Fn gedrückt und tippe, um den Umschalter mit diesem Text zu öffnen. Benötigt die Berechtigung Eingabeüberwachung."
+  replace_cmd_tab: "Cmd+Tab ersetzen"
+  replace_cmd_tab_hint: "Fange Cmd+Tab ab und zeige LeSwitcheur statt des Systemumschalters. Benötigt die Berechtigung Eingabeüberwachung."
+  shortcut_label: "Kurzbefehl"
+  press_combo: "Drücke eine Tastenkombination…"
+  record: "Aufnehmen"
+  cancel_record: "Abbrechen"
+  disabled_in: "Deaktiviert in"
+  no_exceptions: "Noch keine Ausnahmen."
+  add_app: "+ App hinzufügen"
+  exceptions_none: "— keine —"
+  quit: "LeSwitcheur beenden"
+  quit_confirm: "Zum Bestätigen erneut klicken"
+
+sort:
+  header: "Sortierung"
+  recent_app: "Zuletzt verwendet — App"
+  recent_window: "Zuletzt verwendet — Fenster"
+  title: "Fenstertitel (A→Z)"
+  app_name: "App-Name (A→Z)"
+  recent_app_hint: "Fenster gruppiert nach der App, die du zuletzt verwendet hast."
+  recent_window_hint: "Verfolgt jedes Fenster einzeln. Verbraucht im Hintergrund minimal CPU (meist nicht spürbar)."
+
+exclusions:
+  header: "Ausschlüsse"
+  hint: "Regeln verbergen passende Fenster aus dem Umschalter. Lasse App leer, um beliebige Apps zu treffen; lasse das Muster leer, um alle ihre Fenster zu erfassen. Regex standardmäßig ohne Groß-/Kleinschreibung."
+  col_app: "App"
+  col_pattern: "Muster für Fenstertitel"
+  add: "+ Ausschluss hinzufügen"
+  all: "Alle"
+  any_app: "— beliebige App —"
+  invalid_regex: "ungültige Regex: %{err}"
+
+picker:
+  title: "Anwendung auswählen"
+  cancel: "Abbrechen"
+  filter_placeholder: "Zum Filtern tippen…"
+  no_matches: "Keine passenden Apps"
+
+switcher:
+  search_placeholder: "Suchen…"
+  no_windows: "Keine Fenster gefunden"
+  no_results: "Keine Ergebnisse"
+
+llm:
+  ask_claude: "Claude fragen"
+  ask_chatgpt: "ChatGPT fragen"
+  ask_mistral: "Le Chat fragen"
+  ask_perplexity: "Perplexity fragen"
+
+launcher:
+  open_url: "URL öffnen"
+
+keys:
+  space: "Leer"
+  tab: "Tab"
+  enter: "Eingabe"
+  esc: "Esc"
+
+license:
+  title: "Projekt unterstützen"
+  body: "LeSwitcheur ist kostenlos. Eine Lizenz (zahle, was du willst, einmalig) blendet dieses Popup aus und unterstützt das Projekt. Danke!"
+  activate: "Lizenz kaufen"
+  activating: "Browser wird geöffnet…"
+  later: "Später"
+  active: "Lizenziert"
+  remove: "Lizenz entfernen"
+  remove_confirm: "Zum Bestätigen erneut klicken"
+  purchase: "Lizenz kaufen"
+  unlicensed: "Nicht lizenziert"
+  key_label: "Lizenzschlüssel"
+  copy: "Kopieren"
+  copied: "Kopiert"
+  enter_key: "Vorhandenen Schlüssel eingeben"
+  activate_key: "Aktivieren"
+  activating_key: "Aktiviere…"
+  key_placeholder: "LSWT-XXXX-XXXX-XXXX"
+  recover: "Schlüssel verloren? Wiederherstellen."
+  error_invalid: "Ungültiger Lizenzschlüssel."
+  error_monthly: "Monatliches Aktivierungslimit erreicht (3/30 Tage)."
+  error_yearly: "Jährliches Aktivierungslimit erreicht (10/365 Tage)."
+  error_network: "Aktivierung fehlgeschlagen. Verbindung prüfen."
+  error_token: "Aktivierungstoken von der App abgelehnt."
+
+thanks:
+  success:
+    title: "Von Herzen danke!"
+    body: "Deine Lizenz ist aktiv. Du hältst LeSwitcheur am Leben."
+  error:
+    title: "Aktivierung fehlgeschlagen"
+    body: "Dein Schlüssel wurde empfangen, aber die Aktivierung ist nicht abgeschlossen."
+  ok: "OK"
+
+update:
+  available: "Ein neues Update ist verfügbar"
+  download: "Herunterladen"
+  downloading: "Wird heruntergeladen…"
+  ready: "In Programme ziehen und neu starten"
+  dismiss: "Schließen"
+
+onboarding:
+  welcome:
+    title: "Willkommen bei LeSwitcheur"
+  common:
+    back: "Zurück"
+    next: "Weiter"
+  accessibility:
+    title: "Bedienungshilfen zulassen"
+    body: "LeSwitcheur benötigt die macOS-Berechtigung „Bedienungshilfen“, um ein ausgewähltes Fenster in den Vordergrund zu holen. Ohne diese Berechtigung kann der Switcher Apps zwar anzeigen, aber nicht aktivieren."
+    enable: "Bedienungshilfen-Zugriff erlauben"
+    granted: "Bedienungshilfen aktiviert"
+  hotkey:
+    title: "Wähle dein Tastenkürzel"
+    subtitle: "Drücke die Tastenkombination, die den Switcher öffnet."
+    next: "Weiter"
+    re_record: "Erneut aufzeichnen"
+    skip: "Später einrichten"
+  system_switcher:
+    title: "Nativen Switcher ersetzen?"
+    body: "LeSwitcheur kann die obige Kombination abfangen und seinen Panel anstelle des macOS-Switchers anzeigen."
+    yes: "Ja, ersetzen"
+    no: "Nein, nativ behalten"
+  done:
+    title: "Alles bereit"
+    body: "LeSwitcheur ist kostenlos. Eine Lizenz (zahle, was du willst, einmalig) unterstützt das Projekt und blendet den Support-Hinweis aus."
+    buy: "Lizenz kaufen"
+    later: "Später"

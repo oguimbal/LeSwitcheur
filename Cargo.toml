@@ -1,0 +1,87 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/switcheur",
+    "crates/switcheur-core",
+    "crates/switcheur-i18n",
+    "crates/switcheur-platform",
+    "crates/switcheur-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+authors = ["Olivier <olivier.guimbal@gmail.com>"]
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/oliv/leswitcheur"
+
+[workspace.dependencies]
+# Internal crates
+switcheur-core = { path = "crates/switcheur-core" }
+switcheur-i18n = { path = "crates/switcheur-i18n" }
+switcheur-platform = { path = "crates/switcheur-platform" }
+switcheur-ui = { path = "crates/switcheur-ui" }
+
+# GPUI — Zed's UI framework, pinned SHA for reproducibility.
+# To bump: `git ls-remote https://github.com/zed-industries/zed refs/heads/main`
+gpui = { git = "https://github.com/zed-industries/zed", rev = "adfcb45abeceb797dff3b868efc8147f53c0068f" }
+# `runtime_shaders` stitches Metal shaders at runtime instead of pre-compiling
+# them in the build script — avoids needing the full Metal Toolchain at build time.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "adfcb45abeceb797dff3b868efc8147f53c0068f", features = ["runtime_shaders", "font-kit"] }
+
+# Fuzzy matcher — same engine Zed uses
+nucleo-matcher = "0.3"
+
+# Inline math evaluation (Spotlight-style calculator in the query bar)
+meval = "0.2"
+
+# Inline JavaScript evaluation via QuickJS (Fabrice Bellard's ES2023 engine)
+rquickjs = { version = "0.11", default-features = false, features = ["rust-alloc"] }
+
+# Global hotkey registration
+global-hotkey = "0.6"
+
+# macOS platform APIs
+core-foundation = "0.10"
+core-graphics = "0.25"
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+accessibility-sys = "0.1"
+auto-launch = "0.6"
+
+# Config + serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "5"
+regex = "1"
+
+# Utilities
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+crossbeam-channel = "0.5"
+async-channel = "2.5"
+arc-swap = "1"
+
+# i18n — sys-locale detects OS language, rust-i18n loads the YAML bundles.
+rust-i18n = "3"
+sys-locale = "0.3"
+
+# Licensing: verify Ed25519-signed tokens issued by the web backend.
+ed25519-dalek = "2"
+# Used for payload envelope parsing (base64url) + HTTP activation polling.
+base64 = "0.22"
+ureq = { version = "2", features = ["json", "tls"] }
+serde_json = "1"
+open = "5"
+
+# Semver comparison for the update checker (remote manifest vs current binary).
+semver = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

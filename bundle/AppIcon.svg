@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8b93ff"/>
+      <stop offset="55%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#1e1b4b"/>
+    </linearGradient>
+    <linearGradient id="winBack" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#dbe1ee"/>
+      <stop offset="100%" stop-color="#8e98b0"/>
+    </linearGradient>
+    <linearGradient id="winFront" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#dde3ee"/>
+    </linearGradient>
+    <linearGradient id="titleBack" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#b8c1d2"/>
+      <stop offset="100%" stop-color="#8592a8"/>
+    </linearGradient>
+    <linearGradient id="titleFront" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#eef2f9"/>
+      <stop offset="100%" stop-color="#cfd6e3"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="22" stdDeviation="28" flood-color="#000" flood-opacity="0.38"/>
+    </filter>
+    <clipPath id="squircle">
+      <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224"/>
+    </clipPath>
+    <clipPath id="winBackClip">
+      <rect width="620" height="440" rx="56" ry="56"/>
+    </clipPath>
+    <clipPath id="winFrontClip">
+      <rect width="620" height="440" rx="56" ry="56"/>
+    </clipPath>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#bg)"/>
+
+  <g clip-path="url(#squircle)" opacity="0.22">
+    <ellipse cx="512" cy="-140" rx="760" ry="440" fill="#ffffff"/>
+  </g>
+
+  <!-- back window -->
+  <g filter="url(#shadow)" transform="translate(130 190)">
+    <g clip-path="url(#winBackClip)">
+      <rect width="620" height="440" fill="url(#winBack)"/>
+      <rect width="620" height="88" fill="url(#titleBack)"/>
+    </g>
+    <rect width="620" height="440" rx="56" ry="56" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="3"/>
+    <circle cx="48" cy="44" r="14" fill="#6b7488"/>
+    <circle cx="90" cy="44" r="14" fill="#6b7488"/>
+    <circle cx="132" cy="44" r="14" fill="#6b7488"/>
+  </g>
+
+  <!-- front window -->
+  <g filter="url(#shadow)" transform="translate(274 394)">
+    <g clip-path="url(#winFrontClip)">
+      <rect width="620" height="440" fill="url(#winFront)"/>
+      <rect width="620" height="88" fill="url(#titleFront)"/>
+    </g>
+    <rect width="620" height="440" rx="56" ry="56" fill="none" stroke="#c6cedd" stroke-width="2"/>
+    <circle cx="48" cy="44" r="14" fill="#ff5f57"/>
+    <circle cx="90" cy="44" r="14" fill="#febc2e"/>
+    <circle cx="132" cy="44" r="14" fill="#28c840"/>
+    <!-- search bar (suggests fuzzy-find UI) -->
+    <rect x="48" y="138" width="524" height="72" rx="20" fill="#f1f4fa" stroke="#c6cedd" stroke-width="2"/>
+    <circle cx="84" cy="174" r="14" fill="none" stroke="#8592a8" stroke-width="4"/>
+    <line x1="95" y1="185" x2="110" y2="200" stroke="#8592a8" stroke-width="4" stroke-linecap="round"/>
+    <!-- selected row -->
+    <rect x="48" y="240" width="524" height="66" rx="18" fill="#4f46e5" opacity="0.16"/>
+    <rect x="70" y="260" width="36" height="26" rx="6" fill="#4f46e5"/>
+    <rect x="120" y="262" width="240" height="22" rx="11" fill="#4f46e5" opacity="0.75"/>
+    <!-- list rows -->
+    <rect x="70" y="330" width="460" height="16" rx="8" fill="#c6cedd"/>
+    <rect x="70" y="362" width="380" height="16" rx="8" fill="#c6cedd"/>
+    <rect x="70" y="394" width="420" height="16" rx="8" fill="#c6cedd"/>
+  </g>
+</svg>

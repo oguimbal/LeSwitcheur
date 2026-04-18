@@ -1,0 +1,149 @@
+window:
+  settings_title: "LeSwitcheur 设置"
+  license_title: "支持 LeSwitcheur"
+  onboarding_title: "欢迎使用 LeSwitcheur"
+
+settings:
+  header: "设置"
+  tab_general: "通用"
+  tab_shortcuts: "快捷键"
+  tab_exclusions: "排除项"
+  launch_at_startup: "开机自启"
+  search_apps: "搜索应用程序"
+  search_apps_hint: "启用后，输入时会在切换器列表上方显示匹配的已安装应用。"
+  ask_llm: "询问 LLM"
+  ask_llm_hint: "当没有窗口或应用匹配查询时，在列表底部显示「询问 Claude / ChatGPT / …」快捷项。"
+  include_minimized: "包括最小化的窗口"
+  include_minimized_hint: "最小化的窗口会在图标上显示一个小徽章。"
+  show_all_spaces: "显示所有桌面的窗口"
+  show_all_spaces_hint: "开启后，切换器将包含其他桌面的窗口。默认关闭 — 仅显示当前桌面。读取跨桌面窗口标题需要“屏幕录制”权限。"
+  show_all_spaces_needs_permission: "此选项需要“屏幕录制”权限。"
+  open_screen_recording_settings: "授予权限"
+  quick_type: "Quick Type (Fn)"
+  quick_type_hint: "按住 Fn 并输入以使用该文本打开切换器。需要输入监控权限。"
+  replace_cmd_tab: "替换 Cmd+Tab"
+  replace_cmd_tab_hint: "拦截 Cmd+Tab 并显示 LeSwitcheur 代替系统切换器。需要输入监控权限。"
+  shortcut_label: "快捷键"
+  press_combo: "请按下组合键…"
+  record: "录制"
+  cancel_record: "取消"
+  disabled_in: "在以下应用中禁用"
+  no_exceptions: "暂无例外。"
+  add_app: "+ 添加应用"
+  exceptions_none: "— 无 —"
+  quit: "退出 LeSwitcheur"
+  quit_confirm: "再次点击以确认"
+
+sort:
+  header: "排序方式"
+  recent_app: "最近使用 — 应用"
+  recent_window: "最近使用 — 窗口"
+  title: "窗口标题 (A→Z)"
+  app_name: "应用名称 (A→Z)"
+  recent_app_hint: "按最近使用的应用分组窗口。"
+  recent_window_hint: "单独追踪每个窗口。后台占用极少的 CPU（通常难以察觉）。"
+
+exclusions:
+  header: "排除项"
+  hint: "规则会在切换器中隐藏匹配的窗口。留空「应用」以匹配任意应用；留空模式以覆盖其所有窗口。默认不区分大小写。"
+  col_app: "应用"
+  col_pattern: "窗口标题模式"
+  add: "+ 添加排除项"
+  all: "全部"
+  any_app: "— 任意应用 —"
+  invalid_regex: "正则表达式无效:%{err}"
+
+picker:
+  title: "选择一个应用"
+  cancel: "取消"
+  filter_placeholder: "输入以筛选…"
+  no_matches: "没有匹配的应用"
+
+switcher:
+  search_placeholder: "搜索…"
+  no_windows: "未找到窗口"
+  no_results: "无结果"
+
+llm:
+  ask_claude: "问 Claude"
+  ask_chatgpt: "问 ChatGPT"
+  ask_mistral: "问 Le Chat"
+  ask_perplexity: "问 Perplexity"
+
+launcher:
+  open_url: "打开链接"
+
+keys:
+  space: "空格"
+  tab: "Tab"
+  enter: "回车"
+  esc: "Esc"
+
+license:
+  title: "支持项目"
+  body: "LeSwitcheur 免费使用。购买许可证（自愿付费,一次性付款）可隐藏此提示并支持项目。感谢!"
+  activate: "购买许可证"
+  activating: "正在打开浏览器…"
+  later: "稍后"
+  active: "已授权"
+  remove: "移除许可证"
+  remove_confirm: "再次点击以确认"
+  purchase: "购买许可证"
+  unlicensed: "未授权"
+  key_label: "许可证密钥"
+  copy: "复制"
+  copied: "已复制"
+  enter_key: "输入已有密钥"
+  activate_key: "激活"
+  activating_key: "激活中…"
+  key_placeholder: "LSWT-XXXX-XXXX-XXXX"
+  recover: "丢失密钥?找回它。"
+  error_invalid: "许可证密钥无效。"
+  error_monthly: "月度激活次数已达上限(3/30 天)。"
+  error_yearly: "年度激活次数已达上限(10/365 天)。"
+  error_network: "激活失败,请检查网络连接。"
+  error_token: "激活令牌被应用拒绝。"
+
+thanks:
+  success:
+    title: "衷心感谢!"
+    body: "许可证已激活。感谢您支持 LeSwitcheur。"
+  error:
+    title: "激活失败"
+    body: "已收到密钥,但激活未完成。"
+  ok: "确定"
+
+update:
+  available: "有可用的新更新"
+  download: "下载"
+  downloading: "正在下载…"
+  ready: "拖到「应用程序」文件夹并重新启动"
+  dismiss: "关闭"
+
+onboarding:
+  welcome:
+    title: "欢迎使用 LeSwitcheur"
+  common:
+    back: "返回"
+    next: "下一步"
+  accessibility:
+    title: "授予辅助功能权限"
+    body: "LeSwitcheur 需要 macOS 的「辅助功能」权限,才能在你选择窗口后把它切到最前。否则切换器只能列出应用,但无法激活它们。"
+    enable: "授予辅助功能权限"
+    granted: "辅助功能已启用"
+  hotkey:
+    title: "选择你的快捷键"
+    subtitle: "按下用于唤起切换器的组合键。"
+    next: "下一步"
+    re_record: "重新录制"
+    skip: "暂时跳过"
+  system_switcher:
+    title: "替换系统切换器?"
+    body: "LeSwitcheur 可以拦截上方组合键,用自己的面板代替 macOS 切换器。"
+    yes: "是的,替换"
+    no: "否,保留系统"
+  done:
+    title: "全部完成"
+    body: "LeSwitcheur 是免费的。购买许可证(自愿付费,一次性)可支持项目并隐藏支持提示。"
+    buy: "购买许可证"
+    later: "稍后"

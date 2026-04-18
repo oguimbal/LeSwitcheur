@@ -1,0 +1,149 @@
+window:
+  settings_title: "Ajustes de LeSwitcheur"
+  license_title: "Apoya LeSwitcheur"
+  onboarding_title: "Te damos la bienvenida a LeSwitcheur"
+
+settings:
+  header: "Ajustes"
+  tab_general: "General"
+  tab_shortcuts: "Atajos"
+  tab_exclusions: "Exclusiones"
+  launch_at_startup: "Abrir al iniciar"
+  search_apps: "Buscar aplicaciones"
+  search_apps_hint: "Cuando está activado, al escribir se muestran las aplicaciones instaladas coincidentes en un panel sobre la lista del conmutador."
+  ask_llm: "Preguntar a un LLM"
+  ask_llm_hint: "Cuando ninguna ventana o app coincide con la consulta, muestra accesos directos «Preguntar a Claude / ChatGPT / …» al final de la lista."
+  include_minimized: "Incluir ventanas minimizadas"
+  include_minimized_hint: "Las ventanas minimizadas muestran un pequeño distintivo sobre su icono."
+  show_all_spaces: "Mostrar ventanas de todos los Espacios"
+  show_all_spaces_hint: "Cuando está activado, el conmutador incluye ventanas de otros Espacios. Desactivado por defecto — solo se muestra el Espacio actual. Requiere el permiso de Grabación de pantalla para leer los títulos de ventanas entre Espacios."
+  show_all_spaces_needs_permission: "Esta opción requiere el permiso de Grabación de pantalla."
+  open_screen_recording_settings: "Conceder permiso"
+  quick_type: "Quick Type (Fn)"
+  quick_type_hint: "Mantén Fn y escribe para abrir el conmutador con ese texto. Requiere el permiso de Monitorización de Entrada."
+  replace_cmd_tab: "Sustituir Cmd+Tab"
+  replace_cmd_tab_hint: "Intercepta Cmd+Tab y muestra LeSwitcheur en lugar del conmutador del sistema. Requiere el permiso de Monitorización de Entrada."
+  shortcut_label: "Atajo"
+  press_combo: "Pulsa una combinación de teclas…"
+  record: "Grabar"
+  cancel_record: "Cancelar"
+  disabled_in: "Desactivado en"
+  no_exceptions: "Aún no hay excepciones."
+  add_app: "+ Añadir app"
+  exceptions_none: "— ninguna —"
+  quit: "Salir de LeSwitcheur"
+  quit_confirm: "Haz clic de nuevo para confirmar"
+
+sort:
+  header: "Ordenar por"
+  recent_app: "Usado recientemente — app"
+  recent_window: "Usado recientemente — ventana"
+  title: "Título de ventana (A→Z)"
+  app_name: "Nombre de app (A→Z)"
+  recent_app_hint: "Ventanas agrupadas por la app que usaste más recientemente."
+  recent_window_hint: "Hace un seguimiento de cada ventana por separado. Consume muy poco CPU en segundo plano (normalmente imperceptible)."
+
+exclusions:
+  header: "Exclusiones"
+  hint: "Las reglas ocultan las ventanas coincidentes del conmutador. Deja App vacío para coincidir con cualquier app; deja el patrón vacío para abarcar todas sus ventanas. Regex sin distinción de mayúsculas por defecto."
+  col_app: "App"
+  col_pattern: "Patrón del título de ventana"
+  add: "+ Añadir exclusión"
+  all: "Todas"
+  any_app: "— cualquier app —"
+  invalid_regex: "regex no válido: %{err}"
+
+picker:
+  title: "Elegir una aplicación"
+  cancel: "Cancelar"
+  filter_placeholder: "Escribe para filtrar…"
+  no_matches: "No hay apps coincidentes"
+
+switcher:
+  search_placeholder: "Buscar…"
+  no_windows: "No se encontraron ventanas"
+  no_results: "Sin resultados"
+
+llm:
+  ask_claude: "Preguntar a Claude"
+  ask_chatgpt: "Preguntar a ChatGPT"
+  ask_mistral: "Preguntar a Le Chat"
+  ask_perplexity: "Preguntar a Perplexity"
+
+launcher:
+  open_url: "Abrir URL"
+
+keys:
+  space: "Espacio"
+  tab: "Tab"
+  enter: "Intro"
+  esc: "Esc"
+
+license:
+  title: "Apoya el proyecto"
+  body: "LeSwitcheur es gratuito. Comprar una licencia (precio libre, pago único) oculta este aviso y apoya el proyecto. ¡Gracias!"
+  activate: "Comprar una licencia"
+  activating: "Abriendo el navegador…"
+  later: "Más tarde"
+  active: "Con licencia"
+  remove: "Eliminar licencia"
+  remove_confirm: "Haz clic de nuevo para confirmar"
+  purchase: "Comprar una licencia"
+  unlicensed: "Sin licencia"
+  key_label: "Clave de licencia"
+  copy: "Copiar"
+  copied: "Copiado"
+  enter_key: "Introducir clave existente"
+  activate_key: "Activar"
+  activating_key: "Activando…"
+  key_placeholder: "LSWT-XXXX-XXXX-XXXX"
+  recover: "¿Clave perdida? Recupérala."
+  error_invalid: "Clave de licencia inválida."
+  error_monthly: "Límite mensual de activaciones alcanzado (3/30 días)."
+  error_yearly: "Límite anual de activaciones alcanzado (10/365 días)."
+  error_network: "Activación fallida. Verifica tu conexión."
+  error_token: "Token de activación rechazado por la app."
+
+thanks:
+  success:
+    title: "¡Muchas gracias de corazón!"
+    body: "Tu licencia está activa. Tú mantienes vivo LeSwitcheur."
+  error:
+    title: "Activación imposible"
+    body: "Tu clave se recibió, pero la activación no se completó."
+  ok: "OK"
+
+update:
+  available: "Hay una nueva actualización disponible"
+  download: "Descargar"
+  downloading: "Descargando…"
+  ready: "Arrastra a Aplicaciones y reinicia"
+  dismiss: "Cerrar"
+
+onboarding:
+  welcome:
+    title: "Bienvenido a LeSwitcheur"
+  common:
+    back: "Atrás"
+    next: "Siguiente"
+  accessibility:
+    title: "Conceder acceso a Accesibilidad"
+    body: "LeSwitcheur necesita el permiso «Accesibilidad» de macOS para traer al frente la ventana que elijas. Sin él, el conmutador puede listar las apps pero no activarlas."
+    enable: "Conceder acceso de Accesibilidad"
+    granted: "Accesibilidad activada"
+  hotkey:
+    title: "Elige tu atajo"
+    subtitle: "Pulsa la combinación de teclas que abrirá el conmutador."
+    next: "Siguiente"
+    re_record: "Grabar de nuevo"
+    skip: "Omitir por ahora"
+  system_switcher:
+    title: "¿Reemplazar el conmutador nativo?"
+    body: "LeSwitcheur puede interceptar esta combinación y mostrar su panel en lugar del conmutador de macOS."
+    yes: "Sí, reemplazar"
+    no: "No, mantener el nativo"
+  done:
+    title: "¡Todo listo!"
+    body: "LeSwitcheur es gratis. Comprar una licencia (precio libre, pago único) apoya el proyecto y oculta el aviso de soporte."
+    buy: "Comprar licencia"
+    later: "Más tarde"

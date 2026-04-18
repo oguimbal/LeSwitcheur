@@ -1,0 +1,92 @@
+//! Resolve and cache app icons as PNGs on disk.
+//!
+//! GPUI's `img()` element takes a `PathBuf`, so the simplest integration is to
+//! extract each app's icon via AppKit once and write it to
+//! `~/Library/Caches/fr.gmbl.LeSwitcheur/icons/<key>.png`. Subsequent lookups
+//! just check that the file still exists.
+//!
+//! "Key" is the bundle identifier when available (stable across launches);
+//! we fall back to the pid-prefixed name for stray processes without one.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use anyhow::{anyhow, Context, Result};
+use directories::ProjectDirs;
+use objc2::rc::Retained;
+use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSWorkspace};
+use objc2_foundation::{NSDictionary, NSString};
+
+/// Return the on-disk path to a PNG icon for the app with the given bundle path,
+/// generating it if the cache doesn't yet have one.
+pub fn icon_for_bundle(bundle_path: &str, cache_key: &str) -> Option<PathBuf> {
+    let dir = cache_dir()?;
+    let path = dir.join(format!("{}.png", sanitize(cache_key)));
+    if path.exists() {
+        return Some(path);
+    }
+    match write_png_icon(bundle_path, &path) {
+        Ok(()) => Some(path),
+        Err(e) => {
+            tracing::debug!(bundle_path, cache_key, "icon extract failed: {e:#}");
+            None
+        }
+    }
+}
+
+fn write_png_icon(bundle_path: &str, out: &Path) -> Result<()> {
+    let png_bytes = extract_png_bytes(bundle_path)?;
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    fs::write(out, png_bytes).with_context(|| format!("write {}", out.display()))?;
+    Ok(())
+}
+
+fn extract_png_bytes(bundle_path: &str) -> Result<Vec<u8>> {
+    let ns_path = NSString::from_str(bundle_path);
+    let workspace = NSWorkspace::sharedWorkspace();
+    let image: Retained<NSImage> = workspace.iconForFile(&ns_path);
+
+    let tiff = image
+        .TIFFRepresentation()
+        .ok_or_else(|| anyhow!("no TIFF representation"))?;
+
+    let rep = NSBitmapImageRep::imageRepWithData(&tiff)
+        .ok_or_else(|| anyhow!("NSBitmapImageRep::imageRepWithData returned nil"))?;
+
+    let props = NSDictionary::new();
+    let png = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }
+        .ok_or_else(|| anyhow!("representationUsingType(png) returned nil"))?;
+
+    let bytes = png.to_vec();
+    if bytes.is_empty() {
+        return Err(anyhow!("NSData was empty"));
+    }
+    Ok(bytes)
+}
+
+fn cache_dir() -> Option<PathBuf> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let proj = ProjectDirs::from("fr", "gmbl", "LeSwitcheur")?;
+        let d = proj.cache_dir().join("icons");
+        if let Err(e) = fs::create_dir_all(&d) {
+            tracing::warn!("cannot create icon cache dir {}: {e}", d.display());
+            return None;
+        }
+        Some(d)
+    })
+    .clone()
+}
+
+/// Keep cache keys filesystem-safe without fancy encoding.
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_' => c,
+            _ => '_',
+        })
+        .collect()
+}

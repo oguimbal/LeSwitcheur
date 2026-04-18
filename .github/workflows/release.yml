@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify version sync
+        run: ./bundle/verify-version.sh
+
+      - name: Build release binary
+        run: cargo build --release -p switcheur
+
+      # Import the self-signed code-signing cert into a temp keychain so
+      # `codesign --sign "$CODESIGN_IDENTITY"` inside bundle.sh finds it.
+      # Stable identity = TCC grants persist across releases for returning
+      # users (no need to re-tick Accessibility / Screen Recording on each
+      # update). Skipped if secrets are absent — build falls back to ad-hoc.
+      - name: Import signing certificate
+        env:
+          CODESIGN_CERT_P12_BASE64: ${{ secrets.CODESIGN_CERT_P12_BASE64 }}
+          CODESIGN_CERT_PASSWORD: ${{ secrets.CODESIGN_CERT_PASSWORD }}
+        run: |
+          if [ -z "$CODESIGN_CERT_P12_BASE64" ]; then
+            echo "No signing secret configured — bundle will ad-hoc sign."
+            exit 0
+          fi
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 32)
+          echo -n "$CODESIGN_CERT_P12_BASE64" | base64 --decode -o "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CODESIGN_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PATH" "$KEYCHAIN_PATH" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+      - name: Bundle .app
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: ./bundle/bundle.sh
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Create DMG
+        run: ./bundle/dmg.sh
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LeSwitcheur.dmg
+          generate_release_notes: true
+          draft: false
+          prerelease: false

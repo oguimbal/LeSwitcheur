@@ -1,0 +1,28 @@
+[package]
+name = "switcheur"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "switcheur"
+path = "src/main.rs"
+
+[dependencies]
+switcheur-core = { workspace = true }
+switcheur-i18n = { workspace = true }
+switcheur-platform = { workspace = true }
+switcheur-ui = { workspace = true }
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+async-channel = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ureq = { workspace = true }
+open = { workspace = true }
+serde_json = { workspace = true }
+semver = { workspace = true }
+directories = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "switcheur-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+switcheur-core = { workspace = true }
+switcheur-i18n = { workspace = true }
+gpui = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

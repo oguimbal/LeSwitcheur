@@ -1,0 +1,149 @@
+window:
+  settings_title: "Réglages de LeSwitcheur"
+  license_title: "Soutenir LeSwitcheur"
+  onboarding_title: "Bienvenue dans LeSwitcheur"
+
+settings:
+  header: "Réglages"
+  tab_general: "Général"
+  tab_shortcuts: "Raccourcis"
+  tab_exclusions: "Exclusions"
+  launch_at_startup: "Lancer au démarrage"
+  search_apps: "Rechercher des applications"
+  search_apps_hint: "Activé, la saisie affiche les applications installées correspondantes dans un panneau au-dessus de la liste du commutateur."
+  ask_llm: "Demander à un LLM"
+  ask_llm_hint: "Lorsqu'aucune fenêtre ni application ne correspond à la requête, propose des raccourcis « Demander à Claude / ChatGPT / … » en bas de la liste."
+  include_minimized: "Inclure les fenêtres réduites"
+  include_minimized_hint: "Les fenêtres réduites affichent un petit badge sur leur icône."
+  show_all_spaces: "Afficher les fenêtres de tous les bureaux"
+  show_all_spaces_hint: "Lorsqu'activé, le commutateur inclut les fenêtres des autres bureaux. Désactivé par défaut — seul le bureau actuel est affiché. Nécessite la permission Screen Recording pour lire les titres des fenêtres cross-bureau."
+  show_all_spaces_needs_permission: "Cette option nécessite la permission Screen Recording."
+  open_screen_recording_settings: "Accorder la permission"
+  quick_type: "Quick Type (Fn)"
+  quick_type_hint: "Maintenez Fn et tapez pour ouvrir le commutateur avec ce texte. Nécessite l'autorisation Surveillance de la saisie."
+  replace_cmd_tab: "Remplacer Cmd+Tab"
+  replace_cmd_tab_hint: "Intercepte Cmd+Tab et affiche LeSwitcheur à la place du commutateur système. Nécessite l'autorisation Surveillance de la saisie."
+  shortcut_label: "Raccourci"
+  press_combo: "Appuyez sur une combinaison de touches…"
+  record: "Enregistrer"
+  cancel_record: "Annuler"
+  disabled_in: "Désactivé dans"
+  no_exceptions: "Aucune exception pour l'instant."
+  add_app: "+ Ajouter une app"
+  exceptions_none: "— aucune —"
+  quit: "Quitter LeSwitcheur"
+  quit_confirm: "Cliquez à nouveau pour confirmer"
+
+sort:
+  header: "Trier par"
+  recent_app: "Récemment utilisé — app"
+  recent_window: "Récemment utilisé — fenêtre"
+  title: "Titre de fenêtre (A→Z)"
+  app_name: "Nom d'app (A→Z)"
+  recent_app_hint: "Fenêtres regroupées par l'app que vous avez utilisée le plus récemment."
+  recent_window_hint: "Suit chaque fenêtre individuellement. Consomme un tout petit peu de CPU en arrière-plan (généralement imperceptible)."
+
+exclusions:
+  header: "Exclusions"
+  hint: "Les règles masquent les fenêtres correspondantes dans le commutateur. Laissez App vide pour correspondre à n'importe quelle app ; laissez le motif vide pour couvrir toutes ses fenêtres. Regex insensible à la casse par défaut."
+  col_app: "App"
+  col_pattern: "Motif de titre de fenêtre"
+  add: "+ Ajouter une exclusion"
+  all: "Toutes"
+  any_app: "— n'importe quelle app —"
+  invalid_regex: "regex invalide : %{err}"
+
+picker:
+  title: "Choisir une application"
+  cancel: "Annuler"
+  filter_placeholder: "Taper pour filtrer…"
+  no_matches: "Aucune app correspondante"
+
+switcher:
+  search_placeholder: "Rechercher…"
+  no_windows: "Aucune fenêtre trouvée"
+  no_results: "Aucun résultat"
+
+llm:
+  ask_claude: "Demander à Claude"
+  ask_chatgpt: "Demander à ChatGPT"
+  ask_mistral: "Demander à Le Chat"
+  ask_perplexity: "Demander à Perplexity"
+
+launcher:
+  open_url: "Ouvrir le lien"
+
+keys:
+  space: "Espace"
+  tab: "Tab"
+  enter: "Entrée"
+  esc: "Échap"
+
+license:
+  title: "Soutenir le projet"
+  body: "LeSwitcheur est gratuit. Acheter une licence (prix libre, une fois) fait disparaître ce message et soutient le projet. Merci !"
+  activate: "Acheter une licence"
+  activating: "Ouverture du navigateur…"
+  later: "Plus tard"
+  active: "Licence active"
+  remove: "Supprimer la licence"
+  remove_confirm: "Cliquez à nouveau pour confirmer"
+  purchase: "Acheter une licence"
+  unlicensed: "Sans licence"
+  key_label: "Clé de licence"
+  copy: "Copier"
+  copied: "Copié"
+  enter_key: "Saisir une clé existante"
+  activate_key: "Activer"
+  activating_key: "Activation…"
+  key_placeholder: "LSWT-XXXX-XXXX-XXXX"
+  recover: "Clé perdue ? La retrouver."
+  error_invalid: "Clé de licence invalide."
+  error_monthly: "Limite d'activations mensuelle atteinte (3/30 jours)."
+  error_yearly: "Limite d'activations annuelle atteinte (10/365 jours)."
+  error_network: "Activation échouée. Vérifiez votre connexion."
+  error_token: "Jeton d'activation refusé par l'application."
+
+thanks:
+  success:
+    title: "Merci du fond du cœur !"
+    body: "Votre licence est active. Vous faites vivre LeSwitcheur."
+  error:
+    title: "Activation impossible"
+    body: "Votre clé a bien été reçue, mais l'activation a échoué."
+  ok: "OK"
+
+update:
+  available: "Une nouvelle mise à jour est disponible"
+  download: "Télécharger"
+  downloading: "Téléchargement…"
+  ready: "Glissez vers Applications et redémarrez"
+  dismiss: "Ignorer"
+
+onboarding:
+  welcome:
+    title: "Bienvenue dans LeSwitcheur"
+  common:
+    back: "Retour"
+    next: "Suivant"
+  accessibility:
+    title: "Autoriser l'accessibilité"
+    body: "LeSwitcheur a besoin de l'autorisation « Accessibilité » de macOS pour faire passer une fenêtre au premier plan quand vous la choisissez. Sans ça, le switcher peut lister vos apps mais ne peut pas les activer."
+    enable: "Autoriser l'accès Accessibilité"
+    granted: "Accessibilité activée"
+  hotkey:
+    title: "Choisissez votre raccourci"
+    subtitle: "Appuyez sur la combinaison qui affichera le switcher."
+    next: "Suivant"
+    re_record: "Recommencer"
+    skip: "Passer cette étape"
+  system_switcher:
+    title: "Remplacer le switcher natif ?"
+    body: "LeSwitcheur peut intercepter cette combinaison et afficher son panneau à la place du switcher macOS."
+    yes: "Oui, remplacer"
+    no: "Non, garder le natif"
+  done:
+    title: "Félicitations, tout est prêt"
+    body: "LeSwitcheur est gratuit. Acheter une licence (prix libre, une seule fois) soutient le projet et masque le message de soutien."
+    buy: "Acheter une licence"
+    later: "Plus tard"

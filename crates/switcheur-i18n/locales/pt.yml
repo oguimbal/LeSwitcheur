@@ -1,0 +1,149 @@
+window:
+  settings_title: "Ajustes do LeSwitcheur"
+  license_title: "Apoiar o LeSwitcheur"
+  onboarding_title: "Bem-vindo ao LeSwitcheur"
+
+settings:
+  header: "Ajustes"
+  tab_general: "Geral"
+  tab_shortcuts: "Atalhos"
+  tab_exclusions: "Exclusões"
+  launch_at_startup: "Abrir ao iniciar"
+  search_apps: "Pesquisar aplicações"
+  search_apps_hint: "Quando ativado, ao escrever são mostradas as aplicações instaladas correspondentes num painel acima da lista do alternador."
+  ask_llm: "Perguntar a um LLM"
+  ask_llm_hint: "Quando nenhuma janela ou app corresponde à consulta, mostra os atalhos «Perguntar a Claude / ChatGPT / …» no final da lista."
+  include_minimized: "Incluir janelas minimizadas"
+  include_minimized_hint: "As janelas minimizadas mostram um pequeno distintivo no seu ícone."
+  show_all_spaces: "Mostrar janelas de todos os Espaços"
+  show_all_spaces_hint: "Quando ativo, o alternador inclui janelas de outros Espaços. Desativado por predefinição — apenas o Espaço atual é mostrado. Requer a permissão de Gravação do Ecrã para ler os títulos de janelas entre Espaços."
+  show_all_spaces_needs_permission: "Esta opção requer a permissão de Gravação do Ecrã."
+  open_screen_recording_settings: "Conceder permissão"
+  quick_type: "Quick Type (Fn)"
+  quick_type_hint: "Mantenha Fn e digite para abrir o alternador com esse texto. Requer a autorização de Monitorização de Entrada."
+  replace_cmd_tab: "Substituir Cmd+Tab"
+  replace_cmd_tab_hint: "Intercepta Cmd+Tab e mostra o LeSwitcheur em vez do alternador do sistema. Requer a autorização de Monitorização de Entrada."
+  shortcut_label: "Atalho"
+  press_combo: "Prima uma combinação de teclas…"
+  record: "Gravar"
+  cancel_record: "Cancelar"
+  disabled_in: "Desativado em"
+  no_exceptions: "Ainda sem exceções."
+  add_app: "+ Adicionar app"
+  exceptions_none: "— nenhuma —"
+  quit: "Sair do LeSwitcheur"
+  quit_confirm: "Clique novamente para confirmar"
+
+sort:
+  header: "Ordenar por"
+  recent_app: "Usado recentemente — app"
+  recent_window: "Usado recentemente — janela"
+  title: "Título da janela (A→Z)"
+  app_name: "Nome da app (A→Z)"
+  recent_app_hint: "Janelas agrupadas pela app que usou mais recentemente."
+  recent_window_hint: "Acompanha cada janela individualmente. Consome muito pouco CPU em segundo plano (normalmente impercetível)."
+
+exclusions:
+  header: "Exclusões"
+  hint: "As regras ocultam do alternador as janelas correspondentes. Deixe App vazio para qualquer app; deixe o padrão vazio para abranger todas as suas janelas. Regex sem distinção entre maiúsculas por predefinição."
+  col_app: "App"
+  col_pattern: "Padrão do título da janela"
+  add: "+ Adicionar exclusão"
+  all: "Todas"
+  any_app: "— qualquer app —"
+  invalid_regex: "regex inválida: %{err}"
+
+picker:
+  title: "Escolher uma aplicação"
+  cancel: "Cancelar"
+  filter_placeholder: "Escreva para filtrar…"
+  no_matches: "Sem apps correspondentes"
+
+switcher:
+  search_placeholder: "Pesquisar…"
+  no_windows: "Nenhuma janela encontrada"
+  no_results: "Sem resultados"
+
+llm:
+  ask_claude: "Perguntar ao Claude"
+  ask_chatgpt: "Perguntar ao ChatGPT"
+  ask_mistral: "Perguntar ao Le Chat"
+  ask_perplexity: "Perguntar à Perplexity"
+
+launcher:
+  open_url: "Abrir URL"
+
+keys:
+  space: "Espaço"
+  tab: "Tab"
+  enter: "Enter"
+  esc: "Esc"
+
+license:
+  title: "Apoiar o projeto"
+  body: "O LeSwitcheur é gratuito. Comprar uma licença (preço livre, pagamento único) oculta este aviso e apoia o projeto. Obrigado!"
+  activate: "Comprar uma licença"
+  activating: "Abrindo o navegador…"
+  later: "Mais tarde"
+  active: "Com licença"
+  remove: "Remover licença"
+  remove_confirm: "Clique novamente para confirmar"
+  purchase: "Comprar uma licença"
+  unlicensed: "Sem licença"
+  key_label: "Chave de licença"
+  copy: "Copiar"
+  copied: "Copiado"
+  enter_key: "Inserir chave existente"
+  activate_key: "Ativar"
+  activating_key: "Ativando…"
+  key_placeholder: "LSWT-XXXX-XXXX-XXXX"
+  recover: "Chave perdida? Recupere-a."
+  error_invalid: "Chave de licença inválida."
+  error_monthly: "Limite mensal de ativações atingido (3/30 dias)."
+  error_yearly: "Limite anual de ativações atingido (10/365 dias)."
+  error_network: "Ativação falhou. Verifique a sua conexão."
+  error_token: "Token de ativação recusado pela aplicação."
+
+thanks:
+  success:
+    title: "Muito obrigado do fundo do coração!"
+    body: "A sua licença está ativa. Você mantém o LeSwitcheur vivo."
+  error:
+    title: "Ativação impossível"
+    body: "A sua chave foi recebida, mas a ativação não foi concluída."
+  ok: "OK"
+
+update:
+  available: "Uma nova atualização está disponível"
+  download: "Baixar"
+  downloading: "Baixando…"
+  ready: "Arraste para Aplicativos e reinicie"
+  dismiss: "Fechar"
+
+onboarding:
+  welcome:
+    title: "Bem-vindo ao LeSwitcheur"
+  common:
+    back: "Voltar"
+    next: "Próximo"
+  accessibility:
+    title: "Conceder acesso à Acessibilidade"
+    body: "O LeSwitcheur precisa da permissão «Acessibilidade» do macOS para trazer para frente a janela que você escolher. Sem ela, o alternador pode listar seus apps mas não ativá-los."
+    enable: "Conceder acesso à Acessibilidade"
+    granted: "Acessibilidade ativada"
+  hotkey:
+    title: "Escolha o seu atalho"
+    subtitle: "Pressione a combinação de teclas que abrirá o alternador."
+    next: "Próximo"
+    re_record: "Gravar novamente"
+    skip: "Pular por agora"
+  system_switcher:
+    title: "Substituir o alternador nativo?"
+    body: "O LeSwitcheur pode interceptar esta combinação e exibir seu painel no lugar do alternador do macOS."
+    yes: "Sim, substituir"
+    no: "Não, manter nativo"
+  done:
+    title: "Tudo pronto"
+    body: "O LeSwitcheur é gratuito. Comprar uma licença (preço livre, pagamento único) apoia o projeto e oculta o aviso de apoio."
+    buy: "Comprar licença"
+    later: "Mais tarde"

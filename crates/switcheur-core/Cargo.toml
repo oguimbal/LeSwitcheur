@@ -1,0 +1,24 @@
+[package]
+name = "switcheur-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+nucleo-matcher = { workspace = true }
+meval = { workspace = true }
+rquickjs = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+directories = { workspace = true }
+regex = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+base64 = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+rand = "0.8"

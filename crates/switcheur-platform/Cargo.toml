@@ -1,0 +1,31 @@
+[package]
+name = "switcheur-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+switcheur-core = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+crossbeam-channel = { workspace = true }
+async-channel = { workspace = true }
+arc-swap = { workspace = true }
+percent-encoding = "2"
+open = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { workspace = true }
+core-graphics = { workspace = true }
+foreign-types = "0.5"
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["NSRunningApplication", "NSWorkspace", "NSApplication", "NSImage", "NSBitmapImageRep", "NSImageRep", "NSGraphics", "NSPasteboard", "block2"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSArray", "NSURL", "NSDictionary", "NSData", "NSGeometry", "NSNotification", "NSOperation", "NSBundle", "block2"] }
+block2 = "0.6"
+directories = { workspace = true }
+objc2-core-foundation = "0.3"
+accessibility-sys = { workspace = true }
+global-hotkey = { workspace = true }
+auto-launch = { workspace = true }
