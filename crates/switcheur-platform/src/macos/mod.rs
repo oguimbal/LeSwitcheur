@@ -1,4 +1,5 @@
 pub mod activate;
+pub mod app_policy;
 pub mod browser;
 pub mod file_manager;
 pub mod hotkey;

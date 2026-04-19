@@ -8,6 +8,12 @@ use crate::model::{Item, LlmProvider, ProgramRef};
 
 const MAX_PROGRAMS: usize = 3;
 
+/// Show "Ask <Provider>" rows after browser-tab matches when at most this
+/// many tabs matched (and no window matched). Above this, the tab list is a
+/// strong enough signal on its own — adding LLM rows just pushes real matches
+/// off-screen.
+const ASK_LLM_MAX_TABS: usize = 3;
+
 /// Minimum query length (in Unicode scalars, after trimming) before the
 /// switcher asks the host to scrape browser tabs. Short queries (1-2 chars)
 /// are too generic — the AppleScript fetch can be 50-300 ms and the typical
@@ -434,6 +440,7 @@ impl SwitcherState {
             return;
         }
         self.filtered = self.matcher.rank(&self.query, &self.items);
+        let window_count = self.filtered.len();
         if self.query.trim().is_empty() {
             self.filtered_programs.clear();
         } else {
@@ -450,43 +457,46 @@ impl SwitcherState {
         // even when a window also matches. Only kicks in past the minimum
         // query length (see [`MIN_QUERY_LEN_FOR_BROWSER_TABS`]) and when a
         // scan has actually been delivered for this session.
+        let mut tab_count = 0usize;
         if self.browser_tabs_integration && self.query_long_enough_for_browser_tabs() {
             if let Some(cache) = &self.browser_tabs_cache {
                 if !cache.is_empty() {
                     let tab_matches = self.matcher.rank(&self.query, cache);
+                    tab_count = tab_matches.len();
                     self.filtered.extend(tab_matches);
                 }
             }
         }
-        // "Ask <Provider>" fallback — only when nothing else matched, the
-        // query is non-empty, and no other UI tier is present. Suppressed
-        // while a browser-tab scan is in flight so the Ask row doesn't flash
-        // in and out when tabs are about to arrive.
+        // "Ask <Provider>" rows — appended after tabs when the window tier
+        // is empty and the tab signal is thin (≤ ASK_LLM_MAX_TABS). Thin tab
+        // matches are easy to overshoot, so offering an AI handoff keeps the
+        // flow going without a retry. The zero-tab case subsumes the legacy
+        // "nothing matched" fallback. Suppressed while a scan is in flight
+        // so the rows don't flash in and out when tabs are about to arrive.
         let browser_tabs_pending = self.browser_tabs_integration
             && self.browser_tabs_cache.is_none()
             && self.query_long_enough_for_browser_tabs();
         if self.ask_llm_enabled
             && !self.query.trim().is_empty()
-            && self.filtered.is_empty()
+            && window_count == 0
+            && tab_count <= ASK_LLM_MAX_TABS
             && self.filtered_programs.is_empty()
             && self.eval_result.is_none()
             && self.dirs.is_empty()
             && !browser_tabs_pending
         {
             let query: Arc<str> = Arc::from(self.query.as_str());
-            self.filtered = self
-                .llm_provider_order
-                .iter()
-                .copied()
-                .map(|provider| MatchResult {
-                    item: Item::AskLlm {
-                        provider,
-                        query: query.clone(),
-                    },
-                    score: 0,
-                    indices: Vec::new(),
-                })
-                .collect();
+            self.filtered
+                .extend(self.llm_provider_order.iter().copied().map(|provider| {
+                    MatchResult {
+                        item: Item::AskLlm {
+                            provider,
+                            query: query.clone(),
+                        },
+                        score: 0,
+                        indices: Vec::new(),
+                    }
+                }));
         }
         match reset {
             RerankReset::ResetSelection => {
@@ -882,8 +892,62 @@ mod tests {
         s.set_items(vec![win("Mail", "Inbox")]);
         s.set_browser_tabs(vec![tab("GitHub", "https://github.com/")]);
         s.set_query("github");
-        assert_eq!(s.filtered().len(), 1);
+        // 1 tab + 4 AskLlm rows (thin tab signal → offer AI handoff).
         assert!(matches!(s.filtered()[0].item, Item::BrowserTab(_)));
+        assert_eq!(
+            s.filtered()
+                .iter()
+                .filter(|m| matches!(m.item, Item::AskLlm { .. }))
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn llm_rows_appear_after_thin_tab_matches() {
+        // <= ASK_LLM_MAX_TABS tab matches and zero window matches: LLM rows
+        // show up after the tabs so the user can hand off to AI without a
+        // second query.
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_browser_tabs(vec![
+            tab("GitHub", "https://github.com/"),
+            tab("GitHub Docs", "https://docs.github.com/"),
+            tab("GitHub Status", "https://githubstatus.com/"),
+        ]);
+        s.set_query("github");
+        let items = s.filtered();
+        let tabs = items
+            .iter()
+            .filter(|m| matches!(m.item, Item::BrowserTab(_)))
+            .count();
+        let llms = items
+            .iter()
+            .filter(|m| matches!(m.item, Item::AskLlm { .. }))
+            .count();
+        assert_eq!(tabs, 3);
+        assert_eq!(llms, 4);
+        // Tabs first, LLM rows appended at the end.
+        assert!(matches!(items[0].item, Item::BrowserTab(_)));
+        assert!(matches!(items.last().unwrap().item, Item::AskLlm { .. }));
+    }
+
+    #[test]
+    fn llm_rows_hidden_when_tab_matches_exceed_threshold() {
+        // Above ASK_LLM_MAX_TABS, the tab list is its own answer.
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_browser_tabs(vec![
+            tab("GitHub", "https://github.com/a"),
+            tab("GitHub Docs", "https://github.com/b"),
+            tab("GitHub Status", "https://github.com/c"),
+            tab("GitHub Blog", "https://github.com/d"),
+        ]);
+        s.set_query("github");
+        assert!(s
+            .filtered()
+            .iter()
+            .all(|m| !matches!(m.item, Item::AskLlm { .. })));
     }
 
     #[test]
@@ -953,7 +1017,6 @@ mod tests {
         s.set_items(vec![win("Mail", "Inbox")]);
         s.set_browser_tabs(vec![tab("Some Page", "https://github.com/a/b")]);
         s.set_query("github");
-        assert_eq!(s.filtered().len(), 1);
         match &s.filtered()[0].item {
             Item::BrowserTab(t) => assert_eq!(t.host(), "github.com"),
             _ => panic!("expected BrowserTab"),

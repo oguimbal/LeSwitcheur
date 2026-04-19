@@ -82,6 +82,12 @@ pub use macos::{
 pub use macos::panel::adjust_key_window_frame;
 
 #[cfg(target_os = "macos")]
+pub use macos::app_policy::set_accessory as set_accessory_activation_policy;
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_accessory_activation_policy() {}
+
+#[cfg(target_os = "macos")]
 pub use macos::machine_id::machine_id;
 
 #[cfg(not(target_os = "macos"))]

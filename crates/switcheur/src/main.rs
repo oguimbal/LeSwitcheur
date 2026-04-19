@@ -25,10 +25,10 @@ use switcheur_core::{
 use switcheur_platform::{
     default_platform, ensure_accessibility, has_screen_recording_permission,
     prompt_input_monitoring, register_hotkey, request_accessibility_prompt,
-    request_screen_recording_permission, startup, BrowserTabSource, ExclusionCell,
-    FocusedAppCell, HotkeyEvent, LlmLauncher, MacHotkeyService, MacPlatform, ProgramSource,
-    QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService, ScrollDir,
-    SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService, WindowSource,
+    request_screen_recording_permission, set_accessory_activation_policy, startup,
+    BrowserTabSource, ExclusionCell, FocusedAppCell, HotkeyEvent, LlmLauncher, MacHotkeyService,
+    MacPlatform, ProgramSource, QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService,
+    ScrollDir, SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService, WindowSource,
 };
 use switcheur_ui::{
     onboarding_view::{OnboardingView, OnboardingViewEvent},
@@ -229,6 +229,13 @@ fn main() -> Result<()> {
         }
     });
     app.run(move |cx| {
+        // GPUI forces `NSApplicationActivationPolicyRegular` inside its
+        // `applicationDidFinishLaunching`, which adds a Dock tile and lists us
+        // in the system Cmd-Tab switcher — both unwanted for an accessory app.
+        // Flip back to `.accessory` here; `cx.activate(true)` still works to
+        // foreground our Normal windows (settings/onboarding) on demand.
+        set_accessory_activation_policy();
+
         install_key_bindings(cx);
 
         // Recency tracker + observers. App-level observer is always on; the
