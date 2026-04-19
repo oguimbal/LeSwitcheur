@@ -141,6 +141,7 @@ onboarding:
   hotkey:
     title: "Elige tu atajo"
     subtitle: "Pulsa la combinación de teclas que abrirá el conmutador."
+    why: "Como ⌘⇥ — pero el panel permanece abierto y enfocado al reactivar el atajo, para seguir navegando sin mantener ninguna tecla."
     next: "Siguiente"
     re_record: "Grabar de nuevo"
     skip: "Omitir por ahora"

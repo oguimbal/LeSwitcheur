@@ -1,7 +1,7 @@
 //! First-launch wizard. Four steps:
 //!   1. Request Accessibility permission (explain + trigger system prompt).
-//!   2. Record a global hotkey (or skip).
-//!   3. Replace the native Cmd+Tab switcher (yes/no).
+//!   2. Replace the native Cmd+Tab switcher (yes/no).
+//!   3. Record a global hotkey (or skip).
 //!   4. Congratulations + license CTA.
 //!
 //! Rendered in a blurred popup window with no titlebar (always-on-top, no
@@ -109,17 +109,13 @@ impl OnboardingView {
     fn advance_from_accessibility(
         &mut self,
         _: &MouseDownEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.accessibility_granted {
             return;
         }
-        self.step = OnboardingStep::Hotkey;
-        if self.recorded.is_none() {
-            self.recording = true;
-            self.focus.focus(window, cx);
-        }
+        self.step = OnboardingStep::SystemSwitcher;
         cx.notify();
     }
 
@@ -133,9 +129,9 @@ impl OnboardingView {
     fn go_back(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let prev = match self.step {
             OnboardingStep::Accessibility => return,
-            OnboardingStep::Hotkey => OnboardingStep::Accessibility,
-            OnboardingStep::SystemSwitcher => OnboardingStep::Hotkey,
-            OnboardingStep::Done => OnboardingStep::SystemSwitcher,
+            OnboardingStep::SystemSwitcher => OnboardingStep::Accessibility,
+            OnboardingStep::Hotkey => OnboardingStep::SystemSwitcher,
+            OnboardingStep::Done => OnboardingStep::Hotkey,
         };
         self.step = prev;
         self.recording = false;
@@ -175,21 +171,25 @@ impl OnboardingView {
         if let Some(spec) = self.recorded.clone() {
             cx.emit(OnboardingViewEvent::HotkeyApplied(spec));
         }
-        self.step = OnboardingStep::SystemSwitcher;
+        self.step = OnboardingStep::Done;
         self.recording = false;
         cx.notify();
     }
 
     fn skip_hotkey(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.step = OnboardingStep::SystemSwitcher;
+        self.step = OnboardingStep::Done;
         self.recording = false;
         self.recorded = None;
         cx.notify();
     }
 
-    fn pick_switcher(&mut self, on: bool, cx: &mut Context<Self>) {
+    fn pick_switcher(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         cx.emit(OnboardingViewEvent::ReplaceSystemSwitcherChosen(on));
-        self.step = OnboardingStep::Done;
+        self.step = OnboardingStep::Hotkey;
+        if self.recorded.is_none() {
+            self.recording = true;
+            self.focus.focus(window, cx);
+        }
         cx.notify();
     }
 
@@ -292,8 +292,8 @@ impl OnboardingView {
         let theme = self.theme;
         let idx = match self.step {
             OnboardingStep::Accessibility => 0,
-            OnboardingStep::Hotkey => 1,
-            OnboardingStep::SystemSwitcher => 2,
+            OnboardingStep::SystemSwitcher => 1,
+            OnboardingStep::Hotkey => 2,
             OnboardingStep::Done => 3,
         };
         let mut row = div().flex().flex_row().gap_2().justify_center();
@@ -534,6 +534,14 @@ impl OnboardingView {
                     .text_color(theme.muted)
                     .child(tr("onboarding.hotkey.subtitle")),
             )
+            .child(
+                div()
+                    .max_w(px(380.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.muted)
+                    .text_center()
+                    .child(tr("onboarding.hotkey.why")),
+            )
             .child(keystroke_pill)
             .child(
                 div()
@@ -590,8 +598,8 @@ impl OnboardingView {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    this.pick_switcher(false, cx);
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.pick_switcher(false, window, cx);
                 }),
             )
             .child(tr("onboarding.system_switcher.no"));
@@ -608,8 +616,8 @@ impl OnboardingView {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                    this.pick_switcher(true, cx);
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                    this.pick_switcher(true, window, cx);
                 }),
             )
             .child(tr("onboarding.system_switcher.yes"));

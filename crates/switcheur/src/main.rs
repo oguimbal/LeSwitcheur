@@ -1345,6 +1345,10 @@ fn handle_onboarding_event(ev: &OnboardingViewEvent, state: &AppState, cx: &mut 
                     }
                 }
             }
+            // Done screen already offers the licence CTA — suppress the
+            // first-open nag in this session so the user isn't asked twice
+            // back-to-back. Reset on next launch via `nag_shown_this_session`.
+            state.nag_shown_this_session.set(true);
             let slot = state.onboarding.borrow_mut().take();
             if let Some(slot) = slot {
                 let _ = cx.update_window(slot.handle, |_ent, window, _cx| {

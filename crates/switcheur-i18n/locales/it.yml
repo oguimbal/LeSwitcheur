@@ -141,6 +141,7 @@ onboarding:
   hotkey:
     title: "Scegli la tua scorciatoia"
     subtitle: "Premi la combinazione di tasti che aprirà il commutatore."
+    why: "Come ⌘⇥ — ma il pannello resta aperto e attivo quando riattivi la scorciatoia, per continuare a navigare senza tenere premuto alcun tasto."
     next: "Avanti"
     re_record: "Registra di nuovo"
     skip: "Salta per ora"

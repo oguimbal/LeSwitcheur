@@ -141,6 +141,7 @@ onboarding:
   hotkey:
     title: "Choose your shortcut"
     subtitle: "Press the key combination that will pop up the switcher."
+    why: "Same as ⌘⇥ — but the panel stays open and focused when you re-trigger the shortcut, so you can keep browsing without holding any key."
     next: "Next"
     re_record: "Record again"
     skip: "Skip for now"

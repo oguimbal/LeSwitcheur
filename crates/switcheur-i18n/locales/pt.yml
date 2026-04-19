@@ -141,6 +141,7 @@ onboarding:
   hotkey:
     title: "Escolha o seu atalho"
     subtitle: "Pressione a combinação de teclas que abrirá o alternador."
+    why: "Como ⌘⇥ — mas o painel permanece aberto e focado ao reativar o atalho, para continuar a navegar sem manter nenhuma tecla."
     next: "Próximo"
     re_record: "Gravar novamente"
     skip: "Pular por agora"

@@ -141,6 +141,7 @@ onboarding:
   hotkey:
     title: "Choisissez votre raccourci"
     subtitle: "Appuyez sur la combinaison qui affichera le switcher."
+    why: "Comme ⌘⇥ — mais le panneau reste affiché et actif quand vous relancez le raccourci, pour continuer à naviguer sans maintenir de touche."
     next: "Suivant"
     re_record: "Recommencer"
     skip: "Passer cette étape"

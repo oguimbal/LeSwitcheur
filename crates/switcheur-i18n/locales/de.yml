@@ -141,6 +141,7 @@ onboarding:
   hotkey:
     title: "Wähle dein Tastenkürzel"
     subtitle: "Drücke die Tastenkombination, die den Switcher öffnet."
+    why: "Wie ⌘⇥ — aber das Panel bleibt offen und fokussiert, wenn du das Tastenkürzel erneut auslöst, damit du weiter navigieren kannst, ohne eine Taste zu halten."
     next: "Weiter"
     re_record: "Erneut aufzeichnen"
     skip: "Später einrichten"
