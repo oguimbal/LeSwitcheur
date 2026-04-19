@@ -49,5 +49,9 @@ actions!(
         Cut,
         /// Insert clipboard text at the cursor (replacing the selection).
         Paste,
+        /// Move keyboard focus to the next pane (Windows → Dirs).
+        FocusNextPane,
+        /// Move keyboard focus to the previous pane (Dirs → Windows).
+        FocusPrevPane,
     ]
 );

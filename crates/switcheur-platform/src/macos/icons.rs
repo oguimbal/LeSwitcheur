@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use anyhow::{anyhow, Context, Result};
 use directories::ProjectDirs;
 use objc2::rc::Retained;
-use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSWorkspace};
+use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSImageNameFolder, NSWorkspace};
 use objc2_foundation::{NSDictionary, NSString};
 
 /// Return the on-disk path to a PNG icon for the app with the given bundle path,
@@ -33,6 +33,53 @@ pub fn icon_for_bundle(bundle_path: &str, cache_key: &str) -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// Path to the cached PNG of the system's generic folder icon, used by every
+/// row in the right-side dirs panel. We extract from `NSImageNameFolder`
+/// rather than `iconForFile` on a sample directory — `/Applications` and
+/// `~/Documents` carry custom Finder icons, the named system image is
+/// guaranteed to be the plain manila folder. Cached on disk so repeated
+/// renders stay zero-copy through GPUI's `img()`.
+///
+/// Custom per-directory Finder icons (Icon\r files) aren't honoured here
+/// yet — every dir shares one PNG. Trade-off: tiny cache, instant lookup.
+pub fn folder_icon_path() -> Option<PathBuf> {
+    static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let dir = cache_dir()?;
+            let path = dir.join("_folder_.png");
+            if path.exists() {
+                return Some(path);
+            }
+            match write_folder_icon_png(&path) {
+                Ok(()) => Some(path),
+                Err(e) => {
+                    tracing::warn!("folder icon extract failed: {e:#}");
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
+fn write_folder_icon_png(out: &Path) -> Result<()> {
+    let image = unsafe { NSImage::imageNamed(NSImageNameFolder) }
+        .ok_or_else(|| anyhow!("NSImageNameFolder returned nil"))?;
+    let tiff = image
+        .TIFFRepresentation()
+        .ok_or_else(|| anyhow!("no TIFF representation"))?;
+    let rep = NSBitmapImageRep::imageRepWithData(&tiff)
+        .ok_or_else(|| anyhow!("NSBitmapImageRep::imageRepWithData returned nil"))?;
+    let props = NSDictionary::new();
+    let png = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }
+        .ok_or_else(|| anyhow!("representationUsingType(png) returned nil"))?;
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    fs::write(out, png.to_vec()).with_context(|| format!("write {}", out.display()))?;
+    Ok(())
 }
 
 fn write_png_icon(bundle_path: &str, out: &Path) -> Result<()> {

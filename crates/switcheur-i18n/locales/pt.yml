@@ -20,6 +20,10 @@ settings:
   show_all_spaces_needs_permission: "Esta opção requer a permissão de Gravação do Ecrã."
   open_screen_recording_settings: "Conceder permissão"
   screen_recording_permission_granted: "Permissão concedida"
+  zoxide_integration: "Integração zoxide"
+  zoxide_integration_hint: "Sugerir pastas a partir da base de frequência do zoxide num painel lateral. Tab muda o foco; Enter abre a pasta no Finder."
+  zoxide_not_installed: "Zoxide não está instalado."
+  zoxide_install: "Instalar zoxide"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Mantenha Fn e digite para abrir o alternador com esse texto. Requer a autorização de Monitorização de Entrada."
   replace_cmd_tab: "Substituir Cmd+Tab"
@@ -64,6 +68,7 @@ switcher:
   search_placeholder: "Pesquisar…"
   no_windows: "Nenhuma janela encontrada"
   no_results: "Sem resultados"
+  dirs_header: "Pastas zoxide"
 
 llm:
   ask_claude: "Perguntar ao Claude"

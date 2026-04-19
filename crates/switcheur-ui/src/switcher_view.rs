@@ -12,8 +12,8 @@ use switcheur_i18n::tr;
 
 use crate::actions::{
     Backspace, Confirm, Copy, Cut, Delete, Dismiss, ExtendEnd, ExtendHome, ExtendLeft, ExtendRight,
-    ExtendWordLeft, ExtendWordRight, MoveEnd, MoveHome, MoveLeft, MoveRight, MoveWordLeft,
-    MoveWordRight, Paste, SelectAll, SelectNext, SelectPrev,
+    ExtendWordLeft, ExtendWordRight, FocusNextPane, FocusPrevPane, MoveEnd, MoveHome, MoveLeft,
+    MoveRight, MoveWordLeft, MoveWordRight, Paste, SelectAll, SelectNext, SelectPrev,
 };
 use crate::input::QueryInput;
 use crate::list::render_row;
@@ -48,6 +48,10 @@ pub enum SwitcherViewEvent {
     /// User clicked the × on the update banner. Host marks the update
     /// dismissed for this session (no persistence).
     UpdateDismissed,
+    /// The query changed (keystroke, paste, set_items reset). The host
+    /// uses this to drive the zoxide subprocess off the UI thread; the
+    /// view itself stays platform-agnostic.
+    QueryChanged(String),
 }
 
 /// Top-of-panel banner shown when the startup update check reported a newer
@@ -80,6 +84,11 @@ pub struct SwitcherView {
     last_list_shrink: f32,
     nag_phase: NagPhase,
     update_banner: UpdateBannerState,
+    /// Mirrors the user's `zoxide_integration` setting. When false, no
+    /// `QueryChanged` event is emitted and the right pane stays empty.
+    /// The host (main.rs) is the one that actually shells out to zoxide
+    /// — keeps platform code out of the UI crate.
+    zoxide_enabled: bool,
 }
 
 impl SwitcherView {
@@ -96,7 +105,33 @@ impl SwitcherView {
             last_list_shrink: 0.0,
             nag_phase: NagPhase::Hidden,
             update_banner: UpdateBannerState::Hidden,
+            zoxide_enabled: false,
         }
+    }
+
+    /// Mirror the user's zoxide_integration setting. When flipped off, the
+    /// right-pane suggestions are cleared immediately. When flipped on, the
+    /// host should emit a fresh `QueryChanged` synthetically (or the user's
+    /// next keystroke triggers one).
+    pub fn set_zoxide_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.zoxide_enabled == enabled {
+            return;
+        }
+        self.zoxide_enabled = enabled;
+        if !enabled {
+            self.state.set_dirs(Vec::new());
+            cx.notify();
+        } else {
+            // Ask the host to refresh dirs against the current query so the
+            // pane populates without waiting for the next keystroke.
+            cx.emit(SwitcherViewEvent::QueryChanged(
+                self.state.query().to_string(),
+            ));
+        }
+    }
+
+    pub fn zoxide_enabled(&self) -> bool {
+        self.zoxide_enabled
     }
 
     pub fn set_update_banner(&mut self, state: UpdateBannerState, cx: &mut Context<Self>) {
@@ -117,6 +152,9 @@ impl SwitcherView {
         self.input.clear();
         self.state.set_items(items);
         self.state.set_query("");
+        if self.zoxide_enabled {
+            cx.emit(SwitcherViewEvent::QueryChanged(String::new()));
+        }
         self.emit_height_delta_if_changed(cx);
         cx.notify();
     }
@@ -161,6 +199,20 @@ impl SwitcherView {
     /// Toggle the "Ask LLM" fallback rows. Mirrors the user setting.
     pub fn set_ask_llm_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.state.set_ask_llm_enabled(enabled);
+        cx.notify();
+    }
+
+    /// Replace the right-pane directory suggestions. Called by the host with
+    /// the result of an off-thread zoxide query (debounced per keystroke).
+    pub fn set_dirs(&mut self, dirs: Vec<Item>, cx: &mut Context<Self>) {
+        self.state.set_dirs(dirs);
+        cx.notify();
+    }
+
+    /// Clear the right-pane suggestions. Called when the integration is
+    /// turned off in settings or zoxide returns an empty list.
+    pub fn clear_dirs(&mut self, cx: &mut Context<Self>) {
+        self.state.set_dirs(Vec::new());
         cx.notify();
     }
 
@@ -360,6 +412,50 @@ impl SwitcherView {
         cx.notify();
     }
 
+    fn on_dir_row_click(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.state.set_selected_dir(idx);
+        if let Some(item) = self.state.selected().cloned() {
+            self._activation_sub = None;
+            cx.emit(SwitcherViewEvent::Confirmed(item));
+        }
+    }
+
+    fn on_dir_row_hover(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.state.active_section() == Section::Dirs && self.state.selected_dir_idx() == idx {
+            return;
+        }
+        self.state.set_selected_dir(idx);
+        cx.notify();
+    }
+
+    fn on_focus_next_pane(&mut self, _: &FocusNextPane, _: &mut Window, cx: &mut Context<Self>) {
+        if self.nag_phase != NagPhase::Hidden {
+            return;
+        }
+        if self.state.active_section() == Section::Dirs {
+            self.state.focus_windows();
+        } else if self.state.dirs_visible() {
+            self.state.focus_dirs();
+        } else {
+            return;
+        }
+        cx.notify();
+    }
+
+    fn on_focus_prev_pane(&mut self, _: &FocusPrevPane, _: &mut Window, cx: &mut Context<Self>) {
+        if self.nag_phase != NagPhase::Hidden {
+            return;
+        }
+        if self.state.active_section() == Section::Dirs {
+            self.state.focus_windows();
+        } else if self.state.dirs_visible() {
+            self.state.focus_dirs();
+        } else {
+            return;
+        }
+        cx.notify();
+    }
+
     fn on_dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
         self._activation_sub = None;
         cx.emit(SwitcherViewEvent::Dismissed);
@@ -384,10 +480,31 @@ impl SwitcherView {
     }
 
     fn on_move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        // When the dirs pane is focused, Left snaps focus back to the
+        // windows pane (the input doesn't have a visible caret while a
+        // dir row is selected, so consuming the keystroke here costs
+        // nothing). Otherwise behave as a normal text-caret motion.
+        if self.state.active_section() == Section::Dirs {
+            self.state.focus_windows();
+            cx.notify();
+            return;
+        }
         self.input.move_left(false);
         cx.notify();
     }
     fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        // From the windows/programs pane, Right at the end of the input
+        // jumps focus into the dirs pane (when one is visible). The
+        // caret-at-end check preserves normal text editing — typing a
+        // word and pressing Right moves through the characters first.
+        if self.state.active_section() != Section::Dirs
+            && self.state.dirs_visible()
+            && self.input.cursor() >= self.input.text().len()
+        {
+            self.state.focus_dirs();
+            cx.notify();
+            return;
+        }
         self.input.move_right(false);
         cx.notify();
     }
@@ -533,6 +650,11 @@ impl SwitcherView {
     fn sync_query(&mut self, cx: &mut Context<Self>) {
         self.state.set_query(self.input.text());
         self.scroll_selection_into_view();
+        if self.zoxide_enabled {
+            cx.emit(SwitcherViewEvent::QueryChanged(
+                self.state.query().to_string(),
+            ));
+        }
         self.emit_height_delta_if_changed(cx);
         cx.notify();
     }
@@ -650,6 +772,8 @@ impl Render for SwitcherView {
             .on_action(cx.listener(Self::on_copy))
             .on_action(cx.listener(Self::on_cut))
             .on_action(cx.listener(Self::on_paste))
+            .on_action(cx.listener(Self::on_focus_next_pane))
+            .on_action(cx.listener(Self::on_focus_prev_pane))
             .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
@@ -751,15 +875,26 @@ impl Render for SwitcherView {
             .children(if hide_empty_list {
                 None
             } else {
+                let dirs_pane = (nag_phase == NagPhase::Hidden && self.state.dirs_visible())
+                    .then(|| render_dirs_panel(&self.state, &theme, cx));
                 Some(
                     div()
                         .flex()
-                        .flex_col()
+                        .flex_row()
                         .flex_1()
-                        .px_2()
-                        .py_2()
                         .overflow_hidden()
-                        .child(list_section),
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .px_2()
+                                .py_2()
+                                .overflow_hidden()
+                                .child(list_section),
+                        )
+                        .children(dirs_pane),
                 )
             })
     }
@@ -926,6 +1061,70 @@ fn programs_section(
             .children(rows)
             .into_any_element(),
     )
+}
+
+/// Right-side panel listing zoxide directory suggestions. Hidden entirely
+/// when `state.dirs()` is empty — the existing layout is unchanged in that
+/// case. Width is fixed; the windows pane keeps `flex_1` and absorbs the
+/// remainder.
+fn render_dirs_panel(
+    state: &SwitcherState,
+    theme: &Theme,
+    cx: &mut Context<SwitcherView>,
+) -> AnyElement {
+    use switcheur_core::MatchResult;
+
+    let section_active = state.active_section() == Section::Dirs;
+    let selected = state.selected_dir_idx();
+    let dirs = state.dirs();
+
+    let rows: Vec<AnyElement> = dirs
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            // `render_row` takes a MatchResult; dirs aren't fuzzy-ranked
+            // through the matcher (zoxide already ranks them), so wrap with a
+            // zero score and no highlight indices.
+            let mr = MatchResult {
+                item: item.clone(),
+                score: 0,
+                indices: Vec::new(),
+            };
+            render_row(&mr, section_active && i == selected, theme)
+                .id(("switcher-dir-row", i))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    this.on_dir_row_click(i, cx);
+                }))
+                .on_hover(cx.listener(move |this, hovering: &bool, _w, cx| {
+                    if *hovering {
+                        this.on_dir_row_hover(i, cx);
+                    }
+                }))
+                .into_any_element()
+        })
+        .collect();
+
+    div()
+        .flex()
+        .flex_col()
+        .w(px(260.0))
+        .border_l_1()
+        .border_color(theme.border)
+        .px_2()
+        .py_2()
+        .gap_0p5()
+        .overflow_hidden()
+        .child(
+            div()
+                .px_2()
+                .pb_1()
+                .text_size(px(11.0))
+                .text_color(theme.muted)
+                .child(SharedString::from(tr("switcher.dirs_header"))),
+        )
+        .children(rows)
+        .into_any_element()
 }
 
 /// Centred support-the-project card shown in place of the result list when

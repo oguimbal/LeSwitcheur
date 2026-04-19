@@ -20,6 +20,10 @@ settings:
   show_all_spaces_needs_permission: "Cette option nécessite la permission Screen Recording."
   open_screen_recording_settings: "Accorder la permission"
   screen_recording_permission_granted: "Permission accordée"
+  zoxide_integration: "Intégration zoxide"
+  zoxide_integration_hint: "Suggérer des dossiers issus de la base de fréquence de zoxide dans un panneau latéral. Tab y déplace le focus ; Entrée ouvre le dossier dans le Finder."
+  zoxide_not_installed: "Zoxide n'est pas installé."
+  zoxide_install: "Installer zoxide"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Maintenez Fn et tapez pour ouvrir le commutateur avec ce texte. Nécessite l'autorisation Surveillance de la saisie."
   replace_cmd_tab: "Remplacer Cmd+Tab"
@@ -64,6 +68,7 @@ switcher:
   search_placeholder: "Rechercher…"
   no_windows: "Aucune fenêtre trouvée"
   no_results: "Aucun résultat"
+  dirs_header: "Dossiers zoxide"
 
 llm:
   ask_claude: "Demander à Claude"

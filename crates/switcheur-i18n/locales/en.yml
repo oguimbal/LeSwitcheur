@@ -20,6 +20,10 @@ settings:
   show_all_spaces_needs_permission: "This option requires the Screen Recording permission."
   open_screen_recording_settings: "Grant permission"
   screen_recording_permission_granted: "Permission granted"
+  zoxide_integration: "Zoxide integration"
+  zoxide_integration_hint: "Suggest directories from zoxide's frecency database in a side panel. Tab cycles focus to it; Enter opens the folder in Finder."
+  zoxide_not_installed: "Zoxide is not installed."
+  zoxide_install: "Install zoxide"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Hold Fn and type to open the switcher with that text. Requires Input Monitoring permission."
   replace_cmd_tab: "Replace Cmd+Tab"
@@ -64,6 +68,7 @@ switcher:
   search_placeholder: "Search…"
   no_windows: "No windows found"
   no_results: "No results"
+  dirs_header: "Zoxide dirs"
 
 llm:
   ask_claude: "Ask Claude"

@@ -88,6 +88,12 @@ pub enum SettingsViewEvent {
     /// User clicked "Sign out" on a licensed install. Host should clear the
     /// stored token + key and re-show the nag popup at next boot.
     LicenseLogoutRequested,
+    /// User flipped the zoxide-integration toggle. Host persists and pushes
+    /// the new value down to any open switcher view.
+    ZoxideIntegrationChanged(bool),
+    /// User clicked "Install zoxide" under the disabled toggle. Host opens
+    /// the zoxide install page in the default browser.
+    OpenZoxideHomepageRequested,
     Dismissed,
 }
 
@@ -158,6 +164,12 @@ pub struct SettingsView {
     /// Same pattern as `quit_pending`, but for the "Remove license" button.
     license_remove_pending: bool,
     license_remove_gen: u64,
+    /// Mirrors `Config::zoxide_integration`. When zoxide isn't installed the
+    /// toggle is forced off + grayed out regardless of this value.
+    zoxide_integration: bool,
+    /// Whether the host found a `zoxide` binary on this machine. Drives the
+    /// toggle's enabled state and the "Install zoxide" inline link.
+    zoxide_available: bool,
 }
 
 impl SettingsView {
@@ -176,6 +188,8 @@ impl SettingsView {
         hotkey_exceptions: Vec<AppMatch>,
         quick_type_exceptions: Vec<AppMatch>,
         license_key: Option<String>,
+        zoxide_integration: bool,
+        zoxide_available: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
@@ -217,6 +231,8 @@ impl SettingsView {
             quit_gen: 0,
             license_remove_pending: false,
             license_remove_gen: 0,
+            zoxide_integration,
+            zoxide_available,
         };
         view.recompute_errors();
         let _ = cx;
@@ -409,6 +425,36 @@ impl SettingsView {
     ) {
         self.ask_llm_enabled = !self.ask_llm_enabled;
         cx.emit(SettingsViewEvent::AskLlmEnabledChanged(self.ask_llm_enabled));
+        cx.notify();
+    }
+
+    fn toggle_zoxide(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Toggle is inert when zoxide isn't installed. The visual is grayed
+        // out and we still get the click event, so guard explicitly.
+        if !self.zoxide_available {
+            return;
+        }
+        self.zoxide_integration = !self.zoxide_integration;
+        cx.emit(SettingsViewEvent::ZoxideIntegrationChanged(
+            self.zoxide_integration,
+        ));
+        cx.notify();
+    }
+
+    /// Reflect a re-detection of zoxide while settings is open. If zoxide
+    /// disappeared (binary uninstalled mid-session), the toggle visually
+    /// flips off; the persisted preference itself isn't changed so the
+    /// integration comes back automatically when zoxide is reinstalled.
+    pub fn set_zoxide_available(&mut self, available: bool, cx: &mut Context<Self>) {
+        if self.zoxide_available == available {
+            return;
+        }
+        self.zoxide_available = available;
         cx.notify();
     }
 
@@ -946,8 +992,133 @@ impl SettingsView {
                 cx.listener(Self::toggle_include_minimized),
             ))
             .child(self.render_show_all_spaces_block(cx))
+            .child(self.render_zoxide_block(cx))
             .child(self.render_sort_row(cx))
             .child(self.render_license_row(cx))
+            .into_any_element()
+    }
+
+    fn render_zoxide_block(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        // When zoxide isn't installed, the toggle is locked off (regardless
+        // of the persisted preference) and a "Install zoxide" link sits
+        // beneath it. Same UX shape as the Screen Recording warning so the
+        // user only has to learn one pattern.
+        let effective_on = self.zoxide_integration && self.zoxide_available;
+        let track_color = if !self.zoxide_available {
+            theme.border
+        } else if effective_on {
+            theme.accent
+        } else {
+            theme.border
+        };
+        let label_color = if self.zoxide_available {
+            theme.foreground
+        } else {
+            theme.muted
+        };
+
+        let mut track = div()
+            .w(px(36.0))
+            .h(px(20.0))
+            .rounded_full()
+            .bg(track_color)
+            .flex()
+            .items_center()
+            .px(px(2.0));
+        track = if effective_on {
+            track.justify_end()
+        } else {
+            track.justify_start()
+        };
+        let track = track.child(
+            div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded_full()
+                .bg(gpui::rgb(0xffffff)),
+        );
+
+        let text = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .gap_0p5()
+            .child(
+                div()
+                    .text_color(label_color)
+                    .child(tr("settings.zoxide_integration")),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.muted)
+                    .child(tr("settings.zoxide_integration_hint")),
+            );
+
+        let toggle_row = if self.zoxide_available {
+            div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap_3()
+                .w_full()
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::toggle_zoxide))
+                .child(track)
+                .child(text)
+        } else {
+            div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap_3()
+                .w_full()
+                .child(track)
+                .child(text)
+        };
+
+        let mut block = div().flex().flex_col().gap_1p5().child(toggle_row);
+        if !self.zoxide_available {
+            block = block.child(self.render_zoxide_install_row(cx));
+        }
+        block.into_any_element()
+    }
+
+    fn render_zoxide_install_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let message = div()
+            .flex_1()
+            .text_size(px(12.0))
+            .text_color(theme.muted)
+            .child(tr("settings.zoxide_not_installed"));
+        let button = div()
+            .px_3()
+            .py_1p5()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .text_color(theme.foreground)
+            .hover(|s| s.bg(theme.selection))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _: &MouseDownEvent, _, cx| {
+                    cx.emit(SettingsViewEvent::OpenZoxideHomepageRequested);
+                }),
+            )
+            .child(tr("settings.zoxide_install"));
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            // Indent under the toggle label, matching the Screen Recording
+            // warning row's offset (track + gap = 36 + 12).
+            .pl(px(48.0))
+            .child(message)
+            .child(button)
             .into_any_element()
     }
 

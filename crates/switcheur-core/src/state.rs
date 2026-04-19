@@ -13,16 +13,24 @@ const MAX_PROGRAMS: usize = 3;
 pub enum Section {
     Programs,
     Windows,
+    /// Right-side pane fed externally (zoxide today, possibly other sources
+    /// later). Independent stream — not produced by rerank.
+    Dirs,
 }
 
 pub struct SwitcherState {
     items: Vec<Item>,
     programs: Vec<Item>,
+    /// Right-pane suggestions (currently zoxide dirs). Populated externally
+    /// via [`SwitcherState::set_dirs`] — the subprocess call runs off the UI
+    /// thread, so we deliberately keep this out of [`SwitcherState::rerank`].
+    dirs: Vec<Item>,
     query: String,
     filtered: Vec<MatchResult>,
     filtered_programs: Vec<MatchResult>,
     selected_idx: usize,
     selected_program: usize,
+    selected_dir: usize,
     active_section: Section,
     matcher: FuzzyMatcher,
     eval_result: Option<String>,
@@ -39,11 +47,13 @@ impl SwitcherState {
         Self {
             items: Vec::new(),
             programs: Vec::new(),
+            dirs: Vec::new(),
             query: String::new(),
             filtered: Vec::new(),
             filtered_programs: Vec::new(),
             selected_idx: 0,
             selected_program: 0,
+            selected_dir: 0,
             active_section: Section::Windows,
             matcher: FuzzyMatcher::new(),
             eval_result: None,
@@ -88,6 +98,61 @@ impl SwitcherState {
     pub fn set_programs(&mut self, programs: Vec<Arc<ProgramRef>>) {
         self.programs = programs.into_iter().map(Item::Program).collect();
         self.rerank();
+    }
+
+    /// Replace the right-pane directory suggestions (zoxide today). The
+    /// caller resolves these asynchronously; we just store the result and
+    /// reset the per-pane cursor. If the user had focus in the dirs pane
+    /// and the new list is empty, focus snaps back to the windows pane so
+    /// `selected()` keeps returning something useful.
+    pub fn set_dirs(&mut self, dirs: Vec<Item>) {
+        let was_focus = self.active_section == Section::Dirs;
+        self.dirs = dirs;
+        self.selected_dir = 0;
+        if was_focus && self.dirs.is_empty() {
+            self.active_section = Section::Windows;
+        }
+    }
+
+    pub fn dirs(&self) -> &[Item] {
+        &self.dirs
+    }
+
+    pub fn selected_dir_idx(&self) -> usize {
+        self.selected_dir
+    }
+
+    /// True when the dirs pane has any content to show. Used by the view to
+    /// gate rendering — the right column collapses entirely when empty.
+    pub fn dirs_visible(&self) -> bool {
+        !self.dirs.is_empty()
+    }
+
+    /// Move keyboard focus into the dirs pane (no-op if it's empty). Used by
+    /// the Tab / Right-arrow handlers in the view.
+    pub fn focus_dirs(&mut self) {
+        if self.dirs.is_empty() {
+            return;
+        }
+        self.active_section = Section::Dirs;
+        if self.selected_dir >= self.dirs.len() {
+            self.selected_dir = 0;
+        }
+    }
+
+    /// Move keyboard focus back to the windows pane (the default home).
+    pub fn focus_windows(&mut self) {
+        self.active_section = Section::Windows;
+    }
+
+    /// Jump the dirs selection to a specific index + activate the section.
+    /// Used on hover/click of a dir row.
+    pub fn set_selected_dir(&mut self, idx: usize) {
+        if self.dirs.is_empty() {
+            return;
+        }
+        self.active_section = Section::Dirs;
+        self.selected_dir = idx.min(self.dirs.len() - 1);
     }
 
     pub fn set_query(&mut self, q: impl Into<String>) {
@@ -145,10 +210,22 @@ impl SwitcherState {
                 .get(self.selected_program)
                 .map(|m| &m.item),
             Section::Windows => self.filtered.get(self.selected_idx).map(|m| &m.item),
+            Section::Dirs => self.dirs.get(self.selected_dir),
         }
     }
 
     pub fn move_up(&mut self) {
+        if self.active_section == Section::Dirs {
+            if self.dirs.is_empty() {
+                return;
+            }
+            self.selected_dir = if self.selected_dir == 0 {
+                self.dirs.len() - 1
+            } else {
+                self.selected_dir - 1
+            };
+            return;
+        }
         if self.programs_visible() {
             match self.active_section {
                 Section::Windows => {
@@ -173,6 +250,7 @@ impl SwitcherState {
                     };
                     return;
                 }
+                Section::Dirs => unreachable!("handled above"),
             }
         }
         if self.filtered.is_empty() {
@@ -186,6 +264,13 @@ impl SwitcherState {
     }
 
     pub fn move_down(&mut self) {
+        if self.active_section == Section::Dirs {
+            if self.dirs.is_empty() {
+                return;
+            }
+            self.selected_dir = (self.selected_dir + 1) % self.dirs.len();
+            return;
+        }
         if self.programs_visible() {
             match self.active_section {
                 Section::Programs => {
@@ -205,6 +290,7 @@ impl SwitcherState {
                     self.selected_idx = (self.selected_idx + 1) % self.filtered.len();
                     return;
                 }
+                Section::Dirs => unreachable!("handled above"),
             }
         }
         if self.filtered.is_empty() {

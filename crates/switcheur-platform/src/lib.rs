@@ -53,6 +53,8 @@ pub enum HotkeyEvent {
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+pub mod zoxide;
+
 #[cfg(target_os = "macos")]
 pub use macos::{
     ensure_accessibility, has_screen_recording_permission, prompt_accessibility,

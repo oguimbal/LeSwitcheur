@@ -281,6 +281,10 @@ fn main() -> Result<()> {
             focused,
             hotkey_excluded,
             quick_type_excluded,
+            // Resolve once at boot. macOS GUI apps don't see the user's
+            // shell PATH unless we walk it explicitly, so the detector
+            // probes both PATH and well-known absolute install locations.
+            zoxide_bin: Rc::new(RefCell::new(switcheur_platform::zoxide::detect())),
         };
         if open_on_start {
             tracing::info!("cold launch: triggering switcher on startup");
@@ -361,6 +365,9 @@ struct AppState {
     hotkey_excluded: ExclusionCell,
     /// Apps where Quick Type passes through instead of intercepting.
     quick_type_excluded: ExclusionCell,
+    /// Path to the user's `zoxide` binary, resolved once at boot. `None` when
+    /// zoxide isn't installed — the right-side dirs panel stays hidden then.
+    zoxide_bin: Rc<RefCell<Option<std::path::PathBuf>>>,
 }
 
 /// In-flight Cmd+Tab cycle whose panel hasn't been shown yet. Lives entirely
@@ -399,8 +406,9 @@ struct SwitcherSlot {
 fn install_key_bindings(cx: &mut App) {
     use switcheur_ui::actions::{
         Backspace, Confirm, Copy, Cut, Delete, Dismiss, ExtendEnd, ExtendHome, ExtendLeft,
-        ExtendRight, ExtendWordLeft, ExtendWordRight, MoveEnd, MoveHome, MoveLeft, MoveRight,
-        MoveWordLeft, MoveWordRight, Paste, SelectAll, SelectNext, SelectPrev,
+        ExtendRight, ExtendWordLeft, ExtendWordRight, FocusNextPane, FocusPrevPane, MoveEnd,
+        MoveHome, MoveLeft, MoveRight, MoveWordLeft, MoveWordRight, Paste, SelectAll, SelectNext,
+        SelectPrev,
     };
     cx.bind_keys([
         // List navigation (up/down + ctrl-p/ctrl-n, ala Zed/Emacs).
@@ -442,6 +450,9 @@ fn install_key_bindings(cx: &mut App) {
         KeyBinding::new("cmd-c", Copy, Some("Switcher")),
         KeyBinding::new("cmd-x", Cut, Some("Switcher")),
         KeyBinding::new("cmd-v", Paste, Some("Switcher")),
+        // Cycle keyboard focus to/from the right-side dirs pane.
+        KeyBinding::new("tab", FocusNextPane, Some("Switcher")),
+        KeyBinding::new("shift-tab", FocusPrevPane, Some("Switcher")),
     ]);
 }
 
@@ -696,7 +707,7 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
         match &item {
             Item::Window(w) => t.note_window(w.pid, &w.title),
             Item::App(a) => t.note_app(a.pid),
-            Item::Program(_) | Item::AskLlm { .. } | Item::OpenUrl(_) => {
+            Item::Program(_) | Item::AskLlm { .. } | Item::OpenUrl(_) | Item::Dir(_) => {
                 /* Cmd+Tab cycles only ever carry Window/App items */
             }
         }
@@ -705,7 +716,7 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
         Item::Window(w) => state.platform.activate_window(w),
         Item::App(a) => state.platform.activate_app(a),
         Item::Program(p) => state.platform.launch_program(p),
-        Item::AskLlm { .. } | Item::OpenUrl(_) => {
+        Item::AskLlm { .. } | Item::OpenUrl(_) | Item::Dir(_) => {
             tracing::warn!("unexpected non-window/app item in Cmd+Tab cycle");
             Ok(())
         }
@@ -846,10 +857,16 @@ fn open_switcher_with_items(
     );
     let llm_order = state.config.borrow().llm_provider_order.clone();
     let ask_llm_enabled = state.config.borrow().ask_llm_enabled;
+    // Zoxide is enabled only if both the user setting is on AND the binary
+    // was found at boot. The view emits QueryChanged events only when on,
+    // so the host's zoxide call below stays cheap when off.
+    let zoxide_enabled = state.config.borrow().zoxide_integration
+        && state.zoxide_bin.borrow().is_some();
     let handle: WindowHandle<SwitcherView> = cx.open_window(options, move |window, cx| {
         let entity = cx.new(|cx| {
             let mut view = SwitcherView::new(cx);
             view.set_theme(theme, cx);
+            view.set_zoxide_enabled(zoxide_enabled, cx);
             view.set_items(items_for_builder, cx);
             view.set_programs(programs_for_builder, cx);
             view.set_llm_provider_order(llm_order, cx);
@@ -967,6 +984,68 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             }
             return;
         }
+        SwitcherViewEvent::QueryChanged(query) => {
+            // The view emits QueryChanged on every keystroke when zoxide is
+            // enabled. Spawn the subprocess on the background executor so a
+            // slow disk doesn't stutter the UI; cancellation is implicit
+            // via a per-view generation counter inside the view itself —
+            // here we just deliver the freshest result we can compute.
+            let Some(bin) = state.zoxide_bin.borrow().clone() else {
+                return;
+            };
+            let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
+            let Some(entity) = entity_opt else {
+                return;
+            };
+            let query = query.clone();
+            let weak = entity.downgrade();
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                // 30 ms debounce so a fast typist doesn't fire a subprocess
+                // per keystroke. Held even on empty queries to keep the
+                // pane stable while the user clears the input.
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(30))
+                    .await;
+                let bin_for_task = bin.clone();
+                let query_for_task = query.clone();
+                let hits = cx
+                    .background_executor()
+                    .spawn(async move {
+                        switcheur_platform::zoxide::query(
+                            &bin_for_task,
+                            &query_for_task,
+                            8,
+                        )
+                    })
+                    .await;
+                // One generic folder icon shared by every row. Resolved on
+                // the worker so the synchronous AppKit calls don't run on
+                // the GPUI main thread; the result is OnceLock-cached
+                // inside the platform crate so this is free after the
+                // first call.
+                let icon = switcheur_platform::macos::icons::folder_icon_path();
+                let items: Vec<Item> = hits
+                    .into_iter()
+                    .map(|h| {
+                        Item::Dir(Arc::new(switcheur_core::DirRef::new(
+                            h.path,
+                            switcheur_core::DirSource::Zoxide,
+                            icon.clone(),
+                        )))
+                    })
+                    .collect();
+                let _ = weak.update(cx, |view, cx| {
+                    // Apply only if the live query still matches what we
+                    // queried for. Avoids flashing stale results past the
+                    // user mid-typing.
+                    if view.zoxide_enabled() {
+                        view.set_dirs(items, cx);
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
         _ => {}
     }
 
@@ -1015,8 +1094,11 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                 match item {
                     Item::Window(w) => t.note_window(w.pid, &w.title),
                     Item::App(a) => t.note_app(a.pid),
-                    Item::Program(_) | Item::AskLlm { .. } | Item::OpenUrl(_) => {
-                        /* programs, LLM and URL rows don't participate in recency */
+                    Item::Program(_)
+                    | Item::AskLlm { .. }
+                    | Item::OpenUrl(_)
+                    | Item::Dir(_) => {
+                        /* programs, LLM, URL and dir rows don't participate in recency */
                     }
                 }
             }
@@ -1038,6 +1120,11 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                     state.platform.open_llm(*provider, query)
                 }
                 Item::OpenUrl(url) => state.platform.open_url(url),
+                Item::Dir(d) => {
+                    // `open` hands the path to LaunchServices, which routes
+                    // a directory to Finder. Same channel as URLs.
+                    open::that(&d.path).map_err(|e| anyhow::anyhow!(e))
+                }
             };
             if let Err(e) = res {
                 tracing::warn!("activate: {e:#}");
@@ -1057,7 +1144,8 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
         | SwitcherViewEvent::LicenseDismissed
         | SwitcherViewEvent::CloseWindowRequested(_)
         | SwitcherViewEvent::UpdateDownloadRequested
-        | SwitcherViewEvent::UpdateDismissed => unreachable!("handled above"),
+        | SwitcherViewEvent::UpdateDismissed
+        | SwitcherViewEvent::QueryChanged(_) => unreachable!("handled above"),
     };
 
     if let Some(slot) = slot_to_close {
@@ -1308,10 +1396,16 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
             .and_then(|t| switcheur_core::license::verify_embedded(t).ok())
             .map(|t| t.key)
     });
+    let zoxide_integration = cfg.zoxide_integration;
     drop(cfg);
     // Freshly check at open-time so the warning's initial state matches
     // reality (user might have granted the permission between runs).
     let screen_recording_granted = has_screen_recording_permission();
+    // Same idea for zoxide — if the user installed it between runs the
+    // toggle should light up immediately. Refresh the cached path too.
+    let detected = switcheur_platform::zoxide::detect();
+    let zoxide_available = detected.is_some();
+    *state.zoxide_bin.borrow_mut() = detected;
 
     let bounds = initial_bounds(cx, SETTINGS_WIDTH, SETTINGS_HEIGHT);
     tracing::info!(?bounds, "settings window bounds");
@@ -1350,6 +1444,8 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
                 hotkey_excluded_apps,
                 quick_type_excluded_apps,
                 license_key,
+                zoxide_integration,
+                zoxide_available,
                 cx,
             );
             v.set_theme(theme, cx);
@@ -1521,6 +1617,30 @@ fn handle_settings_event(
             c.ask_llm_enabled = *on;
             if let Err(e) = c.save() {
                 tracing::warn!("save config: {e:#}");
+            }
+        }
+        SettingsViewEvent::ZoxideIntegrationChanged(on) => {
+            {
+                let mut c = state.config.borrow_mut();
+                c.zoxide_integration = *on;
+                if let Err(e) = c.save() {
+                    tracing::warn!("save config: {e:#}");
+                }
+            }
+            // Push the new state to the live switcher view if one is open
+            // so the right pane appears/disappears immediately. Effective
+            // on-state still requires the binary to be present.
+            let effective = *on && state.zoxide_bin.borrow().is_some();
+            let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
+            if let Some(entity) = entity_opt {
+                entity.update(cx, |view, cx| view.set_zoxide_enabled(effective, cx));
+            }
+        }
+        SettingsViewEvent::OpenZoxideHomepageRequested => {
+            // Top of the GitHub README has the install instructions for
+            // every platform — most accurate single landing page.
+            if let Err(e) = open::that("https://github.com/ajeetdsouza/zoxide#installation") {
+                tracing::warn!("open zoxide install page: {e:#}");
             }
         }
         SettingsViewEvent::IncludeMinimizedChanged(on) => {

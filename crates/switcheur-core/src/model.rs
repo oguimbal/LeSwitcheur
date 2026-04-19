@@ -43,6 +43,59 @@ pub struct ProgramRef {
     pub icon_path: Option<PathBuf>,
 }
 
+/// Where a [`DirRef`] came from. Today only zoxide; the variant exists so a
+/// future Spotlight / fasd / autojump source can plug in next to it without
+/// re-shaping [`Item`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirSource {
+    Zoxide,
+}
+
+/// A directory the user has visited often enough to deserve a suggestion in
+/// the right-side panel. Populated by [`crate::state::SwitcherState::set_dirs`].
+///
+/// `basename` and `parent` are pre-rendered at construction time so the
+/// `Item::primary`/`secondary` accessors can keep returning `&str` like the
+/// other variants — and so we don't allocate on every render frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirRef {
+    pub path: PathBuf,
+    pub source: DirSource,
+    /// Cached PNG of the macOS folder icon, populated by the host. `None`
+    /// falls back to the `📁` placeholder so non-macOS targets keep building.
+    pub icon_path: Option<PathBuf>,
+    basename: String,
+    parent: String,
+}
+
+impl DirRef {
+    pub fn new(path: PathBuf, source: DirSource, icon_path: Option<PathBuf>) -> Self {
+        let basename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let parent = path
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        Self {
+            path,
+            source,
+            icon_path,
+            basename,
+            parent,
+        }
+    }
+
+    pub fn basename(&self) -> &str {
+        &self.basename
+    }
+
+    pub fn parent_display(&self) -> &str {
+        &self.parent
+    }
+}
+
 impl WindowRef {
     /// Title shown as the primary line in the UI — falls back to the app name
     /// when the window has no title of its own.
@@ -136,6 +189,9 @@ pub enum Item {
     /// Row shown when the query is a URL (http/https). Activating it opens
     /// the URL in the user's default browser.
     OpenUrl(Arc<str>),
+    /// A directory suggestion — currently from zoxide, displayed in the
+    /// right-side panel. Activating it opens the path in Finder.
+    Dir(Arc<DirRef>),
 }
 
 impl Item {
@@ -153,6 +209,9 @@ impl Item {
             Item::Program(p) => p.name.clone(),
             Item::AskLlm { provider, .. } => provider.display_name().to_string(),
             Item::OpenUrl(url) => url.to_string(),
+            // Match against both basename and parent so typing either filters
+            // sensibly (e.g. "src" matches "/Users/oliv/repos/foo/src").
+            Item::Dir(d) => format!("{} {}", d.basename(), d.parent_display()),
         }
     }
 
@@ -168,6 +227,7 @@ impl Item {
             // OpenUrl rows also resolve their primary label via i18n at render
             // time. Fall back to the URL itself.
             Item::OpenUrl(url) => url,
+            Item::Dir(d) => d.basename(),
         }
     }
 
@@ -175,6 +235,14 @@ impl Item {
         match self {
             Item::Window(w) => w.display_subtitle(),
             Item::OpenUrl(url) => Some(url),
+            Item::Dir(d) => {
+                let p = d.parent_display();
+                if p.is_empty() {
+                    None
+                } else {
+                    Some(p)
+                }
+            }
             _ => None,
         }
     }
@@ -187,6 +255,7 @@ impl Item {
             Item::Program(p) => p.bundle_id.as_deref().unwrap_or(&p.name),
             Item::AskLlm { provider, .. } => provider.display_name(),
             Item::OpenUrl(_) => "open_url",
+            Item::Dir(_) => "dir",
         }
     }
 
@@ -198,6 +267,7 @@ impl Item {
             Item::Program(p) => p.name.as_str(),
             Item::AskLlm { provider, .. } => return provider.icon_initial(),
             Item::OpenUrl(_) => return '↗',
+            Item::Dir(_) => return '📁',
         };
         name.chars().next().unwrap_or('?').to_ascii_uppercase()
     }
@@ -209,6 +279,7 @@ impl Item {
             Item::App(a) => a.icon_path.as_deref(),
             Item::Program(p) => p.icon_path.as_deref(),
             Item::AskLlm { .. } | Item::OpenUrl(_) => None,
+            Item::Dir(d) => d.icon_path.as_deref(),
         }
     }
 

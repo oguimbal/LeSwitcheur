@@ -96,6 +96,11 @@ pub struct Config {
     /// get false via [`Config::default`] and see the wizard on first run.
     #[serde(default = "default_true")]
     pub onboarding_completed: bool,
+    /// When true, the switcher shows zoxide directory suggestions in a right
+    /// panel. No-op when zoxide is not installed (the integration silently
+    /// degrades). On by default.
+    #[serde(default = "default_true")]
+    pub zoxide_integration: bool,
 }
 
 fn default_true() -> bool {
@@ -144,6 +149,7 @@ impl Default for Config {
             llm_provider_order: LlmProvider::default_order(),
             ask_llm_enabled: true,
             onboarding_completed: false,
+            zoxide_integration: true,
         }
     }
 }

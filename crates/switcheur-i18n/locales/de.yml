@@ -20,6 +20,10 @@ settings:
   show_all_spaces_needs_permission: "Diese Option benötigt die Berechtigung Bildschirmaufnahme."
   open_screen_recording_settings: "Berechtigung erteilen"
   screen_recording_permission_granted: "Berechtigung erteilt"
+  zoxide_integration: "Zoxide-Integration"
+  zoxide_integration_hint: "Verzeichnisse aus zoxides Frecency-Datenbank in einem Seitenpanel vorschlagen. Tab wechselt den Fokus dorthin; Enter öffnet den Ordner im Finder."
+  zoxide_not_installed: "Zoxide ist nicht installiert."
+  zoxide_install: "Zoxide installieren"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Halte Fn gedrückt und tippe, um den Umschalter mit diesem Text zu öffnen. Benötigt die Berechtigung Eingabeüberwachung."
   replace_cmd_tab: "Cmd+Tab ersetzen"
@@ -64,6 +68,7 @@ switcher:
   search_placeholder: "Suchen…"
   no_windows: "Keine Fenster gefunden"
   no_results: "Keine Ergebnisse"
+  dirs_header: "Zoxide-Ordner"
 
 llm:
   ask_claude: "Claude fragen"
