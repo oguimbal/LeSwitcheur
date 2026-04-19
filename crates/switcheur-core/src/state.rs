@@ -107,10 +107,26 @@ impl SwitcherState {
     /// `selected()` keeps returning something useful.
     pub fn set_dirs(&mut self, dirs: Vec<Item>) {
         let was_focus = self.active_section == Section::Dirs;
+        let presence_changed = self.dirs.is_empty() != dirs.is_empty();
         self.dirs = dirs;
         self.selected_dir = 0;
         if was_focus && self.dirs.is_empty() {
             self.active_section = Section::Windows;
+        }
+        // The "Ask LLM" fallback is suppressed when dirs are present, so the
+        // right pane can take over the full width. Rerank when dirs toggle
+        // between empty and non-empty so the fallback rows appear/disappear.
+        if presence_changed {
+            self.rerank();
+        }
+        // When the left list has nothing to show but dirs do, move keyboard
+        // focus there so Enter activates a dir row without a manual Tab.
+        if self.filtered.is_empty()
+            && self.filtered_programs.is_empty()
+            && !self.dirs.is_empty()
+            && self.active_section == Section::Windows
+        {
+            self.active_section = Section::Dirs;
         }
     }
 
@@ -355,6 +371,7 @@ impl SwitcherState {
             || !self.filtered.is_empty()
             || !self.filtered_programs.is_empty()
             || self.eval_result.is_some()
+            || !self.dirs.is_empty()
         {
             // leave filtered as-is (empty or populated by items above)
         } else {

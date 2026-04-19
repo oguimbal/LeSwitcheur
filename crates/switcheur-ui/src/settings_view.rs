@@ -10,7 +10,10 @@ use gpui::{
     IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, ParentElement, Render,
     SharedString, Styled, Window,
 };
-use switcheur_core::{AppMatch, ExclusionFilter, ExclusionRule, HotkeySpec, SortOrder};
+use switcheur_core::{
+    file_manager::{AvailableFileManager, FINDER_ID},
+    AppMatch, ExclusionFilter, ExclusionRule, HotkeySpec, SortOrder,
+};
 use switcheur_i18n::{modifier_symbol, tr as _tr, tr_sub};
 
 use crate::theme::Theme;
@@ -94,6 +97,9 @@ pub enum SettingsViewEvent {
     /// User clicked "Install zoxide" under the disabled toggle. Host opens
     /// the zoxide install page in the default browser.
     OpenZoxideHomepageRequested,
+    /// User picked a file manager to open folders with. `None` means "system
+    /// default" (Finder). Host persists the new id.
+    FileManagerChanged(Option<String>),
     Dismissed,
 }
 
@@ -170,6 +176,13 @@ pub struct SettingsView {
     /// Whether the host found a `zoxide` binary on this machine. Drives the
     /// toggle's enabled state and the "Install zoxide" inline link.
     zoxide_available: bool,
+    /// Stable id of the file manager currently selected, or `None` when the
+    /// user hasn't opted out of the Finder default.
+    file_manager: Option<String>,
+    /// Managers the host detected installed. Finder is always first; the
+    /// rest are only included when their bundle was found on disk.
+    available_file_managers: Vec<AvailableFileManager>,
+    file_manager_picker_open: bool,
 }
 
 impl SettingsView {
@@ -190,6 +203,8 @@ impl SettingsView {
         license_key: Option<String>,
         zoxide_integration: bool,
         zoxide_available: bool,
+        file_manager: Option<String>,
+        available_file_managers: Vec<AvailableFileManager>,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
@@ -233,6 +248,9 @@ impl SettingsView {
             license_remove_gen: 0,
             zoxide_integration,
             zoxide_available,
+            file_manager,
+            available_file_managers,
+            file_manager_picker_open: false,
         };
         view.recompute_errors();
         let _ = cx;
@@ -302,6 +320,7 @@ impl SettingsView {
         self.sort_picker_open = false;
         self.hotkey_popover_open = false;
         self.quick_type_popover_open = false;
+        self.file_manager_picker_open = false;
     }
 
     fn recompute_errors(&mut self) {
@@ -566,6 +585,25 @@ impl SettingsView {
         cx.notify();
     }
 
+    fn toggle_file_manager_picker(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_open = self.file_manager_picker_open;
+        self.close_all_popovers();
+        self.file_manager_picker_open = !was_open;
+        cx.notify();
+    }
+
+    fn pick_file_manager(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        self.file_manager = id.clone();
+        self.file_manager_picker_open = false;
+        cx.emit(SettingsViewEvent::FileManagerChanged(id));
+        cx.notify();
+    }
+
     fn on_quit_click(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.quit_pending {
             cx.emit(SettingsViewEvent::QuitRequested);
@@ -821,6 +859,7 @@ impl SettingsView {
             if self.sort_picker_open
                 || self.hotkey_popover_open
                 || self.quick_type_popover_open
+                || self.file_manager_picker_open
             {
                 self.close_all_popovers();
                 cx.notify();
@@ -993,6 +1032,7 @@ impl SettingsView {
             ))
             .child(self.render_show_all_spaces_block(cx))
             .child(self.render_zoxide_block(cx))
+            .child(self.render_file_manager_row(cx))
             .child(self.render_sort_row(cx))
             .child(self.render_license_row(cx))
             .into_any_element()
@@ -1894,6 +1934,136 @@ impl SettingsView {
         }
 
         row.child(label_col)
+            .child(
+                div()
+                    .text_color(theme.accent)
+                    .child(if selected { "✓" } else { "" }),
+            )
+            .into_any_element()
+    }
+
+    fn render_file_manager_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let current_id: &str = self.file_manager.as_deref().unwrap_or(FINDER_ID);
+        let current_label: SharedString = self
+            .available_file_managers
+            .iter()
+            .find(|m| m.id == current_id)
+            .map(|m| SharedString::from(m.display_name))
+            .unwrap_or_else(|| SharedString::from("Finder"));
+
+        let field = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_3()
+            .py_1p5()
+            .rounded_md()
+            .border_1()
+            .border_color(if self.file_manager_picker_open {
+                theme.accent
+            } else {
+                theme.border
+            })
+            .bg(theme.selection)
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::toggle_file_manager_picker),
+            )
+            .text_color(theme.foreground)
+            .child(current_label)
+            .child(div().text_color(theme.muted).child("▾"));
+
+        let mut field_container = div().relative().flex_1().child(field);
+        if self.file_manager_picker_open {
+            field_container = field_container.child(
+                deferred(self.render_file_manager_popover(cx)).with_priority(10),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .min_w(px(140.0))
+                    .text_color(theme.muted)
+                    .child(tr("settings.file_manager")),
+            )
+            .child(field_container)
+            .into_any_element()
+    }
+
+    fn render_file_manager_popover(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let current_id: &str = self.file_manager.as_deref().unwrap_or(FINDER_ID);
+
+        let mut popover = div()
+            .absolute()
+            .top(px(38.0))
+            .left(px(0.0))
+            .w_full()
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_md()
+            .shadow_md()
+            .flex()
+            .flex_col()
+            .py_1();
+
+        for entry in &self.available_file_managers {
+            let selected = entry.id == current_id;
+            // Finder is the default → emit None so the config stays clean.
+            let payload: Option<String> = if entry.id == FINDER_ID {
+                None
+            } else {
+                Some(entry.id.to_string())
+            };
+            popover = popover.child(self.render_file_manager_option(
+                SharedString::from(entry.display_name),
+                payload,
+                selected,
+                cx,
+            ));
+        }
+
+        popover.into_any_element()
+    }
+
+    fn render_file_manager_option(
+        &self,
+        label: SharedString,
+        payload: Option<String>,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_3()
+            .py_1p5()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.pick_file_manager(payload.clone(), cx);
+                }),
+            );
+        if selected {
+            row = row.bg(theme.selection);
+        }
+
+        row.child(div().flex_1().text_color(theme.foreground).child(label))
             .child(
                 div()
                     .text_color(theme.accent)

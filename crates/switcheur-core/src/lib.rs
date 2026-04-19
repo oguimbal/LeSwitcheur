@@ -5,6 +5,7 @@
 pub mod app_match;
 pub mod config;
 pub mod exclusions;
+pub mod file_manager;
 pub mod license;
 pub mod matcher;
 pub mod js;

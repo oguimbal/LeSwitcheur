@@ -1,4 +1,5 @@
 pub mod activate;
+pub mod file_manager;
 pub mod hotkey;
 pub mod icons;
 pub mod llm;

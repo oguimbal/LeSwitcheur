@@ -57,7 +57,7 @@ pub mod zoxide;
 
 #[cfg(target_os = "macos")]
 pub use macos::{
-    ensure_accessibility, has_screen_recording_permission, prompt_accessibility,
+    ensure_accessibility, file_manager, has_screen_recording_permission, prompt_accessibility,
     prompt_input_monitoring, request_accessibility_prompt, request_screen_recording_permission,
     startup, ExclusionCell, FocusedApp, FocusedAppCell, MacHotkeyService, MacPlatform,
     QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService, ScrollDir,

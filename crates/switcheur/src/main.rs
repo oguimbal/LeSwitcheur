@@ -1121,9 +1121,11 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                 }
                 Item::OpenUrl(url) => state.platform.open_url(url),
                 Item::Dir(d) => {
-                    // `open` hands the path to LaunchServices, which routes
-                    // a directory to Finder. Same channel as URLs.
-                    open::that(&d.path).map_err(|e| anyhow::anyhow!(e))
+                    let bundle_id = resolve_file_manager_bundle_id(&state.config.borrow());
+                    switcheur_platform::file_manager::open_folder_with(
+                        bundle_id.as_deref(),
+                        &d.path,
+                    )
                 }
             };
             if let Err(e) = res {
@@ -1397,6 +1399,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
             .map(|t| t.key)
     });
     let zoxide_integration = cfg.zoxide_integration;
+    let file_manager = cfg.file_manager.clone();
     drop(cfg);
     // Freshly check at open-time so the warning's initial state matches
     // reality (user might have granted the permission between runs).
@@ -1406,6 +1409,12 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
     let detected = switcheur_platform::zoxide::detect();
     let zoxide_available = detected.is_some();
     *state.zoxide_bin.borrow_mut() = detected;
+
+    // Re-scan installed file managers on settings open so the list tracks
+    // apps installed between runs (or mid-session).
+    let available_file_managers = switcheur_core::file_manager::available_file_managers(
+        &switcheur_platform::file_manager::detected_file_manager_bundle_ids(),
+    );
 
     let bounds = initial_bounds(cx, SETTINGS_WIDTH, SETTINGS_HEIGHT);
     tracing::info!(?bounds, "settings window bounds");
@@ -1446,6 +1455,8 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
                 license_key,
                 zoxide_integration,
                 zoxide_available,
+                file_manager,
+                available_file_managers,
                 cx,
             );
             v.set_theme(theme, cx);
@@ -1641,6 +1652,13 @@ fn handle_settings_event(
             // every platform — most accurate single landing page.
             if let Err(e) = open::that("https://github.com/ajeetdsouza/zoxide#installation") {
                 tracing::warn!("open zoxide install page: {e:#}");
+            }
+        }
+        SettingsViewEvent::FileManagerChanged(id) => {
+            let mut c = state.config.borrow_mut();
+            c.file_manager = id.clone();
+            if let Err(e) = c.save() {
+                tracing::warn!("save config: {e:#}");
             }
         }
         SettingsViewEvent::IncludeMinimizedChanged(on) => {
@@ -2396,6 +2414,16 @@ fn theme_for(appearance: Appearance) -> Theme {
         Appearance::Light => Theme::light(),
         _ => Theme::dark(),
     }
+}
+
+/// Resolve the configured file-manager `id` to an installed bundle id, or
+/// `None` when the preference is unset, unknown, or points at an app that
+/// isn't currently installed. In every `None` case the caller routes through
+/// the system default handler (Finder).
+fn resolve_file_manager_bundle_id(cfg: &Config) -> Option<String> {
+    let id = cfg.file_manager.as_deref()?;
+    let installed = switcheur_platform::file_manager::detected_file_manager_bundle_ids();
+    switcheur_core::file_manager::resolve_bundle_id(id, &installed)
 }
 
 fn initial_bounds(cx: &mut App, width: f32, height: f32) -> Bounds<Pixels> {

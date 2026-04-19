@@ -875,27 +875,43 @@ impl Render for SwitcherView {
             .children(if hide_empty_list {
                 None
             } else {
-                let dirs_pane = (nag_phase == NagPhase::Hidden && self.state.dirs_visible())
-                    .then(|| render_dirs_panel(&self.state, &theme, cx));
-                Some(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_1()
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .px_2()
-                                .py_2()
-                                .overflow_hidden()
-                                .child(list_section),
-                        )
-                        .children(dirs_pane),
-                )
+                let dirs_visible = nag_phase == NagPhase::Hidden && self.state.dirs_visible();
+                // When the windows list has nothing to show but dirs do, the
+                // dirs pane takes the full row width and the "Ask LLM"
+                // fallback is suppressed (see `rerank`).
+                let dirs_full_width = dirs_visible && filtered_count == 0;
+                if dirs_full_width {
+                    Some(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(render_dirs_panel(&self.state, &theme, cx, true)),
+                    )
+                } else {
+                    let dirs_pane = dirs_visible
+                        .then(|| render_dirs_panel(&self.state, &theme, cx, false));
+                    Some(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .px_2()
+                                    .py_2()
+                                    .overflow_hidden()
+                                    .child(list_section),
+                            )
+                            .children(dirs_pane),
+                    )
+                }
             })
     }
 }
@@ -1071,6 +1087,7 @@ fn render_dirs_panel(
     state: &SwitcherState,
     theme: &Theme,
     cx: &mut Context<SwitcherView>,
+    full_width: bool,
 ) -> AnyElement {
     use switcheur_core::MatchResult;
 
@@ -1105,12 +1122,13 @@ fn render_dirs_panel(
         })
         .collect();
 
-    div()
-        .flex()
-        .flex_col()
-        .w(px(260.0))
-        .border_l_1()
-        .border_color(theme.border)
+    let mut panel = div().flex().flex_col();
+    if full_width {
+        panel = panel.flex_1().min_w_0();
+    } else {
+        panel = panel.w(px(260.0)).border_l_1().border_color(theme.border);
+    }
+    panel
         .px_2()
         .py_2()
         .gap_0p5()

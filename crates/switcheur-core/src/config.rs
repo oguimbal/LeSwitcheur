@@ -101,6 +101,12 @@ pub struct Config {
     /// degrades). On by default.
     #[serde(default = "default_true")]
     pub zoxide_integration: bool,
+    /// Stable id of the file manager used to open folders picked from the
+    /// switcher. `None` (or an unknown / uninstalled id) resolves to the
+    /// system default (Finder). See
+    /// [`crate::file_manager::KNOWN_FILE_MANAGERS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_manager: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -150,6 +156,7 @@ impl Default for Config {
             ask_llm_enabled: true,
             onboarding_completed: false,
             zoxide_integration: true,
+            file_manager: None,
         }
     }
 }
