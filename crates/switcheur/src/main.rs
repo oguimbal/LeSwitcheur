@@ -25,7 +25,7 @@ use switcheur_core::{
 use switcheur_platform::{
     default_platform, ensure_accessibility, has_screen_recording_permission,
     prompt_input_monitoring, register_hotkey, request_accessibility_prompt,
-    request_screen_recording_permission, startup, ExclusionCell,
+    request_screen_recording_permission, startup, BrowserTabSource, ExclusionCell,
     FocusedAppCell, HotkeyEvent, LlmLauncher, MacHotkeyService, MacPlatform, ProgramSource,
     QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService, ScrollDir,
     SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService, WindowSource,
@@ -707,7 +707,11 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
         match &item {
             Item::Window(w) => t.note_window(w.pid, &w.title),
             Item::App(a) => t.note_app(a.pid),
-            Item::Program(_) | Item::AskLlm { .. } | Item::OpenUrl(_) | Item::Dir(_) => {
+            Item::Program(_)
+            | Item::AskLlm { .. }
+            | Item::OpenUrl(_)
+            | Item::Dir(_)
+            | Item::BrowserTab(_) => {
                 /* Cmd+Tab cycles only ever carry Window/App items */
             }
         }
@@ -716,7 +720,7 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
         Item::Window(w) => state.platform.activate_window(w),
         Item::App(a) => state.platform.activate_app(a),
         Item::Program(p) => state.platform.launch_program(p),
-        Item::AskLlm { .. } | Item::OpenUrl(_) | Item::Dir(_) => {
+        Item::AskLlm { .. } | Item::OpenUrl(_) | Item::Dir(_) | Item::BrowserTab(_) => {
             tracing::warn!("unexpected non-window/app item in Cmd+Tab cycle");
             Ok(())
         }
@@ -862,11 +866,13 @@ fn open_switcher_with_items(
     // so the host's zoxide call below stays cheap when off.
     let zoxide_enabled = state.config.borrow().zoxide_integration
         && state.zoxide_bin.borrow().is_some();
+    let browser_tabs_enabled = state.config.borrow().browser_tabs_integration;
     let handle: WindowHandle<SwitcherView> = cx.open_window(options, move |window, cx| {
         let entity = cx.new(|cx| {
             let mut view = SwitcherView::new(cx);
             view.set_theme(theme, cx);
             view.set_zoxide_enabled(zoxide_enabled, cx);
+            view.set_browser_tabs_integration(browser_tabs_enabled, cx);
             view.set_items(items_for_builder, cx);
             view.set_programs(programs_for_builder, cx);
             view.set_llm_provider_order(llm_order, cx);
@@ -984,6 +990,32 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             }
             return;
         }
+        SwitcherViewEvent::NeedsBrowserTabs => {
+            // Fired once per switcher session the first time the fallback
+            // tier is reached and no scan has been delivered yet. Shell out
+            // to AppleScript off the UI thread so a slow / permission-
+            // blocked osascript can't stall typing, then feed the result
+            // back into the view (empty vec when Chrome isn't running or
+            // the automation prompt was denied — UX falls through to LLM).
+            let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
+            let Some(entity) = entity_opt else {
+                return;
+            };
+            let platform = state.platform.clone();
+            let weak = entity.downgrade();
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                let tabs = cx
+                    .background_executor()
+                    .spawn(async move { platform.list_browser_tabs() })
+                    .await;
+                let items: Vec<Item> = tabs.into_iter().map(Item::from).collect();
+                let _ = weak.update(cx, |view, cx| {
+                    view.set_browser_tabs(items, cx);
+                });
+            })
+            .detach();
+            return;
+        }
         SwitcherViewEvent::QueryChanged(query) => {
             // The view emits QueryChanged on every keystroke when zoxide is
             // enabled. Spawn the subprocess on the background executor so a
@@ -1097,8 +1129,9 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                     Item::Program(_)
                     | Item::AskLlm { .. }
                     | Item::OpenUrl(_)
-                    | Item::Dir(_) => {
-                        /* programs, LLM, URL and dir rows don't participate in recency */
+                    | Item::Dir(_)
+                    | Item::BrowserTab(_) => {
+                        /* programs, LLM, URL, dir and browser-tab rows don't participate in recency */
                     }
                 }
             }
@@ -1127,6 +1160,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                         &d.path,
                     )
                 }
+                Item::BrowserTab(t) => state.platform.activate_browser_tab(t),
             };
             if let Err(e) = res {
                 tracing::warn!("activate: {e:#}");
@@ -1147,7 +1181,8 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
         | SwitcherViewEvent::CloseWindowRequested(_)
         | SwitcherViewEvent::UpdateDownloadRequested
         | SwitcherViewEvent::UpdateDismissed
-        | SwitcherViewEvent::QueryChanged(_) => unreachable!("handled above"),
+        | SwitcherViewEvent::QueryChanged(_)
+        | SwitcherViewEvent::NeedsBrowserTabs => unreachable!("handled above"),
     };
 
     if let Some(slot) = slot_to_close {
@@ -1403,6 +1438,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
             .map(|t| t.key)
     });
     let zoxide_integration = cfg.zoxide_integration;
+    let browser_tabs_integration = cfg.browser_tabs_integration;
     let file_manager = cfg.file_manager.clone();
     drop(cfg);
     // Freshly check at open-time so the warning's initial state matches
@@ -1459,6 +1495,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
                 license_key,
                 zoxide_integration,
                 zoxide_available,
+                browser_tabs_integration,
                 file_manager,
                 available_file_managers,
                 cx,
@@ -1656,6 +1693,23 @@ fn handle_settings_event(
             // every platform — most accurate single landing page.
             if let Err(e) = open::that("https://github.com/ajeetdsouza/zoxide#installation") {
                 tracing::warn!("open zoxide install page: {e:#}");
+            }
+        }
+        SettingsViewEvent::BrowserTabsIntegrationChanged(on) => {
+            {
+                let mut c = state.config.borrow_mut();
+                c.browser_tabs_integration = *on;
+                if let Err(e) = c.save() {
+                    tracing::warn!("save config: {e:#}");
+                }
+            }
+            // Mirror the new value into any live switcher view so the
+            // fallback tier starts / stops considering tabs immediately.
+            let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
+            if let Some(entity) = entity_opt {
+                entity.update(cx, |view, cx| {
+                    view.set_browser_tabs_integration(*on, cx)
+                });
             }
         }
         SettingsViewEvent::FileManagerChanged(id) => {

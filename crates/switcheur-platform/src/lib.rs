@@ -5,7 +5,7 @@
 //! only this crate needs implementing.
 
 use anyhow::Result;
-use switcheur_core::{AppRef, HotkeySpec, LlmProvider, ProgramRef, WindowRef};
+use switcheur_core::{AppRef, BrowserTabRef, HotkeySpec, LlmProvider, ProgramRef, WindowRef};
 
 /// Source of truth for what's currently runnable and how to focus it.
 pub trait WindowSource: Send + Sync {
@@ -42,6 +42,20 @@ pub trait ProgramSource: Send + Sync {
 /// to the corresponding web URL with the query as a prefilled prompt.
 pub trait LlmLauncher: Send + Sync {
     fn open_llm(&self, provider: LlmProvider, prompt: &str) -> Result<()>;
+}
+
+/// Scan running browsers for their open tabs and focus a chosen tab. Chrome
+/// is the only backend today (macOS AppleScript). The contract is explicitly
+/// best-effort:
+///
+/// - `list_browser_tabs` must never error — returning an empty vec for "not
+///   running" or "automation permission denied" lets the switcher silently
+///   fall through to the LLM tier.
+/// - `activate_browser_tab` may fail (window closed between scan and pick)
+///   and the caller reports the error through the normal activation path.
+pub trait BrowserTabSource: Send + Sync {
+    fn list_browser_tabs(&self) -> Vec<BrowserTabRef>;
+    fn activate_browser_tab(&self, t: &BrowserTabRef) -> Result<()>;
 }
 
 /// Events delivered when the user presses the registered hotkey.

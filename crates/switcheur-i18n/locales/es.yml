@@ -24,6 +24,8 @@ settings:
   zoxide_integration_hint: "Sugerir carpetas desde la base de frecuencia de zoxide en un panel lateral. Tab cambia el foco; Enter abre la carpeta en tu gestor de archivos."
   zoxide_not_installed: "Zoxide no está instalado."
   zoxide_install: "Instalar zoxide"
+  browser_tabs_integration: "Pestañas del navegador"
+  browser_tabs_integration_hint: "Cuando ninguna ventana o aplicación coincide con la búsqueda, buscar también entre las pestañas abiertas de Chrome. Enter activa la pestaña. La primera vez, macOS solicitará permiso para controlar Google Chrome."
   file_manager: "Abrir carpetas con"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Mantén Fn y escribe para abrir el conmutador con ese texto. Requiere el permiso de Monitorización de Entrada."
@@ -69,6 +71,7 @@ switcher:
   search_placeholder: "Buscar…"
   no_windows: "No se encontraron ventanas"
   no_results: "Sin resultados"
+  searching_browser_tabs: "Buscando pestañas…"
   dirs_header: "Carpetas zoxide"
 
 llm:

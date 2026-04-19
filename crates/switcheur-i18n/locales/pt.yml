@@ -24,6 +24,8 @@ settings:
   zoxide_integration_hint: "Sugerir pastas a partir da base de frequência do zoxide num painel lateral. Tab muda o foco; Enter abre a pasta no teu gestor de ficheiros."
   zoxide_not_installed: "Zoxide não está instalado."
   zoxide_install: "Instalar zoxide"
+  browser_tabs_integration: "Separadores do navegador"
+  browser_tabs_integration_hint: "Quando nenhuma janela ou aplicação corresponde à pesquisa, pesquisa também nos separadores abertos do Chrome. Enter ativa o separador. Na primeira utilização, o macOS pede autorização para controlar o Google Chrome."
   file_manager: "Abrir pastas com"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Mantenha Fn e digite para abrir o alternador com esse texto. Requer a autorização de Monitorização de Entrada."
@@ -69,6 +71,7 @@ switcher:
   search_placeholder: "Pesquisar…"
   no_windows: "Nenhuma janela encontrada"
   no_results: "Sem resultados"
+  searching_browser_tabs: "A procurar separadores…"
   dirs_header: "Pastas zoxide"
 
 llm:

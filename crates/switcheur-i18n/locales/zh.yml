@@ -24,6 +24,8 @@ settings:
   zoxide_integration_hint: "在侧边面板中显示来自 zoxide 频率数据库的目录建议。Tab 切换焦点；回车在文件管理器中打开文件夹。"
   zoxide_not_installed: "未安装 Zoxide。"
   zoxide_install: "安装 zoxide"
+  browser_tabs_integration: "浏览器标签页"
+  browser_tabs_integration_hint: "当没有窗口或应用匹配查询时，同时搜索 Chrome 已打开的标签页。回车切换到该标签页。首次使用时，macOS 会请求控制 Google Chrome 的权限。"
   file_manager: "打开文件夹使用"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "按住 Fn 并输入以使用该文本打开切换器。需要输入监控权限。"
@@ -69,6 +71,7 @@ switcher:
   search_placeholder: "搜索…"
   no_windows: "未找到窗口"
   no_results: "无结果"
+  searching_browser_tabs: "正在搜索浏览器标签页…"
   dirs_header: "Zoxide 目录"
 
 llm:

@@ -8,6 +8,13 @@ use crate::model::{Item, LlmProvider, ProgramRef};
 
 const MAX_PROGRAMS: usize = 3;
 
+/// Minimum query length (in Unicode scalars, after trimming) before the
+/// switcher asks the host to scrape browser tabs. Short queries (1-2 chars)
+/// are too generic — the AppleScript fetch can be 50-300 ms and the typical
+/// "aa" prefix would pull in dozens of false-positive matches from the tab
+/// haystack, clutter the list, and fire osascript on every quick key repeat.
+const MIN_QUERY_LEN_FOR_BROWSER_TABS: usize = 3;
+
 /// Which section of the switcher the keyboard cursor currently lives in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -25,6 +32,14 @@ pub struct SwitcherState {
     /// via [`SwitcherState::set_dirs`] — the subprocess call runs off the UI
     /// thread, so we deliberately keep this out of [`SwitcherState::rerank`].
     dirs: Vec<Item>,
+    /// All browser tabs fetched for the current switcher session, unfiltered.
+    /// `None` = not yet fetched; `Some(vec)` = fetched (possibly empty, e.g.
+    /// browser not running or permission denied). Populated externally via
+    /// [`SwitcherState::set_browser_tabs`] after an off-thread AppleScript
+    /// call. [`SwitcherState::rerank`] fuzzy-matches against this cache when
+    /// the fallback tier is reached.
+    browser_tabs_cache: Option<Vec<Item>>,
+    browser_tabs_integration: bool,
     query: String,
     filtered: Vec<MatchResult>,
     filtered_programs: Vec<MatchResult>,
@@ -48,6 +63,8 @@ impl SwitcherState {
             items: Vec::new(),
             programs: Vec::new(),
             dirs: Vec::new(),
+            browser_tabs_cache: None,
+            browser_tabs_integration: true,
             query: String::new(),
             filtered: Vec::new(),
             filtered_programs: Vec::new(),
@@ -76,6 +93,68 @@ impl SwitcherState {
     pub fn set_ask_llm_enabled(&mut self, enabled: bool) {
         self.ask_llm_enabled = enabled;
         self.rerank();
+    }
+
+    /// Toggle the browser-tabs fallback tier. When disabled the state never
+    /// reports [`SwitcherState::needs_browser_tabs`] as true and any cached
+    /// tabs are ignored in [`SwitcherState::rerank`].
+    pub fn set_browser_tabs_integration(&mut self, enabled: bool) {
+        if self.browser_tabs_integration == enabled {
+            return;
+        }
+        self.browser_tabs_integration = enabled;
+        if !enabled {
+            self.browser_tabs_cache = None;
+        }
+        self.rerank();
+    }
+
+    /// Install the browser tabs cache for the current switcher session. The
+    /// caller resolves this asynchronously via AppleScript, then calls in
+    /// with the (possibly empty) result. Rerank runs so tabs immediately
+    /// factor into the fallback tier.
+    ///
+    /// Unlike every other rerank trigger, this one **preserves** the user's
+    /// current selection: the delivery is async and happens at an
+    /// unpredictable moment (possibly while the user is arrow-keying through
+    /// the window matches), so resetting the cursor would feel like the UI
+    /// snatched focus for no reason. The selection is only clamped when the
+    /// new list is shorter than the old cursor position.
+    pub fn set_browser_tabs(&mut self, tabs: Vec<Item>) {
+        self.browser_tabs_cache = Some(tabs);
+        self.rerank_inner(RerankReset::PreserveSelection);
+    }
+
+    /// Forget any fetched browser tabs. Called when the switcher closes so
+    /// the next open starts with a fresh scan.
+    pub fn clear_browser_tabs(&mut self) {
+        if self.browser_tabs_cache.is_none() {
+            return;
+        }
+        self.browser_tabs_cache = None;
+        self.rerank();
+    }
+
+    /// True when the host should kick off an AppleScript scan: the user has
+    /// typed enough to make a tab search useful, the integration is on, and
+    /// no scan has been delivered for this switcher session yet.
+    pub fn needs_browser_tabs(&self) -> bool {
+        self.browser_tabs_integration
+            && self.browser_tabs_cache.is_none()
+            && self.query_long_enough_for_browser_tabs()
+    }
+
+    /// True while the scan is in flight — triggers the spinner that the view
+    /// appends below the results list so the user sees motion while we wait.
+    pub fn browser_tabs_loading(&self) -> bool {
+        self.needs_browser_tabs()
+    }
+
+    /// Does the current query clear the minimum length we require before
+    /// scraping browser tabs? Counts Unicode scalars after trimming so a
+    /// leading space doesn't throw the threshold off.
+    fn query_long_enough_for_browser_tabs(&self) -> bool {
+        self.query.trim().chars().count() >= MIN_QUERY_LEN_FOR_BROWSER_TABS
     }
 
     /// Replace the candidate set (typically called each time the switcher opens).
@@ -336,6 +415,10 @@ impl SwitcherState {
     }
 
     fn rerank(&mut self) {
+        self.rerank_inner(RerankReset::ResetSelection);
+    }
+
+    fn rerank_inner(&mut self, reset: RerankReset) {
         // URL launcher short-circuits everything else — a pasted URL is never
         // a fuzzy match for a window/program, and eval rows don't apply.
         if let Some(url) = &self.detected_url {
@@ -362,19 +445,34 @@ impl SwitcherState {
             ranked.reverse();
             self.filtered_programs = ranked;
         }
+        // Browser tabs are not a fallback — they're a complementary source,
+        // appended after the window matches so the user can jump to a tab
+        // even when a window also matches. Only kicks in past the minimum
+        // query length (see [`MIN_QUERY_LEN_FOR_BROWSER_TABS`]) and when a
+        // scan has actually been delivered for this session.
+        if self.browser_tabs_integration && self.query_long_enough_for_browser_tabs() {
+            if let Some(cache) = &self.browser_tabs_cache {
+                if !cache.is_empty() {
+                    let tab_matches = self.matcher.rank(&self.query, cache);
+                    self.filtered.extend(tab_matches);
+                }
+            }
+        }
         // "Ask <Provider>" fallback — only when nothing else matched, the
-        // query is non-empty, and math/JS eval hasn't answered either. The
-        // providers render directly in `filtered` so arrow keys + Enter +
-        // click all reuse the existing window-section plumbing.
-        if !self.ask_llm_enabled
-            || self.query.trim().is_empty()
-            || !self.filtered.is_empty()
-            || !self.filtered_programs.is_empty()
-            || self.eval_result.is_some()
-            || !self.dirs.is_empty()
+        // query is non-empty, and no other UI tier is present. Suppressed
+        // while a browser-tab scan is in flight so the Ask row doesn't flash
+        // in and out when tabs are about to arrive.
+        let browser_tabs_pending = self.browser_tabs_integration
+            && self.browser_tabs_cache.is_none()
+            && self.query_long_enough_for_browser_tabs();
+        if self.ask_llm_enabled
+            && !self.query.trim().is_empty()
+            && self.filtered.is_empty()
+            && self.filtered_programs.is_empty()
+            && self.eval_result.is_none()
+            && self.dirs.is_empty()
+            && !browser_tabs_pending
         {
-            // leave filtered as-is (empty or populated by items above)
-        } else {
             let query: Arc<str> = Arc::from(self.query.as_str());
             self.filtered = self
                 .llm_provider_order
@@ -390,10 +488,40 @@ impl SwitcherState {
                 })
                 .collect();
         }
-        self.selected_idx = 0;
-        self.selected_program = 0;
-        self.active_section = Section::Windows;
+        match reset {
+            RerankReset::ResetSelection => {
+                self.selected_idx = 0;
+                self.selected_program = 0;
+                self.active_section = Section::Windows;
+            }
+            RerankReset::PreserveSelection => {
+                // Clamp to the new lengths — the cursor may have been beyond
+                // the last row if the pool shrank (rare here, but possible if
+                // a later refactor calls this from a non-append path).
+                if self.filtered.is_empty() {
+                    self.selected_idx = 0;
+                } else if self.selected_idx >= self.filtered.len() {
+                    self.selected_idx = self.filtered.len() - 1;
+                }
+                if self.filtered_programs.is_empty() {
+                    self.selected_program = 0;
+                } else if self.selected_program >= self.filtered_programs.len() {
+                    self.selected_program = self.filtered_programs.len() - 1;
+                }
+                // Leave `active_section` alone: the user chose it.
+            }
+        }
     }
+}
+
+/// Whether a [`SwitcherState::rerank_inner`] call should blow away the
+/// current selection (default, because the input that drove the rerank
+/// changed) or keep it wherever the user parked the arrow-key cursor
+/// (used by async deliveries like [`SwitcherState::set_browser_tabs`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RerankReset {
+    ResetSelection,
+    PreserveSelection,
 }
 
 impl Default for SwitcherState {
@@ -489,12 +617,13 @@ mod tests {
 
     #[test]
     fn no_moves_on_empty_filter() {
-        // A query that matches nothing now populates the filter with the
-        // "Ask LLM" fallback rows, so navigation cycles among providers
-        // instead of being a no-op. The previous expectation (None) no
-        // longer holds, but navigation must still be safe.
+        // A query that matches nothing populates the filter with the
+        // "Ask LLM" fallback rows once the browser-tabs tier has finished
+        // its scan (here simulated as an empty cache). Navigation cycles
+        // among providers instead of being a no-op.
         let mut s = SwitcherState::new();
         s.set_items(vec![win("A", "alpha")]);
+        s.set_browser_tabs(Vec::new());
         s.set_query("zzzzzz");
         s.move_down();
         s.move_up();
@@ -580,6 +709,9 @@ mod tests {
     fn llm_fallback_shown_when_no_match() {
         let mut s = SwitcherState::new();
         s.set_items(vec![win("Mail", "Inbox")]);
+        // Simulate a completed (empty) browser-tab scan so the LLM tier
+        // isn't held back by an in-flight fetch.
+        s.set_browser_tabs(Vec::new());
         s.set_query("xyznomatchatall");
         // 4 providers in default order (Mistral first).
         assert_eq!(s.filtered().len(), 4);
@@ -596,6 +728,7 @@ mod tests {
     fn llm_fallback_respects_configured_order() {
         let mut s = SwitcherState::new();
         s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_browser_tabs(Vec::new());
         s.set_llm_provider_order(vec![
             LlmProvider::Claude,
             LlmProvider::ChatGpt,
@@ -649,6 +782,7 @@ mod tests {
         let mut s = SwitcherState::new();
         s.set_items(vec![win("Mail", "Inbox")]);
         s.set_ask_llm_enabled(false);
+        s.set_browser_tabs(Vec::new());
         s.set_query("xyznomatchatall");
         assert!(s.filtered().is_empty());
     }
@@ -679,6 +813,175 @@ mod tests {
         }
         assert!(s.filtered_programs().is_empty());
         assert!(s.eval_result().is_none());
+    }
+
+    // --- Browser tabs fallback tier tests ---
+
+    fn tab(title: &str, url: &str) -> Item {
+        Item::BrowserTab(Arc::new(crate::model::BrowserTabRef::new(
+            crate::model::Browser::Chrome,
+            1,
+            1,
+            Arc::from(title),
+            Arc::from(url),
+            None,
+        )))
+    }
+
+    #[test]
+    fn browser_tabs_needed_past_min_query_len() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_query("gh"); // 2 chars — too short
+        assert!(!s.needs_browser_tabs());
+        s.set_query("git"); // 3 chars — threshold
+        assert!(s.needs_browser_tabs());
+    }
+
+    #[test]
+    fn browser_tabs_not_needed_when_query_empty() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        assert!(!s.needs_browser_tabs());
+    }
+
+    #[test]
+    fn browser_tabs_not_needed_when_integration_off() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_browser_tabs_integration(false);
+        s.set_query("github");
+        assert!(!s.needs_browser_tabs());
+    }
+
+    #[test]
+    fn browser_tabs_not_needed_once_scan_completed() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_browser_tabs(Vec::new()); // scan finished, no tabs
+        s.set_query("github");
+        assert!(!s.needs_browser_tabs());
+    }
+
+    #[test]
+    fn browser_tabs_appended_after_window_matches() {
+        // Windows still come first; tabs are appended so the user never loses
+        // a running-window match to a tab match.
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("GitHub Desktop", "")]);
+        s.set_browser_tabs(vec![tab("GitHub", "https://github.com/")]);
+        s.set_query("github");
+        assert_eq!(s.filtered().len(), 2);
+        assert!(matches!(s.filtered()[0].item, Item::Window(_)));
+        assert!(matches!(s.filtered()[1].item, Item::BrowserTab(_)));
+    }
+
+    #[test]
+    fn browser_tabs_appear_even_without_window_match() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_browser_tabs(vec![tab("GitHub", "https://github.com/")]);
+        s.set_query("github");
+        assert_eq!(s.filtered().len(), 1);
+        assert!(matches!(s.filtered()[0].item, Item::BrowserTab(_)));
+    }
+
+    #[test]
+    fn browser_tabs_ignored_below_min_query_len() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_browser_tabs(vec![tab("GitHub", "https://github.com/")]);
+        s.set_query("gh"); // 2 chars — below threshold
+        // Below the threshold we must never surface a tab, even when the
+        // cache is warm and would match.
+        assert!(!s
+            .filtered()
+            .iter()
+            .any(|m| matches!(m.item, Item::BrowserTab(_))));
+    }
+
+    #[test]
+    fn browser_tabs_arrival_preserves_user_selection() {
+        // User typed, arrow-keyed down to row 2, then tabs arrive. Row 2
+        // must stay selected — async delivery shouldn't yank the cursor.
+        let mut s = SwitcherState::new();
+        s.set_items(vec![
+            win("VSCode", "foo.rs"),
+            win("VSCode", "bar.rs"),
+            win("VSCode", "baz.rs"),
+        ]);
+        s.set_query("vs");
+        s.move_down();
+        s.move_down();
+        assert_eq!(s.selected_idx(), 2);
+        s.set_browser_tabs(vec![tab("Some VSCode tab", "https://code.vsc/")]);
+        assert_eq!(s.selected_idx(), 2);
+    }
+
+    #[test]
+    fn browser_tabs_arrival_clamps_when_cursor_would_overflow() {
+        // User types, arrow-keys to the last row, then tabs arrive. Normally
+        // tabs *append* so clamping isn't needed — but we still guarantee
+        // that the cursor can never end up past the end of the list.
+        let mut s = SwitcherState::new();
+        s.set_items(vec![
+            win("VSCode", "a.rs"),
+            win("VSCode", "b.rs"),
+            win("VSCode", "c.rs"),
+        ]);
+        s.set_query("vsc");
+        // Move to the last filtered row.
+        s.move_down();
+        s.move_down();
+        assert_eq!(s.selected_idx(), 2);
+        // Tabs arrive with a match — filtered grows, cursor unchanged.
+        s.set_browser_tabs(vec![tab("VSCode tab", "https://vscode.dev/")]);
+        assert!(s.filtered().len() >= 3);
+        assert_eq!(s.selected_idx(), 2);
+        // Simulate an unusual shrink (cleared cache then refilled with
+        // nothing). Selection must clamp into the new range.
+        s.clear_browser_tabs();
+        s.set_browser_tabs(Vec::new());
+        // filtered now only holds the 3 window matches.
+        assert_eq!(s.filtered().len(), 3);
+        assert!(s.selected_idx() <= 2);
+    }
+
+    #[test]
+    fn browser_tabs_match_by_host_not_only_title() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_browser_tabs(vec![tab("Some Page", "https://github.com/a/b")]);
+        s.set_query("github");
+        assert_eq!(s.filtered().len(), 1);
+        match &s.filtered()[0].item {
+            Item::BrowserTab(t) => assert_eq!(t.host(), "github.com"),
+            _ => panic!("expected BrowserTab"),
+        }
+    }
+
+    #[test]
+    fn llm_fallback_suppressed_while_scan_in_flight() {
+        // At or past the 3-char threshold the scan is in flight — don't flash
+        // the LLM rows only to replace them once tabs arrive.
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_query("nomatch");
+        assert!(s.filtered().is_empty());
+        assert!(s.needs_browser_tabs());
+    }
+
+    #[test]
+    fn llm_fallback_shown_below_min_query_len_even_without_scan() {
+        // Under 3 chars we never scan, so the LLM fallback kicks in
+        // immediately once windows/programs/eval have nothing to offer.
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_query("xx"); // 2 chars, below threshold
+        assert!(s
+            .filtered()
+            .iter()
+            .all(|m| matches!(m.item, Item::AskLlm { .. })));
     }
 
     #[test]

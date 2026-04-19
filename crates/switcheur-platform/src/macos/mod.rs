@@ -1,4 +1,5 @@
 pub mod activate;
+pub mod browser;
 pub mod file_manager;
 pub mod hotkey;
 pub mod icons;
@@ -23,9 +24,9 @@ pub use recency::{FocusedApp, FocusedAppCell, RecencyService};
 pub use system_switcher::{SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService};
 
 use anyhow::Result;
-use switcheur_core::{AppRef, LlmProvider, ProgramRef, WindowRef};
+use switcheur_core::{AppRef, BrowserTabRef, LlmProvider, ProgramRef, WindowRef};
 
-use crate::{LlmLauncher, ProgramSource, WindowSource};
+use crate::{BrowserTabSource, LlmLauncher, ProgramSource, WindowSource};
 
 pub struct MacPlatform;
 
@@ -80,5 +81,15 @@ impl ProgramSource for MacPlatform {
 impl LlmLauncher for MacPlatform {
     fn open_llm(&self, provider: LlmProvider, prompt: &str) -> Result<()> {
         llm::open_llm(provider, prompt)
+    }
+}
+
+impl BrowserTabSource for MacPlatform {
+    fn list_browser_tabs(&self) -> Vec<BrowserTabRef> {
+        browser::list_tabs()
+    }
+
+    fn activate_browser_tab(&self, t: &BrowserTabRef) -> Result<()> {
+        browser::activate_tab(t)
     }
 }

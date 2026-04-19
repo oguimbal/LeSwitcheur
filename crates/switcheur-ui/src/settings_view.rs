@@ -97,6 +97,9 @@ pub enum SettingsViewEvent {
     /// User clicked "Install zoxide" under the disabled toggle. Host opens
     /// the zoxide install page in the default browser.
     OpenZoxideHomepageRequested,
+    /// User flipped the browser-tabs integration toggle. Host persists and
+    /// pushes the new value down to any open switcher view.
+    BrowserTabsIntegrationChanged(bool),
     /// User picked a file manager to open folders with. `None` means "system
     /// default" (Finder). Host persists the new id.
     FileManagerChanged(Option<String>),
@@ -176,6 +179,9 @@ pub struct SettingsView {
     /// Whether the host found a `zoxide` binary on this machine. Drives the
     /// toggle's enabled state and the "Install zoxide" inline link.
     zoxide_available: bool,
+    /// Mirrors `Config::browser_tabs_integration`. Drives the fallback tier
+    /// that scrapes open Chrome tabs when no window / program / URL matches.
+    browser_tabs_integration: bool,
     /// Stable id of the file manager currently selected, or `None` when the
     /// user hasn't opted out of the Finder default.
     file_manager: Option<String>,
@@ -203,6 +209,7 @@ impl SettingsView {
         license_key: Option<String>,
         zoxide_integration: bool,
         zoxide_available: bool,
+        browser_tabs_integration: bool,
         file_manager: Option<String>,
         available_file_managers: Vec<AvailableFileManager>,
         cx: &mut Context<Self>,
@@ -248,6 +255,7 @@ impl SettingsView {
             license_remove_gen: 0,
             zoxide_integration,
             zoxide_available,
+            browser_tabs_integration,
             file_manager,
             available_file_managers,
             file_manager_picker_open: false,
@@ -474,6 +482,19 @@ impl SettingsView {
             return;
         }
         self.zoxide_available = available;
+        cx.notify();
+    }
+
+    fn toggle_browser_tabs(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.browser_tabs_integration = !self.browser_tabs_integration;
+        cx.emit(SettingsViewEvent::BrowserTabsIntegrationChanged(
+            self.browser_tabs_integration,
+        ));
         cx.notify();
     }
 
@@ -1032,6 +1053,7 @@ impl SettingsView {
             ))
             .child(self.render_show_all_spaces_block(cx))
             .child(self.render_zoxide_block(cx))
+            .child(self.render_browser_tabs_block(cx))
             .child(self.render_file_manager_row(cx))
             .child(self.render_sort_row(cx))
             .child(self.render_license_row(cx))
@@ -1124,6 +1146,59 @@ impl SettingsView {
             block = block.child(self.render_zoxide_install_row(cx));
         }
         block.into_any_element()
+    }
+
+    fn render_browser_tabs_block(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let on = self.browser_tabs_integration;
+        let track_color = if on { theme.accent } else { theme.border };
+
+        let mut track = div()
+            .w(px(36.0))
+            .h(px(20.0))
+            .rounded_full()
+            .bg(track_color)
+            .flex()
+            .items_center()
+            .px(px(2.0));
+        track = if on { track.justify_end() } else { track.justify_start() };
+        let track = track.child(
+            div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded_full()
+                .bg(gpui::rgb(0xffffff)),
+        );
+
+        let text = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .gap_0p5()
+            .child(
+                div()
+                    .text_color(theme.foreground)
+                    .child(tr("settings.browser_tabs_integration")),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.muted)
+                    .child(tr("settings.browser_tabs_integration_hint")),
+            );
+
+        div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap_3()
+            .w_full()
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::toggle_browser_tabs))
+            .child(track)
+            .child(text)
+            .into_any_element()
     }
 
     fn render_zoxide_install_row(&self, cx: &mut Context<Self>) -> AnyElement {

@@ -51,6 +51,96 @@ pub enum DirSource {
     Zoxide,
 }
 
+/// Which browser a [`BrowserTabRef`] was scraped from. Chrome for v1 — the
+/// enum shape is here so Arc / Brave / Edge / Safari can be slotted in
+/// without reshaping [`Item`] or [`crate::state::SwitcherState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Browser {
+    Chrome,
+}
+
+impl Browser {
+    /// Human-readable display name, used for logging and row subtitles.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Browser::Chrome => "Google Chrome",
+        }
+    }
+
+    /// Bundle identifier of the browser app. Used by the platform layer to
+    /// activate the app after switching the tab.
+    pub fn bundle_id(self) -> &'static str {
+        match self {
+            Browser::Chrome => "com.google.Chrome",
+        }
+    }
+}
+
+/// One browser tab captured at scan time. The `window_id` / `tab_index` pair
+/// is enough to re-focus the tab later (AppleScript identifies windows by
+/// stable id within a browser session).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserTabRef {
+    pub browser: Browser,
+    /// AppleScript `id` of the owning window. Stable for the browser's
+    /// session; invalidated if the window is closed or the browser restarts.
+    pub window_id: i64,
+    /// 1-based index into the window's tabs list (AppleScript convention).
+    pub tab_index: i64,
+    pub title: Arc<str>,
+    pub url: Arc<str>,
+    /// Cached PNG of the browser app icon. `None` falls back to a placeholder.
+    pub icon_path: Option<PathBuf>,
+    /// Pre-rendered host portion of `url` (e.g. `github.com`). Stored so
+    /// [`Item::secondary`] and [`Item::search_text`] can borrow it without
+    /// re-parsing on every render. Empty when the URL is not parseable
+    /// (chrome://, about:blank, …).
+    host: String,
+}
+
+impl BrowserTabRef {
+    pub fn new(
+        browser: Browser,
+        window_id: i64,
+        tab_index: i64,
+        title: Arc<str>,
+        url: Arc<str>,
+        icon_path: Option<PathBuf>,
+    ) -> Self {
+        let host = extract_host(&url).unwrap_or_default();
+        Self {
+            browser,
+            window_id,
+            tab_index,
+            title,
+            url,
+            icon_path,
+            host,
+        }
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+}
+
+/// Minimal URL host extractor — avoids pulling in the `url` crate for a
+/// rendering-only convenience. Returns `None` for anything that isn't a
+/// standard `scheme://host/...` form.
+fn extract_host(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://")?.1;
+    let host = after_scheme
+        .split(|c: char| c == '/' || c == '?' || c == '#')
+        .next()?;
+    let host = host.rsplit_once('@').map(|(_, h)| h).unwrap_or(host);
+    let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
 /// A directory the user has visited often enough to deserve a suggestion in
 /// the right-side panel. Populated by [`crate::state::SwitcherState::set_dirs`].
 ///
@@ -192,6 +282,11 @@ pub enum Item {
     /// A directory suggestion — currently from zoxide, displayed in the
     /// right-side panel. Activating it opens the path in Finder.
     Dir(Arc<DirRef>),
+    /// A tab open in a running browser (Chrome today). Appears in the main
+    /// list as a fallback tier — only shown when no window / program / URL /
+    /// eval / dir matched the query. Activating focuses the owning window and
+    /// switches to that tab.
+    BrowserTab(Arc<BrowserTabRef>),
 }
 
 impl Item {
@@ -212,6 +307,9 @@ impl Item {
             // Match against both basename and parent so typing either filters
             // sensibly (e.g. "src" matches "/Users/oliv/repos/foo/src").
             Item::Dir(d) => format!("{} {}", d.basename(), d.parent_display()),
+            // Title + URL host so typing "github" matches a github.com tab
+            // even when the page title doesn't include the word.
+            Item::BrowserTab(t) => format!("{} {}", t.title, t.host()),
         }
     }
 
@@ -228,6 +326,7 @@ impl Item {
             // time. Fall back to the URL itself.
             Item::OpenUrl(url) => url,
             Item::Dir(d) => d.basename(),
+            Item::BrowserTab(t) => &t.title,
         }
     }
 
@@ -243,6 +342,14 @@ impl Item {
                     Some(p)
                 }
             }
+            Item::BrowserTab(t) => {
+                let h = t.host();
+                if h.is_empty() {
+                    Some(&t.url)
+                } else {
+                    Some(h)
+                }
+            }
             _ => None,
         }
     }
@@ -256,6 +363,7 @@ impl Item {
             Item::AskLlm { provider, .. } => provider.display_name(),
             Item::OpenUrl(_) => "open_url",
             Item::Dir(_) => "dir",
+            Item::BrowserTab(t) => t.browser.bundle_id(),
         }
     }
 
@@ -268,6 +376,7 @@ impl Item {
             Item::AskLlm { provider, .. } => return provider.icon_initial(),
             Item::OpenUrl(_) => return '↗',
             Item::Dir(_) => return '📁',
+            Item::BrowserTab(_) => return 'C',
         };
         name.chars().next().unwrap_or('?').to_ascii_uppercase()
     }
@@ -280,6 +389,7 @@ impl Item {
             Item::Program(p) => p.icon_path.as_deref(),
             Item::AskLlm { .. } | Item::OpenUrl(_) => None,
             Item::Dir(d) => d.icon_path.as_deref(),
+            Item::BrowserTab(t) => t.icon_path.as_deref(),
         }
     }
 
@@ -304,5 +414,59 @@ impl From<AppRef> for Item {
 impl From<ProgramRef> for Item {
     fn from(p: ProgramRef) -> Self {
         Item::Program(Arc::new(p))
+    }
+}
+
+impl From<BrowserTabRef> for Item {
+    fn from(t: BrowserTabRef) -> Self {
+        Item::BrowserTab(Arc::new(t))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_host_strips_scheme_path_query() {
+        assert_eq!(extract_host("https://github.com/foo/bar").as_deref(), Some("github.com"));
+        assert_eq!(extract_host("http://example.com:8080/x?y").as_deref(), Some("example.com"));
+        assert_eq!(extract_host("https://user:pw@host.test/").as_deref(), Some("host.test"));
+    }
+
+    #[test]
+    fn extract_host_returns_none_for_non_urls() {
+        assert_eq!(extract_host("about:blank"), None);
+        assert_eq!(extract_host("chrome://settings"), Some("settings".into()));
+        assert_eq!(extract_host(""), None);
+    }
+
+    #[test]
+    fn browser_tab_ref_prerenders_host() {
+        let t = BrowserTabRef::new(
+            Browser::Chrome,
+            42,
+            1,
+            Arc::from("Hello"),
+            Arc::from("https://github.com/anthropics/claude-code"),
+            None,
+        );
+        assert_eq!(t.host(), "github.com");
+    }
+
+    #[test]
+    fn browser_tab_item_search_text_includes_host() {
+        let t = BrowserTabRef::new(
+            Browser::Chrome,
+            1,
+            1,
+            Arc::from("Claude docs"),
+            Arc::from("https://docs.anthropic.com/"),
+            None,
+        );
+        let item: Item = t.into();
+        let s = item.search_text();
+        assert!(s.contains("Claude docs"));
+        assert!(s.contains("docs.anthropic.com"));
     }
 }

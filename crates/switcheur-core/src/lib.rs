@@ -19,6 +19,8 @@ pub use app_match::{AppMatch, AppMatchSet};
 pub use config::{Appearance, Config, HotkeySpec};
 pub use exclusions::{ExclusionFilter, ExclusionRule};
 pub use matcher::{FuzzyMatcher, MatchResult};
-pub use model::{AppRef, DirRef, DirSource, Item, LlmProvider, ProgramRef, WindowRef};
+pub use model::{
+    AppRef, Browser, BrowserTabRef, DirRef, DirSource, Item, LlmProvider, ProgramRef, WindowRef,
+};
 pub use sort::{sort_items, RecencyTracker, SortOrder};
 pub use state::{Section, SwitcherState};

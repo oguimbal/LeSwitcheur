@@ -1,9 +1,10 @@
 //! The switcher panel itself. Owns a [`SwitcherState`] and renders it.
 
 use gpui::{
-    div, prelude::*, px, uniform_list, AnyElement, App, ClickEvent, Context, EventEmitter,
-    FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement,
-    Render, ScrollStrategy, SharedString, Styled, Subscription, UniformListScrollHandle, Window,
+    div, linear, percentage, prelude::*, px, svg, uniform_list, Animation, AnimationExt, AnyElement,
+    App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, ParentElement, Render, ScrollStrategy, SharedString, Styled,
+    Subscription, Transformation, UniformListScrollHandle, Window,
 };
 use std::sync::Arc;
 
@@ -52,6 +53,12 @@ pub enum SwitcherViewEvent {
     /// uses this to drive the zoxide subprocess off the UI thread; the
     /// view itself stays platform-agnostic.
     QueryChanged(String),
+    /// The state reached the browser-tabs fallback tier and no scan has
+    /// been delivered yet. The host responds by running the AppleScript
+    /// scrape off the UI thread and feeding the result back via
+    /// [`SwitcherView::set_browser_tabs`]. One-shot per switcher session —
+    /// emission is gated by a view-level flag reset in `set_items`.
+    NeedsBrowserTabs,
 }
 
 /// Top-of-panel banner shown when the startup update check reported a newer
@@ -89,6 +96,11 @@ pub struct SwitcherView {
     /// The host (main.rs) is the one that actually shells out to zoxide
     /// — keeps platform code out of the UI crate.
     zoxide_enabled: bool,
+    /// Has a `NeedsBrowserTabs` event already been fired for the current
+    /// switcher session? Prevents re-requesting on every subsequent
+    /// keystroke after the first fallback-tier hit. Reset in `set_items`
+    /// (the switcher is reopened) so each session gets one fresh scan.
+    browser_tabs_requested: bool,
 }
 
 impl SwitcherView {
@@ -106,6 +118,7 @@ impl SwitcherView {
             nag_phase: NagPhase::Hidden,
             update_banner: UpdateBannerState::Hidden,
             zoxide_enabled: false,
+            browser_tabs_requested: false,
         }
     }
 
@@ -152,6 +165,11 @@ impl SwitcherView {
         self.input.clear();
         self.state.set_items(items);
         self.state.set_query("");
+        // New switcher session — forget any tabs scanned for the previous
+        // one and allow `NeedsBrowserTabs` to be emitted again once the
+        // fallback tier is reached.
+        self.state.clear_browser_tabs();
+        self.browser_tabs_requested = false;
         if self.zoxide_enabled {
             cx.emit(SwitcherViewEvent::QueryChanged(String::new()));
         }
@@ -206,6 +224,24 @@ impl SwitcherView {
     /// the result of an off-thread zoxide query (debounced per keystroke).
     pub fn set_dirs(&mut self, dirs: Vec<Item>, cx: &mut Context<Self>) {
         self.state.set_dirs(dirs);
+        cx.notify();
+    }
+
+    /// Deliver the off-thread browser-tab scan back into the state. Rerank
+    /// fires automatically so the tabs immediately populate the fallback
+    /// tier (or step aside for the LLM row if none match).
+    pub fn set_browser_tabs(&mut self, tabs: Vec<Item>, cx: &mut Context<Self>) {
+        self.state.set_browser_tabs(tabs);
+        cx.notify();
+    }
+
+    /// Mirror the user's `browser_tabs_integration` setting. Off → no scan
+    /// is ever requested and any previously delivered cache is cleared.
+    pub fn set_browser_tabs_integration(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.state.set_browser_tabs_integration(enabled);
+        if !enabled {
+            self.browser_tabs_requested = false;
+        }
         cx.notify();
     }
 
@@ -655,6 +691,13 @@ impl SwitcherView {
                 self.state.query().to_string(),
             ));
         }
+        // Kick off the browser-tabs scan the first time the fallback tier
+        // becomes active this session. Gated so the host doesn't spawn an
+        // osascript on every keystroke — one scan per switcher opening.
+        if !self.browser_tabs_requested && self.state.needs_browser_tabs() {
+            self.browser_tabs_requested = true;
+            cx.emit(SwitcherViewEvent::NeedsBrowserTabs);
+        }
         self.emit_height_delta_if_changed(cx);
         cx.notify();
     }
@@ -686,9 +729,16 @@ impl Render for SwitcherView {
         } else {
             SharedString::from(tr("switcher.no_results"))
         };
+        let browser_tabs_loading = self.state.browser_tabs_loading();
 
         let list_section: AnyElement = if nag_phase != NagPhase::Hidden {
             render_nag_card(nag_phase, &theme, cx).into_any_element()
+        } else if filtered_count == 0 && browser_tabs_loading {
+            // Only the spinner is shown here because no window, program, or
+            // tab has matched yet. The scan is in flight — rendering "No
+            // results" would be a false negative the moment before tabs
+            // arrive.
+            render_browser_tabs_loading(&theme)
         } else if filtered_count == 0 {
             div()
                 .px_3()
@@ -698,7 +748,7 @@ impl Render for SwitcherView {
                 .child(empty_msg)
                 .into_any_element()
         } else {
-            uniform_list(
+            let list = uniform_list(
                 "switcher-list",
                 filtered_count,
                 cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
@@ -743,8 +793,21 @@ impl Render for SwitcherView {
                 }),
             )
             .track_scroll(&self.scroll)
-            .flex_1()
-            .into_any_element()
+            .flex_1();
+            if browser_tabs_loading {
+                // Results are visible but the tab scan isn't back yet —
+                // append a small spinner row below the list so the user
+                // knows more results may still arrive.
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .child(list)
+                    .child(render_browser_tabs_loading(&theme))
+                    .into_any_element()
+            } else {
+                list.into_any_element()
+            }
         };
 
         div()
@@ -1142,6 +1205,38 @@ fn render_dirs_panel(
                 .child(SharedString::from(tr("switcher.dirs_header"))),
         )
         .children(rows)
+        .into_any_element()
+}
+
+/// Inline "scanning browser tabs" row shown while the AppleScript fetch is
+/// in flight. Replaces the "No results" label so the user isn't briefly told
+/// nothing matched when we're still looking. Uses GPUI's animation API to
+/// rotate the spinner SVG — linear easing keeps the motion feeling like a
+/// loader rather than a bounce.
+fn render_browser_tabs_loading(theme: &Theme) -> AnyElement {
+    let spinner = svg()
+        .path("browser_icons/spinner.svg")
+        .w(px(14.0))
+        .h(px(14.0))
+        .text_color(theme.muted)
+        .with_animation(
+            "browser_tabs_spinner",
+            Animation::new(std::time::Duration::from_millis(900))
+                .repeat()
+                .with_easing(linear),
+            |s, delta| s.with_transformation(Transformation::rotate(percentage(delta))),
+        );
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .text_size(px(13.0))
+        .text_color(theme.muted)
+        .child(spinner)
+        .child(SharedString::from(tr("switcher.searching_browser_tabs")))
         .into_any_element()
 }
 

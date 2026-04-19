@@ -24,6 +24,8 @@ settings:
   zoxide_integration_hint: "Verzeichnisse aus zoxides Frecency-Datenbank in einem Seitenpanel vorschlagen. Tab wechselt den Fokus dorthin; Enter öffnet den Ordner in deinem Dateimanager."
   zoxide_not_installed: "Zoxide ist nicht installiert."
   zoxide_install: "Zoxide installieren"
+  browser_tabs_integration: "Browser-Tabs"
+  browser_tabs_integration_hint: "Wenn kein Fenster oder keine App zur Suche passt, werden auch offene Chrome-Tabs durchsucht. Enter fokussiert den Tab. Beim ersten Aufruf fragt macOS nach der Berechtigung, Google Chrome zu steuern."
   file_manager: "Ordner öffnen mit"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Halte Fn gedrückt und tippe, um den Umschalter mit diesem Text zu öffnen. Benötigt die Berechtigung Eingabeüberwachung."
@@ -69,6 +71,7 @@ switcher:
   search_placeholder: "Suchen…"
   no_windows: "Keine Fenster gefunden"
   no_results: "Keine Ergebnisse"
+  searching_browser_tabs: "Browser-Tabs werden durchsucht…"
   dirs_header: "Zoxide-Ordner"
 
 llm:

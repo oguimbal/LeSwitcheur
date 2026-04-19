@@ -24,6 +24,8 @@ settings:
   zoxide_integration_hint: "Suggérer des dossiers issus de la base de fréquence de zoxide dans un panneau latéral. Tab y déplace le focus ; Entrée ouvre le dossier dans votre gestionnaire de fichiers."
   zoxide_not_installed: "Zoxide n'est pas installé."
   zoxide_install: "Installer zoxide"
+  browser_tabs_integration: "Onglets de navigateur"
+  browser_tabs_integration_hint: "Quand aucune fenêtre ni application ne correspond à la recherche, chercher aussi dans les onglets Chrome ouverts. Entrée active l'onglet. À la première utilisation, macOS demande l'autorisation de contrôler Google Chrome."
   file_manager: "Ouvrir les dossiers avec"
   quick_type: "Quick Type (Fn)"
   quick_type_hint: "Maintenez Fn et tapez pour ouvrir le commutateur avec ce texte. Nécessite l'autorisation Surveillance de la saisie."
@@ -69,6 +71,7 @@ switcher:
   search_placeholder: "Rechercher…"
   no_windows: "Aucune fenêtre trouvée"
   no_results: "Aucun résultat"
+  searching_browser_tabs: "Recherche des onglets…"
   dirs_header: "Dossiers zoxide"
 
 llm:

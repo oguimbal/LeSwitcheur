@@ -13,6 +13,8 @@ const CLAUDE: &[u8] = include_bytes!("../assets/llm_icons/claude.svg");
 const CHATGPT: &[u8] = include_bytes!("../assets/llm_icons/chatgpt.svg");
 const MISTRAL: &[u8] = include_bytes!("../assets/llm_icons/mistral.svg");
 const PERPLEXITY: &[u8] = include_bytes!("../assets/llm_icons/perplexity.svg");
+const TAB_OVERLAY: &[u8] = include_bytes!("../assets/browser_icons/tab_overlay.svg");
+const SPINNER: &[u8] = include_bytes!("../assets/browser_icons/spinner.svg");
 const BRAND_LOGO: &[u8] = include_bytes!("../../../brand/logo-256.png");
 
 /// Unit struct that the host registers via `application().with_assets(Assets)`.
@@ -26,6 +28,8 @@ impl AssetSource for Assets {
             "llm_icons/chatgpt.svg" => Ok(Some(Cow::Borrowed(CHATGPT))),
             "llm_icons/mistral.svg" => Ok(Some(Cow::Borrowed(MISTRAL))),
             "llm_icons/perplexity.svg" => Ok(Some(Cow::Borrowed(PERPLEXITY))),
+            "browser_icons/tab_overlay.svg" => Ok(Some(Cow::Borrowed(TAB_OVERLAY))),
+            "browser_icons/spinner.svg" => Ok(Some(Cow::Borrowed(SPINNER))),
             "brand/logo.png" => Ok(Some(Cow::Borrowed(BRAND_LOGO))),
             _ => Err(anyhow!("unknown asset: {path}")),
         }
@@ -37,6 +41,8 @@ impl AssetSource for Assets {
             SharedString::from("chatgpt.svg"),
             SharedString::from("mistral.svg"),
             SharedString::from("perplexity.svg"),
+            SharedString::from("tab_overlay.svg"),
+            SharedString::from("spinner.svg"),
             SharedString::from("logo.png"),
         ])
     }

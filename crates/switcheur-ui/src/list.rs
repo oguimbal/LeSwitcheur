@@ -7,6 +7,10 @@ use switcheur_i18n::tr;
 use crate::theme::Theme;
 
 const ICON_SIZE: f32 = 26.0;
+/// Size of the badge overlaid on an icon's bottom-right corner (minimized
+/// windows and browser tabs). Sized relative to [`ICON_SIZE`] so the badge
+/// reads as deliberate rather than crammed.
+const OVERLAY_SIZE: f32 = 15.0;
 /// Every row is forced to this height so `uniform_list` (which only measures
 /// the first item) can't clip the two-line rows when the first one happens to
 /// only have a primary title.
@@ -51,18 +55,48 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
             .child(
                 div()
                     .absolute()
-                    .bottom(px(-2.0))
-                    .right(px(-2.0))
-                    .w(px(12.0))
-                    .h(px(12.0))
+                    .bottom(px(-3.0))
+                    .right(px(-3.0))
+                    .w(px(OVERLAY_SIZE))
+                    .h(px(OVERLAY_SIZE))
                     .rounded_full()
                     .bg(theme.background)
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(10.0))
+                    .text_size(px(13.0))
                     .text_color(theme.foreground)
                     .child("▾"),
+            )
+            .into_any_element()
+    } else if matches!(item, Item::BrowserTab(_)) {
+        // Browser-tab rows get the browser's app icon plus a small "tab"
+        // overlay in the corner so the row visually reads as "a tab inside
+        // this browser" rather than an app/window of the browser itself.
+        div()
+            .relative()
+            .w(px(ICON_SIZE))
+            .h(px(ICON_SIZE))
+            .child(base_icon)
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(-3.0))
+                    .right(px(-3.0))
+                    .w(px(OVERLAY_SIZE))
+                    .h(px(OVERLAY_SIZE))
+                    .rounded_full()
+                    .bg(theme.background)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        svg()
+                            .path("browser_icons/tab_overlay.svg")
+                            .w(px(OVERLAY_SIZE - 4.0))
+                            .h(px(OVERLAY_SIZE - 4.0))
+                            .text_color(theme.foreground),
+                    ),
             )
             .into_any_element()
     } else {

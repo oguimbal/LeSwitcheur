@@ -101,6 +101,13 @@ pub struct Config {
     /// degrades). On by default.
     #[serde(default = "default_true")]
     pub zoxide_integration: bool,
+    /// When true, if no window / program / URL / eval matches the query, the
+    /// switcher scrapes the running browsers (Chrome today) for open tabs and
+    /// offers them as results before falling back to "Ask AI". Fetch runs off
+    /// the UI thread and is fully lazy — no AppleScript fires until the
+    /// fallback tier is actually reached. On by default.
+    #[serde(default = "default_true")]
+    pub browser_tabs_integration: bool,
     /// Stable id of the file manager used to open folders picked from the
     /// switcher. `None` (or an unknown / uninstalled id) resolves to the
     /// system default (Finder). See
@@ -156,6 +163,7 @@ impl Default for Config {
             ask_llm_enabled: true,
             onboarding_completed: false,
             zoxide_integration: true,
+            browser_tabs_integration: true,
             file_manager: None,
         }
     }
