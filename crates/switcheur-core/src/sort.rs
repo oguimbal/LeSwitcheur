@@ -6,7 +6,7 @@
 //! for items of equal fuzzy score, which is rare.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -83,13 +83,30 @@ impl RecencyTracker {
 pub fn sort_items(windows: &mut [WindowRef], order: SortOrder, tracker: &RecencyTracker) {
     match order {
         SortOrder::RecentWindow => {
-            // No fallback to app_rank: if we fell back, every sibling window
-            // of a recently-activated app would tie at the app's rank and
-            // cluster at the top — exactly the "10 VSCode windows before the
-            // previous window" pain this mode is trying to avoid. Windows
-            // never explicitly focused drop to the bottom, and the stable
-            // sort preserves their enumeration order down there.
-            windows.sort_by_key(|w| Reverse(tracker.window_rank(w.pid, &w.title)));
+            // Narrow fallback to app_rank: only for apps that have NO window
+            // with a window_rank in the current list. Covers the "freshly
+            // launched app" race where NSWorkspaceDidActivate fires before
+            // AX exposes the window's title, so note_window was never called
+            // and the new app would otherwise sink to the bottom. For apps
+            // that do have at least one ranked window (e.g. VSCode after a
+            // focus), siblings without a window_rank stay unranked — fallback
+            // there would tie every sibling at app_rank and clog the top
+            // ("10 VSCode windows before the previous window").
+            let apps_with_ranked_window: HashSet<i32> = windows
+                .iter()
+                .filter(|w| tracker.window_rank(w.pid, &w.title).is_some())
+                .map(|w| w.pid)
+                .collect();
+            windows.sort_by_key(|w| {
+                let key = tracker.window_rank(w.pid, &w.title).or_else(|| {
+                    if apps_with_ranked_window.contains(&w.pid) {
+                        None
+                    } else {
+                        tracker.app_rank(w.pid)
+                    }
+                });
+                Reverse(key)
+            });
         }
         SortOrder::Title => {
             windows.sort_by(|a, b| {
@@ -169,6 +186,62 @@ mod tests {
         }
         let w: Wrap = toml::from_str(toml).expect("deserialize");
         assert_eq!(w.sort_order, SortOrder::RecentWindow);
+    }
+
+    #[test]
+    fn freshly_launched_app_inherits_app_rank_when_no_sibling_window_ranked() {
+        // Race: NSWorkspaceDidActivate for a newly launched app fires before
+        // AX has the window title, so note_window is skipped and only note_app
+        // runs. Without the narrow fallback, the new app would sink below
+        // every previously-focused window. With it, the new app lands near
+        // the top so a second alt-tab lands on it — matching macOS cmd-tab.
+        let mut t = RecencyTracker::new();
+        t.note_window(1, "old-a"); // pid 1 has a ranked window
+        sleep(Duration::from_millis(2));
+        t.note_window(1, "old-b");
+        sleep(Duration::from_millis(2));
+        t.note_app(2); // pid 2: freshly launched, title not available at activation
+
+        let mut ws = vec![
+            w(1, "A", "old-a"),
+            w(1, "A", "old-b"),
+            w(2, "NEW", "just-launched"),
+        ];
+        sort_items(&mut ws, SortOrder::RecentWindow, &t);
+        let ordered: Vec<_> = ws.iter().map(|w| (w.pid, w.title.as_str())).collect();
+        // pid 2's app_rank is most recent, so it sorts above pid 1's windows.
+        assert_eq!(ordered[0], (2, "just-launched"));
+        assert_eq!(ordered[1], (1, "old-b"));
+        assert_eq!(ordered[2], (1, "old-a"));
+    }
+
+    #[test]
+    fn multi_window_app_does_not_clog_top_via_app_rank_fallback() {
+        // VSCode with 10 windows: user focused window 0, then activated
+        // VSCode via Dock. app_rank is fresh, but only window 0 has a
+        // window_rank. The other 9 must NOT fall back to app_rank —
+        // otherwise they'd all tie at the app's rank and clog the top
+        // ahead of the user's previous app.
+        let mut t = RecencyTracker::new();
+        t.note_window(99, "prev-app-window"); // previous app focused first
+        sleep(Duration::from_millis(2));
+        t.note_window(1, "vscode-0"); // only window 0 of VSCode focused
+        sleep(Duration::from_millis(2));
+        t.note_app(1); // VSCode re-activated (Dock click) — bumps app_rank
+
+        let mut ws = vec![
+            w(1, "VSCode", "vscode-0"),
+            w(1, "VSCode", "vscode-1"),
+            w(1, "VSCode", "vscode-2"),
+            w(99, "Prev", "prev-app-window"),
+        ];
+        sort_items(&mut ws, SortOrder::RecentWindow, &t);
+        let ordered: Vec<_> = ws.iter().map(|w| (w.pid, w.title.as_str())).collect();
+        // vscode-0 first (most recent window_rank), then prev-app-window
+        // (the previously-focused window the user wants to alt-tab back to).
+        // Unranked vscode-1/2 sink to the bottom.
+        assert_eq!(ordered[0], (1, "vscode-0"));
+        assert_eq!(ordered[1], (99, "prev-app-window"));
     }
 
     #[test]
