@@ -86,7 +86,7 @@ impl LlmLauncher for MacPlatform {
 }
 
 impl BrowserTabSource for MacPlatform {
-    fn list_browser_tabs(&self) -> Vec<BrowserTabRef> {
+    fn list_browser_tabs(&self) -> (Vec<BrowserTabRef>, bool) {
         browser::list_tabs()
     }
 

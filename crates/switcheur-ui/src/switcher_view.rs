@@ -7,6 +7,7 @@ use gpui::{
     Subscription, Transformation, UniformListScrollHandle, Window,
 };
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use switcheur_core::{Item, ProgramRef, Section, SwitcherState, WindowRef};
 use switcheur_i18n::tr;
@@ -100,8 +101,21 @@ pub struct SwitcherView {
     /// switcher session? Prevents re-requesting on every subsequent
     /// keystroke after the first fallback-tier hit. Reset in `set_items`
     /// (the switcher is reopened) so each session gets one fresh scan.
+    /// Also reset on scan failure so a retry is allowed — rate-limited by
+    /// [`SwitcherView::browser_tabs_retry_after`].
     browser_tabs_requested: bool,
+    /// Earliest Instant at which a fresh `NeedsBrowserTabs` may fire after
+    /// a failed scan (AppleScript timeout / permission error). Throttles
+    /// retries so a stuck Chrome doesn't trigger an osascript on every
+    /// keystroke. `None` = no cooldown (either no failure yet, or cooldown
+    /// elapsed).
+    browser_tabs_retry_after: Option<Instant>,
 }
+
+/// Cooldown between scan-failure retries. Long enough that a slow Chrome
+/// gets breathing room, short enough that the user doesn't notice when
+/// typing the next character.
+const BROWSER_TABS_RETRY_COOLDOWN: Duration = Duration::from_millis(1500);
 
 impl SwitcherView {
     pub fn new(cx: &mut Context<Self>) -> Self {
@@ -119,6 +133,7 @@ impl SwitcherView {
             update_banner: UpdateBannerState::Hidden,
             zoxide_enabled: false,
             browser_tabs_requested: false,
+            browser_tabs_retry_after: None,
         }
     }
 
@@ -170,6 +185,7 @@ impl SwitcherView {
         // fallback tier is reached.
         self.state.clear_browser_tabs();
         self.browser_tabs_requested = false;
+        self.browser_tabs_retry_after = None;
         if self.zoxide_enabled {
             cx.emit(SwitcherViewEvent::QueryChanged(String::new()));
         }
@@ -241,7 +257,21 @@ impl SwitcherView {
         self.state.set_browser_tabs_integration(enabled);
         if !enabled {
             self.browser_tabs_requested = false;
+            self.browser_tabs_retry_after = None;
         }
+        cx.notify();
+    }
+
+    /// Signal from the host that the off-thread scan errored out (every
+    /// supported browser timed out or the automation prompt was denied).
+    /// Clears the `requested` latch and installs a cooldown so the next
+    /// keystroke (after the cooldown window) can fire a retry. We
+    /// deliberately do NOT touch the state's tab cache: keeping it at
+    /// `None` lets `needs_browser_tabs()` stay true so the retry actually
+    /// fires.
+    pub fn browser_tabs_scan_failed(&mut self, cx: &mut Context<Self>) {
+        self.browser_tabs_requested = false;
+        self.browser_tabs_retry_after = Some(Instant::now() + BROWSER_TABS_RETRY_COOLDOWN);
         cx.notify();
     }
 
@@ -693,10 +723,18 @@ impl SwitcherView {
         }
         // Kick off the browser-tabs scan the first time the fallback tier
         // becomes active this session. Gated so the host doesn't spawn an
-        // osascript on every keystroke — one scan per switcher opening.
+        // osascript on every keystroke — one scan per switcher opening,
+        // plus one retry per cooldown window after a scan failure.
         if !self.browser_tabs_requested && self.state.needs_browser_tabs() {
-            self.browser_tabs_requested = true;
-            cx.emit(SwitcherViewEvent::NeedsBrowserTabs);
+            let ready = self
+                .browser_tabs_retry_after
+                .map(|t| Instant::now() >= t)
+                .unwrap_or(true);
+            if ready {
+                self.browser_tabs_requested = true;
+                self.browser_tabs_retry_after = None;
+                cx.emit(SwitcherViewEvent::NeedsBrowserTabs);
+            }
         }
         self.emit_height_delta_if_changed(cx);
         cx.notify();

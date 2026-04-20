@@ -103,51 +103,69 @@ end tell"#;
 
 /// Hard ceiling for each browser's scan. Each browser runs in its own thread,
 /// so total wall-clock is still bounded by this — not the sum across
-/// browsers. If `osascript` runs longer than this we kill it and return an
-/// empty vec for that browser; the UI silently falls through to the LLM tier
-/// rather than freezing or flashing a placeholder.
-const SCAN_TIMEOUT: Duration = Duration::from_millis(800);
+/// browsers. If `osascript` runs longer than this we kill it and return a
+/// failure for that browser; the caller may retry on the next keystroke
+/// (see [`crate::macos::MacPlatform::list_browser_tabs`]).
+///
+/// 3s comfortably covers Chrome with ~50+ tabs when the browser thread is
+/// busy. The scan runs off the UI thread, so the UI never stalls.
+const SCAN_TIMEOUT: Duration = Duration::from_millis(3000);
 
 /// Browsers we try to scan on every fallback tick. Order doesn't matter —
 /// results are merged and the UI sorts them via its own fuzzy-match scorer.
 const SUPPORTED: &[Browser] = &[Browser::Chrome, Browser::Safari];
 
-/// Scan every supported browser's tabs, concurrently. Silent on every
-/// failure (not running, permission denied, script timeout, garbled output)
-/// — returns the union of whatever each browser produced. Running the scans
-/// in parallel keeps the worst-case wall-clock at [`SCAN_TIMEOUT`] even when
+/// Scan every supported browser's tabs, concurrently. Running the scans in
+/// parallel keeps the worst-case wall-clock at [`SCAN_TIMEOUT`] even when
 /// one browser hangs.
-pub fn list_tabs() -> Vec<BrowserTabRef> {
+///
+/// `all_failed` is set when every browser we tried returned an error
+/// (timeout, permission denied, garbled output). In that case the caller
+/// should NOT cache the empty result — a retry on the next keystroke may
+/// succeed (Chrome often stutters on the first AppleScript of a switcher
+/// session). A browser that's simply not running counts as success (empty
+/// tab list, no error), so `all_failed` stays false.
+pub fn list_tabs() -> (Vec<BrowserTabRef>, bool) {
     let handles: Vec<_> = SUPPORTED
         .iter()
         .copied()
         .map(|b| std::thread::spawn(move || list_tabs_for(b)))
         .collect();
     let mut out = Vec::new();
+    let mut attempted = 0usize;
+    let mut failed = 0usize;
     for h in handles {
-        if let Ok(mut v) = h.join() {
-            out.append(&mut v);
+        attempted += 1;
+        match h.join() {
+            Ok(Ok(mut v)) => out.append(&mut v),
+            Ok(Err(())) => failed += 1,
+            Err(_) => failed += 1,
         }
     }
-    out
+    let all_failed = attempted > 0 && failed == attempted;
+    (out, all_failed)
 }
 
-/// Run the per-browser list script and parse the result. Returns an empty
-/// vec on any failure — caller doesn't care why.
-fn list_tabs_for(browser: Browser) -> Vec<BrowserTabRef> {
+/// Run the per-browser list script and parse the result. `Ok(vec)` — scan
+/// completed (possibly empty, e.g. browser not running). `Err(())` — scan
+/// actually failed (timeout, osascript error); caller may want to retry.
+fn list_tabs_for(browser: Browser) -> Result<Vec<BrowserTabRef>, ()> {
     let script = list_script(browser);
     let raw = match run_osascript(script, SCAN_TIMEOUT) {
         Ok(s) => s,
         Err(e) => {
-            tracing::debug!("{} tab scan failed: {e:#}", browser.display_name());
-            return Vec::new();
+            tracing::warn!("{} tab scan failed: {e:#}", browser.display_name());
+            return Err(());
         }
     };
     if raw.trim().is_empty() {
-        return Vec::new();
+        tracing::debug!("{} not running or no tabs", browser.display_name());
+        return Ok(Vec::new());
     }
     let icon = browser_icon_path(browser);
-    parse_tabs(browser, &raw, icon)
+    let tabs = parse_tabs(browser, &raw, icon);
+    tracing::debug!("{} tab scan: {} tabs", browser.display_name(), tabs.len());
+    Ok(tabs)
 }
 
 fn list_script(browser: Browser) -> &'static str {

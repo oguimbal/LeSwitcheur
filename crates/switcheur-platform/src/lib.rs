@@ -44,17 +44,20 @@ pub trait LlmLauncher: Send + Sync {
     fn open_llm(&self, provider: LlmProvider, prompt: &str) -> Result<()>;
 }
 
-/// Scan running browsers for their open tabs and focus a chosen tab. Chrome
-/// is the only backend today (macOS AppleScript). The contract is explicitly
-/// best-effort:
+/// Scan running browsers for their open tabs and focus a chosen tab.
+/// Supports Chrome and Safari today (macOS AppleScript). The contract is
+/// explicitly best-effort:
 ///
-/// - `list_browser_tabs` must never error — returning an empty vec for "not
-///   running" or "automation permission denied" lets the switcher silently
-///   fall through to the LLM tier.
+/// - `list_browser_tabs` must never error. Returns the tabs collected plus
+///   a boolean `all_failed` flag: `true` when every browser attempted
+///   errored out (timeout, permission denied). The caller uses that flag
+///   to decide whether to cache the empty result (success) or retry on
+///   the next keystroke (failure). A browser that simply isn't running
+///   counts as a success returning no tabs.
 /// - `activate_browser_tab` may fail (window closed between scan and pick)
 ///   and the caller reports the error through the normal activation path.
 pub trait BrowserTabSource: Send + Sync {
-    fn list_browser_tabs(&self) -> Vec<BrowserTabRef>;
+    fn list_browser_tabs(&self) -> (Vec<BrowserTabRef>, bool);
     fn activate_browser_tab(&self, t: &BrowserTabRef) -> Result<()>;
 }
 

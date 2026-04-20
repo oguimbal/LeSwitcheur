@@ -1011,13 +1011,17 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             let platform = state.platform.clone();
             let weak = entity.downgrade();
             cx.spawn(async move |cx: &mut AsyncApp| {
-                let tabs = cx
+                let (tabs, all_failed) = cx
                     .background_executor()
                     .spawn(async move { platform.list_browser_tabs() })
                     .await;
                 let items: Vec<Item> = tabs.into_iter().map(Item::from).collect();
                 let _ = weak.update(cx, |view, cx| {
-                    view.set_browser_tabs(items, cx);
+                    if all_failed && items.is_empty() {
+                        view.browser_tabs_scan_failed(cx);
+                    } else {
+                        view.set_browser_tabs(items, cx);
+                    }
                 });
             })
             .detach();
