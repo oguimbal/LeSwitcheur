@@ -33,7 +33,7 @@
     <key>NSScreenCaptureUsageDescription</key>
     <string>LeSwitcheur reads window titles to list your windows across Spaces. It does not record or capture screen contents.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>LeSwitcheur queries Google Chrome to list open tabs and switch to the one you pick from the switcher.</string>
+    <string>LeSwitcheur queries Google Chrome and Safari to list open tabs and switch to the one you pick from the switcher.</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
     <key>CFBundleURLTypes</key>

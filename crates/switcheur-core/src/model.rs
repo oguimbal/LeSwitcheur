@@ -51,12 +51,13 @@ pub enum DirSource {
     Zoxide,
 }
 
-/// Which browser a [`BrowserTabRef`] was scraped from. Chrome for v1 — the
-/// enum shape is here so Arc / Brave / Edge / Safari can be slotted in
-/// without reshaping [`Item`] or [`crate::state::SwitcherState`].
+/// Which browser a [`BrowserTabRef`] was scraped from. The enum shape lets
+/// Arc / Brave / Edge be slotted in later without reshaping [`Item`] or
+/// [`crate::state::SwitcherState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Browser {
     Chrome,
+    Safari,
 }
 
 impl Browser {
@@ -64,6 +65,7 @@ impl Browser {
     pub fn display_name(self) -> &'static str {
         match self {
             Browser::Chrome => "Google Chrome",
+            Browser::Safari => "Safari",
         }
     }
 
@@ -72,6 +74,7 @@ impl Browser {
     pub fn bundle_id(self) -> &'static str {
         match self {
             Browser::Chrome => "com.google.Chrome",
+            Browser::Safari => "com.apple.Safari",
         }
     }
 }
