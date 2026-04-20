@@ -25,11 +25,12 @@ use std::ptr;
 use std::sync::{Arc, Mutex};
 
 use accessibility_sys::{
-    kAXErrorSuccess, kAXFocusedWindowChangedNotification, kAXTitleAttribute, AXError,
-    AXObserverAddNotification, AXObserverCreate, AXObserverGetRunLoopSource,
-    AXObserverRef, AXObserverRemoveNotification, AXUIElementCopyAttributeValue,
-    AXUIElementCreateApplication, AXUIElementRef,
+    kAXErrorSuccess, kAXFocusedWindowAttribute, kAXFocusedWindowChangedNotification,
+    kAXTitleAttribute, AXError, AXObserverAddNotification, AXObserverCreate,
+    AXObserverGetRunLoopSource, AXObserverRef, AXObserverRemoveNotification,
+    AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementRef,
 };
+use core_foundation::base::CFType;
 use arc_swap::ArcSwap;
 use block2::RcBlock;
 use core_foundation::base::{CFRelease, TCFType};
@@ -105,8 +106,18 @@ impl AppActivationObserver {
                 None => return,
             };
             let pid = app.processIdentifier();
+            // Also note the app's currently-focused window so per-window MRU
+            // captures app activations that didn't go through the switcher
+            // (Dock click, Cmd-Tab, click-through from another window). Without
+            // this, an app brought forward by non-switcher means would leave
+            // its focused window stuck at an old window_rank, and the user
+            // couldn't alt-tab back to it via the per-window sort.
+            let focused_title = ax_focused_window_title(pid);
             if let Ok(mut t) = tracker.lock() {
                 t.note_app(pid);
+                if let Some(title) = focused_title {
+                    t.note_window(pid, &title);
+                }
             }
             let snapshot = running_app_snapshot(app);
             // Ignore our own activation (e.g. Settings window coming forward)
@@ -241,6 +252,32 @@ unsafe fn ax_copy_title(elem: AXUIElementRef) -> Option<String> {
     Some(s.to_string())
 }
 
+/// Query an app's current focused window title via AX. Returns `None` when
+/// the app exposes no focused window (background app, no windows open) or
+/// when the focused window has an empty/missing title.
+fn ax_focused_window_title(pid: c_int) -> Option<String> {
+    unsafe {
+        let app_elem = AXUIElementCreateApplication(pid);
+        if app_elem.is_null() {
+            return None;
+        }
+        // Own the retain returned by the `Create` call so it's released
+        // regardless of which branch we exit through.
+        let app_ref: CFType = CFType::wrap_under_create_rule(app_elem as _);
+        let raw_app = app_ref.as_CFTypeRef() as AXUIElementRef;
+        let attr = CFString::from_static_string(kAXFocusedWindowAttribute);
+        let mut value: *const c_void = ptr::null();
+        let err: AXError =
+            AXUIElementCopyAttributeValue(raw_app, attr.as_concrete_TypeRef(), &mut value);
+        if err != kAXErrorSuccess || value.is_null() {
+            return None;
+        }
+        let w: CFType = CFType::wrap_under_create_rule(value as _);
+        let w_elem = w.as_CFTypeRef() as AXUIElementRef;
+        ax_copy_title(w_elem).filter(|t| !t.is_empty())
+    }
+}
+
 /// Owns the always-on app observer and, when enabled, a per-pid window-focus
 /// observer. Mutating the tracker happens from the main thread (where all
 /// callbacks fire).
@@ -279,6 +316,12 @@ impl RecencyService {
 
     /// Start a window-focus observer for every given pid. Safe to call
     /// multiple times: any previous observers are dropped first.
+    ///
+    /// Also seeds [`RecencyTracker`] with each app's currently-focused window,
+    /// so per-window MRU ordering has something to work with before any focus
+    /// change has actually fired. Without the seed, the first switcher open
+    /// after launch would have no window ranks at all and fall back to raw
+    /// enumeration order — defeating the whole point of the per-window mode.
     pub fn enable_window_tracking(&mut self, pids: &[c_int]) {
         self.windows.clear();
         for &pid in pids {
@@ -286,6 +329,7 @@ impl RecencyService {
                 self.windows.push(obs);
             }
         }
+        seed_window_ranks(&self.tracker, pids);
         tracing::info!(
             observed = self.windows.len(),
             total = pids.len(),
@@ -301,6 +345,25 @@ impl RecencyService {
     pub fn window_tracking_enabled(&self) -> bool {
         !self.windows.is_empty()
     }
+}
+
+/// Ask AX for each app's currently-focused window and stamp it into the
+/// tracker at the current instant. Called when per-window tracking is
+/// (re-)enabled so the very first switcher open after a mode change has
+/// a usable starting order.
+fn seed_window_ranks(tracker: &Arc<Mutex<RecencyTracker>>, pids: &[c_int]) {
+    let mut seeded = 0usize;
+    let mut guard = match tracker.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    for &pid in pids {
+        if let Some(title) = ax_focused_window_title(pid) {
+            guard.note_window(pid, &title);
+            seeded += 1;
+        }
+    }
+    tracing::debug!(seeded, pids = pids.len(), "seeded window recency ranks");
 }
 
 fn current_process_bundle_id() -> Option<String> {

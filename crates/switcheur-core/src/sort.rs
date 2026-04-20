@@ -16,10 +16,16 @@ use crate::model::WindowRef;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SortOrder {
-    /// Most-recently-activated app first. Cheap: one NSWorkspace observer.
-    RecentApp,
-    /// Most-recently-focused *window* first. More precise but needs one
-    /// AXObserver per app on the focus-changed notification — costs ~1% CPU.
+    /// Most-recently-focused *window* first. Drives the alt-tab-back flow
+    /// most users expect: picking a window bumps that single window to the
+    /// top, so the "previously used window" is always one step away, even
+    /// when the user has ten instances of the same app open.
+    ///
+    /// The legacy `recent_app` value deserializes into this variant — the
+    /// old per-app grouping turned out to be unusable with multi-window
+    /// apps like VSCode (ten sibling windows clogging the top of the list
+    /// before the previous app could be reached).
+    #[serde(alias = "recent_app")]
     RecentWindow,
     /// Alphabetical by window title (fallback to app name when title empty).
     Title,
@@ -29,7 +35,10 @@ pub enum SortOrder {
 
 impl Default for SortOrder {
     fn default() -> Self {
-        Self::RecentApp
+        // Per-window MRU is the alt-tab-like behavior most users expect:
+        // picking a window bumps that specific window to the top without
+        // dragging every sibling window of the same app along with it.
+        Self::RecentWindow
     }
 }
 
@@ -73,17 +82,14 @@ impl RecencyTracker {
 /// original relative order.
 pub fn sort_items(windows: &mut [WindowRef], order: SortOrder, tracker: &RecencyTracker) {
     match order {
-        SortOrder::RecentApp => {
-            windows.sort_by_key(|w| Reverse(tracker.app_rank(w.pid)));
-        }
         SortOrder::RecentWindow => {
-            windows.sort_by_key(|w| {
-                Reverse(
-                    tracker
-                        .window_rank(w.pid, &w.title)
-                        .or_else(|| tracker.app_rank(w.pid)),
-                )
-            });
+            // No fallback to app_rank: if we fell back, every sibling window
+            // of a recently-activated app would tie at the app's rank and
+            // cluster at the top — exactly the "10 VSCode windows before the
+            // previous window" pain this mode is trying to avoid. Windows
+            // never explicitly focused drop to the bottom, and the stable
+            // sort preserves their enumeration order down there.
+            windows.sort_by_key(|w| Reverse(tracker.window_rank(w.pid, &w.title)));
         }
         SortOrder::Title => {
             windows.sort_by(|a, b| {
@@ -152,26 +158,29 @@ mod tests {
     }
 
     #[test]
-    fn recent_app_puts_last_noted_first() {
-        let mut t = RecencyTracker::new();
-        t.note_app(1);
-        sleep(Duration::from_millis(2));
-        t.note_app(2);
-        let mut ws = vec![w(1, "Old", "x"), w(2, "New", "y"), w(3, "Unknown", "z")];
-        sort_items(&mut ws, SortOrder::RecentApp, &t);
-        assert_eq!(
-            ws.iter().map(|w| w.pid).collect::<Vec<_>>(),
-            vec![2, 1, 3]
-        );
+    fn legacy_recent_app_config_migrates_to_recent_window() {
+        // Users upgrading from the pre-release default (sort_order = "recent_app")
+        // must land on RecentWindow seamlessly — the whole point of removing
+        // per-app grouping.
+        let toml = r#"sort_order = "recent_app""#;
+        #[derive(serde::Deserialize)]
+        struct Wrap {
+            sort_order: SortOrder,
+        }
+        let w: Wrap = toml::from_str(toml).expect("deserialize");
+        assert_eq!(w.sort_order, SortOrder::RecentWindow);
     }
 
     #[test]
-    fn recent_window_prefers_specific_window_then_app_fallback() {
+    fn recent_window_ranks_seen_windows_above_unseen() {
         let mut t = RecencyTracker::new();
         t.note_app(1);
         sleep(Duration::from_millis(2));
         t.note_window(2, "focused");
-        // pid=2 wins thanks to window note; pid=1 has an app note; pid=3 has nothing.
+        // Only (2,"focused") has a window_rank. The other rows have none —
+        // per-window MRU deliberately does NOT fall back to app_rank, so
+        // those sink below, preserving their enumeration order among each
+        // other (stable sort).
         let mut ws = vec![
             w(1, "A", "other"),
             w(2, "B", "focused"),
@@ -180,10 +189,10 @@ mod tests {
         ];
         sort_items(&mut ws, SortOrder::RecentWindow, &t);
         let ordered: Vec<_> = ws.iter().map(|w| (w.pid, w.title.as_str())).collect();
-        // pid 2 "focused" first (window rank), pid 2 "not-focused" next (app rank
-        // inherited from note_window bumping the app too), pid 1 "other" (old
-        // app rank), pid 3 last (unknown).
         assert_eq!(ordered[0], (2, "focused"));
-        assert_eq!(ordered[3], (3, "unseen"));
+        assert_eq!(
+            &ordered[1..],
+            &[(1, "other"), (2, "not-focused"), (3, "unseen")][..]
+        );
     }
 }

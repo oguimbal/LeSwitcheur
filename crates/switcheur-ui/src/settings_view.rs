@@ -1937,7 +1937,6 @@ impl SettingsView {
         let theme = self.theme;
         let current = self.sort_order;
         let options = [
-            SortOrder::RecentApp,
             SortOrder::RecentWindow,
             SortOrder::Title,
             SortOrder::AppName,
@@ -2513,7 +2512,6 @@ fn shortcut_row(
 
 fn sort_order_label(order: SortOrder) -> SharedString {
     match order {
-        SortOrder::RecentApp => tr("sort.recent_app"),
         SortOrder::RecentWindow => tr("sort.recent_window"),
         SortOrder::Title => tr("sort.title"),
         SortOrder::AppName => tr("sort.app_name"),
@@ -2522,7 +2520,6 @@ fn sort_order_label(order: SortOrder) -> SharedString {
 
 fn sort_order_hint(order: SortOrder) -> Option<SharedString> {
     match order {
-        SortOrder::RecentApp => Some(tr("sort.recent_app_hint")),
         SortOrder::RecentWindow => Some(tr("sort.recent_window_hint")),
         SortOrder::Title => None,
         SortOrder::AppName => None,

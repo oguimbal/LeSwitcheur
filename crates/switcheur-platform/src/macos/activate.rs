@@ -133,6 +133,12 @@ pub fn activate_window(win: &WindowRef) -> Result<()> {
         // if we don't currently hold activation — that's the signal that the
         // switcher panel wasn't opened with `cx.activate(true)`, or the panel
         // was already closed before we got here.
+        //
+        // Pass empty options (NOT `ActivateAllWindows`): we target one specific
+        // window and let SLPS raise it below. With `ActivateAllWindows`, every
+        // window of the app is lifted above other apps' windows, so a user
+        // with 10 VSCode windows ends up with all 10 stacked above the
+        // previous app — breaking the "alt-tab back" flow.
         {
             use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
             if let Some(running) =
@@ -141,7 +147,7 @@ pub fn activate_window(win: &WindowRef) -> Result<()> {
                 let us = NSRunningApplication::currentApplication();
                 let ok = running.activateFromApplication_options(
                     &us,
-                    NSApplicationActivationOptions::ActivateAllWindows,
+                    NSApplicationActivationOptions::empty(),
                 );
                 tracing::debug!(pid = win.pid, ok, "activateFromApplication");
             } else {
