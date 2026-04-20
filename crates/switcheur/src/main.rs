@@ -997,6 +997,35 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             }
             return;
         }
+        SwitcherViewEvent::RemoveDirRequested(d) => {
+            let Some(bin) = state.zoxide_bin.borrow().clone() else {
+                return;
+            };
+            // Drop the row up front so the click feels instant. If the
+            // subprocess ends up failing (missing entry, permission issue)
+            // the next zoxide query will just not bring the path back.
+            let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
+            if let Some(entity) = entity_opt {
+                let path = d.path.clone();
+                let _ = cx.update_entity(&entity, |view, cx| view.drop_dir(&path, cx));
+            }
+            let path = d.path.clone();
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                let res = cx
+                    .background_executor()
+                    .spawn({
+                        let bin = bin.clone();
+                        let path = path.clone();
+                        async move { switcheur_platform::zoxide::remove(&bin, &path) }
+                    })
+                    .await;
+                if let Err(e) = res {
+                    tracing::warn!("zoxide remove {}: {e:#}", path.display());
+                }
+            })
+            .detach();
+            return;
+        }
         SwitcherViewEvent::NeedsBrowserTabs => {
             // Fired once per switcher session the first time the fallback
             // tier is reached and no scan has been delivered yet. Shell out
@@ -1190,6 +1219,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
         SwitcherViewEvent::LicenseActivateRequested
         | SwitcherViewEvent::LicenseDismissed
         | SwitcherViewEvent::CloseWindowRequested(_)
+        | SwitcherViewEvent::RemoveDirRequested(_)
         | SwitcherViewEvent::UpdateDownloadRequested
         | SwitcherViewEvent::UpdateDismissed
         | SwitcherViewEvent::QueryChanged(_)

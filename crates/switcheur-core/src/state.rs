@@ -1,6 +1,7 @@
 //! UI-agnostic state machine. The GPUI view reads from and drives this.
 //! Keeping it pure Rust makes every transition unit-testable.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::matcher::{FuzzyMatcher, MatchResult};
@@ -176,6 +177,29 @@ impl SwitcherState {
     pub fn remove_window(&mut self, id: u64) {
         self.items.retain(|it| !matches!(it, Item::Window(w) if w.id == id));
         self.rerank();
+    }
+
+    /// Drop the directory with the given path from the dirs pane. Used after
+    /// the user clicks × on a zoxide row so the row vanishes before the next
+    /// zoxide query has been issued.
+    pub fn remove_dir(&mut self, path: &Path) {
+        let before = self.dirs.len();
+        self.dirs
+            .retain(|it| !matches!(it, Item::Dir(d) if d.path == path));
+        if self.dirs.len() == before {
+            return;
+        }
+        if self.dirs.is_empty() {
+            // Emptying the pane: hand focus back to windows and rerank so the
+            // "Ask LLM" fallback can come back in (it was suppressed while
+            // dirs were visible).
+            if self.active_section == Section::Dirs {
+                self.active_section = Section::Windows;
+            }
+            self.rerank();
+        } else if self.selected_dir >= self.dirs.len() {
+            self.selected_dir = self.dirs.len() - 1;
+        }
     }
 
     /// Replace the installed-program catalogue. Called once on startup (and on
@@ -543,9 +567,17 @@ impl Default for SwitcherState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ProgramRef, WindowRef};
+    use crate::model::{DirRef, DirSource, ProgramRef, WindowRef};
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    fn dir(path: &str) -> Item {
+        Item::Dir(Arc::new(DirRef::new(
+            PathBuf::from(path),
+            DirSource::Zoxide,
+            None,
+        )))
+    }
 
     fn win(app: &str, title: &str) -> Item {
         Item::Window(Arc::new(WindowRef {
@@ -1045,6 +1077,52 @@ mod tests {
             .filtered()
             .iter()
             .all(|m| matches!(m.item, Item::AskLlm { .. })));
+    }
+
+    // --- remove_dir tests ---
+
+    #[test]
+    fn remove_dir_drops_matching_entry() {
+        let mut s = SwitcherState::new();
+        s.set_dirs(vec![dir("/a"), dir("/b"), dir("/c")]);
+        s.remove_dir(Path::new("/b"));
+        assert_eq!(s.dirs().len(), 2);
+        assert!(s.dirs().iter().all(|it| !matches!(
+            it,
+            Item::Dir(d) if d.path == PathBuf::from("/b")
+        )));
+    }
+
+    #[test]
+    fn remove_dir_missing_is_noop() {
+        let mut s = SwitcherState::new();
+        s.set_dirs(vec![dir("/a")]);
+        s.remove_dir(Path::new("/missing"));
+        assert_eq!(s.dirs().len(), 1);
+    }
+
+    #[test]
+    fn remove_dir_emptying_pane_returns_focus_to_windows() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_dirs(vec![dir("/only")]);
+        s.focus_dirs();
+        assert_eq!(s.active_section(), Section::Dirs);
+        s.remove_dir(Path::new("/only"));
+        assert!(s.dirs().is_empty());
+        assert_eq!(s.active_section(), Section::Windows);
+    }
+
+    #[test]
+    fn remove_dir_clamps_selection() {
+        let mut s = SwitcherState::new();
+        s.set_dirs(vec![dir("/a"), dir("/b"), dir("/c")]);
+        s.focus_dirs();
+        s.move_down();
+        s.move_down(); // selected_dir = 2
+        assert_eq!(s.selected_dir_idx(), 2);
+        s.remove_dir(Path::new("/c"));
+        assert_eq!(s.selected_dir_idx(), 1);
     }
 
     #[test]

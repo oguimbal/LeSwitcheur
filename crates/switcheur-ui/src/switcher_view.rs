@@ -6,10 +6,11 @@ use gpui::{
     MouseButton, MouseDownEvent, ParentElement, Render, ScrollStrategy, SharedString, Styled,
     Subscription, Transformation, UniformListScrollHandle, Window,
 };
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use switcheur_core::{Item, ProgramRef, Section, SwitcherState, WindowRef};
+use switcheur_core::{DirRef, Item, ProgramRef, Section, SwitcherState, WindowRef};
 use switcheur_i18n::tr;
 
 use crate::actions::{
@@ -44,6 +45,10 @@ pub enum SwitcherViewEvent {
     /// User clicked the × on a window row. Host closes the target window via
     /// the platform and refreshes the list; the panel stays open.
     CloseWindowRequested(Arc<WindowRef>),
+    /// User clicked the × on a zoxide directory row. Host runs
+    /// `zoxide remove <path>` off the UI thread; the row is dropped from the
+    /// view optimistically so the UI is immediate.
+    RemoveDirRequested(Arc<DirRef>),
     /// User clicked "Download" on the update banner. Host starts the DMG
     /// download and flips the banner to `UpdateBannerState::Downloading`.
     UpdateDownloadRequested,
@@ -207,6 +212,14 @@ impl SwitcherView {
     /// to propagate through `list_windows`.
     pub fn drop_window(&mut self, id: u64, cx: &mut Context<Self>) {
         self.state.remove_window(id);
+        self.emit_height_delta_if_changed(cx);
+        cx.notify();
+    }
+
+    /// Drop the zoxide dir row matching `path` right away — optimistic,
+    /// mirrors [`Self::drop_window`] for the dirs pane.
+    pub fn drop_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.state.remove_dir(path);
         self.emit_height_delta_if_changed(cx);
         cx.notify();
     }
@@ -492,6 +505,18 @@ impl SwitcherView {
         }
         self.state.set_selected_dir(idx);
         cx.notify();
+    }
+
+    /// Click on the dir row's × button: ask the host to run `zoxide remove`
+    /// for that path. Row-level click is short-circuited by the button's
+    /// `mouse_down` propagation stop.
+    fn on_dir_remove_clicked(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some(item) = self.state.dirs().get(idx) else {
+            return;
+        };
+        if let Item::Dir(d) = item {
+            cx.emit(SwitcherViewEvent::RemoveDirRequested(d.clone()));
+        }
     }
 
     fn on_focus_next_pane(&mut self, _: &FocusNextPane, _: &mut Window, cx: &mut Context<Self>) {
@@ -1133,6 +1158,40 @@ fn render_close_button(
         .into_any_element()
 }
 
+/// Mirror of [`render_close_button`] for the dirs pane: clicking it asks the
+/// host to run `zoxide remove` against the row's path. Distinct id tag so
+/// GPUI's interaction state doesn't collide with the window-row close button.
+fn render_dir_remove_button(
+    idx: usize,
+    theme: &Theme,
+    cx: &mut Context<SwitcherView>,
+) -> AnyElement {
+    let muted = theme.muted;
+    let foreground = theme.foreground;
+    let hover_bg = theme.border;
+    div()
+        .id(("switcher-dir-remove-btn", idx))
+        .w(px(20.0))
+        .h(px(20.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .text_size(px(13.0))
+        .text_color(muted)
+        .cursor_pointer()
+        .hover(move |d| d.bg(hover_bg).text_color(foreground))
+        .on_mouse_down(
+            MouseButton::Left,
+            |_: &MouseDownEvent, _w, cx| cx.stop_propagation(),
+        )
+        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+            this.on_dir_remove_clicked(idx, cx);
+        }))
+        .child("×")
+        .into_any_element()
+}
+
 /// Visible only when the query has at least one program match. Returns an
 /// `Option<impl IntoElement>` so `.children(...)` quietly collapses when the
 /// section should be hidden (no empty placeholder per product spec).
@@ -1209,6 +1268,7 @@ fn render_dirs_panel(
                 indices: Vec::new(),
             };
             render_row(&mr, section_active && i == selected, theme)
+                .child(render_dir_remove_button(i, theme, cx))
                 .id(("switcher-dir-row", i))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {

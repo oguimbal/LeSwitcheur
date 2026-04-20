@@ -5,6 +5,7 @@
 //! shell-out to `zoxide query --list --score [terms…]` — measured at ~6 ms
 //! for ~160 entries on a Mac, effectively free.
 
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -92,6 +93,20 @@ fn parse_query_output(stdout: &str, limit: usize) -> Vec<ZoxideHit> {
         })
         .take(limit)
         .collect()
+}
+
+/// Remove `path` from the zoxide database.
+///
+/// Shells out to `zoxide remove <path>` — the CLI expects an exact match and
+/// exits non-zero if the entry isn't in the database. Callers treat that as a
+/// benign race (user clicked × on a row whose entry zoxide had already
+/// dropped) and just log; the UI removes the row optimistically regardless.
+pub fn remove(bin: &Path, path: &Path) -> Result<()> {
+    let status = Command::new(bin).arg("remove").arg(path).status()?;
+    if !status.success() {
+        anyhow::bail!("zoxide remove exited with {status}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
