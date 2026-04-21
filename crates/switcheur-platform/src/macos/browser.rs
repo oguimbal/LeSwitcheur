@@ -209,20 +209,32 @@ fn parse_tabs(browser: Browser, raw: &str, icon: Option<PathBuf>) -> Vec<Browser
 /// off to the shared native activation path so cross-Space / fullscreen /
 /// un-minimize behavior matches any other window pick.
 ///
-/// Two stages:
-/// 1. AppleScript: only the browser knows how to switch tabs. We set the
-///    active tab on the target window (identified by the browser's
-///    AppleScript `id`, which is distinct from any CGWindowID). We
-///    deliberately do **not** try to un-minimize or reorder through
-///    AppleScript — scripting dictionaries don't always honor those on
-///    minimized windows, and the native path below handles both cleanly.
-/// 2. Native activation: list the browser's windows via the regular
-///    enumerator, match the target by the tab title that AppleScript just
-///    made current, and call [`super::activate::activate_window`]. That's
-///    the same code path a normal Cmd+Tab pick goes through, so minimize,
-///    cross-Space, and fullscreen-Space behavior matches what users
-///    already expect.
+/// Two stages — AppleScript only drives tab-internal content; native AX/
+/// SLPS owns window management (unminimize, focus, raise). AppleScript
+/// window writes (`miniaturized`, `index`, `activate`) are unreliable
+/// across apps and macOS versions.
+///
+/// 1. Switch tab via AppleScript. This works on miniaturized windows —
+///    Chrome/Safari update their internal state (and, empirically,
+///    refresh the window's AX title to reflect the newly-active tab)
+///    even when the window isn't visible.
+/// 2. Enumerate browser windows and match the target by CGWindowID
+///    (Safari only — its `id of window` == NSWindow windowNumber), then
+///    by `t.title`. Chrome decorates the AX title with suffixes like
+///    `" - High memory usage - 2.4 GB - Google Chrome – {profile}"`, so
+///    exact equality won't match — fall back to `starts_with` then
+///    `contains`. Safari's AX title equals the tab title verbatim, so
+///    the exact branch hits first.
+/// 3. [`super::activate::activate_window`] — the Cmd+Tab path:
+///    kAXMinimizedAttribute write + AXRaise (SLPS skipped on fresh
+///    un-miniaturize; see `activate.rs`).
 pub fn activate_tab(t: &BrowserTabRef) -> Result<()> {
+    let bundle = t.browser.bundle_id();
+
+    // AppleScript tab switch. Safe on miniaturized windows; Chrome and
+    // Safari both refresh the window's AX title to the new active tab's
+    // page title as part of this call, so post-switch matching against
+    // `t.title` below is reliable.
     let script = activate_script(t);
     run_osascript(&script, SCAN_TIMEOUT).with_context(|| {
         format!(
@@ -233,51 +245,53 @@ pub fn activate_tab(t: &BrowserTabRef) -> Result<()> {
         )
     })?;
 
-    // After switching the tab, the target window's AX title reflects the
-    // tab title we captured at scan time. Match it to find the real
-    // CGWindowID + minimized state, then hand off to the shared activator.
-    //
-    // `show_all_spaces=true` so cross-Space and fullscreen-Space targets
-    // still surface — without it the AX layer only reports windows on the
-    // current Space. Minimized windows show up with `minimized=true` so
-    // `activate_window` knows to AX-un-minimize before the SLPS dance.
-    let bundle = t.browser.bundle_id();
-    let all = super::windows::list_windows(true).unwrap_or_default();
-    let title_snapshot = t.title.as_ref();
-    let mut browser_windows = all
+    // `show_all_spaces=true` surfaces cross-Space and miniaturized windows.
+    let browser_windows: Vec<WindowRef> = super::windows::list_windows(true)
+        .unwrap_or_default()
         .into_iter()
-        .filter(|w| w.bundle_id.as_deref() == Some(bundle));
-    // Prefer an exact title match (covers the common case even when the
-    // browser has multiple windows on multiple Spaces). If no title matches
-    // — possible when the page title hasn't updated yet, or collides —
-    // fall back to the frontmost window (first one enumerated in AX
-    // order), which is the best guess available.
-    let first: Option<WindowRef> = browser_windows.next();
-    let target = if first
-        .as_ref()
-        .map(|w| w.title == title_snapshot)
-        .unwrap_or(false)
-    {
-        first
-    } else {
-        let mut matched: Option<WindowRef> = None;
-        for w in browser_windows {
-            if w.title == title_snapshot {
-                matched = Some(w);
-                break;
-            }
-        }
-        matched.or(first)
-    };
+        .filter(|w| w.bundle_id.as_deref() == Some(bundle))
+        .collect();
+
+    // Matching order: CGWindowID (Safari exact) → AX title == t.title
+    // (Safari exact) → `starts_with(t.title)` (Chrome, whose AX title
+    // decorates the page title with app/profile/memory suffixes) →
+    // `contains(t.title)`. NO `first()` fallback: picking an arbitrary
+    // browser window on mismatch focuses the wrong window (the original
+    // complaint). Unmatched degrades to `activate_app` — browser comes
+    // forward without yanking focus to a random sibling.
+    let tt: &str = t.title.as_ref();
+    let target: Option<WindowRef> = browser_windows
+        .iter()
+        .find(|w| w.id as i64 == t.window_id)
+        .or_else(|| browser_windows.iter().find(|w| w.title == tt))
+        .or_else(|| {
+            (!tt.is_empty()).then(|| browser_windows.iter().find(|w| w.title.starts_with(tt)))?
+        })
+        .or_else(|| {
+            (!tt.is_empty()).then(|| browser_windows.iter().find(|w| w.title.contains(tt)))?
+        })
+        .cloned();
+    tracing::debug!(
+        browser = t.browser.display_name(),
+        window_id = t.window_id,
+        tab_index = t.tab_index,
+        t_title = %tt,
+        candidates = browser_windows.len(),
+        candidate_titles = ?browser_windows.iter().map(|w| &w.title).collect::<Vec<_>>(),
+        target_found = target.is_some(),
+        target_cg_id = target.as_ref().map(|w| w.id),
+        target_minimized = target.as_ref().map(|w| w.minimized),
+        "activate_tab target lookup"
+    );
+
     match target {
         Some(w) => super::activate::activate_window(&w),
         None => {
-            // No browser window surfaced by either AX or CG — fall back to
-            // activating the app as a whole so the user at least lands in
-            // the browser. Happens when the browser was quit between scan
-            // and click.
+            // Browser quit between scan and click, or AX hasn't surfaced
+            // any window for this bundle. Fall back to app-level focus so
+            // the user at least lands in the browser.
             tracing::debug!(
-                "{} window not found post-applescript; falling back to activate_app",
+                "{} window not found; falling back to activate_app",
                 t.browser.display_name()
             );
             let pid = browser_pid(t.browser);

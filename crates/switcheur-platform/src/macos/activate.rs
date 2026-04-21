@@ -128,6 +128,15 @@ pub fn activate_window(win: &WindowRef) -> Result<()> {
         // Space and targeting it for SLPS would no-op (already frontmost on
         // its Space) and hide the real cross-Space behavior.
         let target = find_matching_window(&windows, win);
+        tracing::debug!(
+            pid = win.pid,
+            wid = win.id,
+            title = %win.title,
+            minimized = win.minimized,
+            ax_windows = windows.len(),
+            ax_target_found = target.is_some(),
+            "activate_window invoked"
+        );
 
         // Step 1 (see module doc): yield-based activation. Returns `ok=false`
         // if we don't currently hold activation — that's the signal that the
@@ -158,17 +167,31 @@ pub fn activate_window(win: &WindowRef) -> Result<()> {
         // Un-minimize BEFORE the SLPS/raise dance. Only works if we have the
         // real AX window element — skip silently otherwise (the target isn't
         // actually minimized from AX's perspective if AX can't see it).
+        let mut unminimized_now = false;
         if win.minimized {
-            if let Some(t) = target {
-                let min_attr = CFString::from_static_string(kAXMinimizedAttribute);
-                let f = CFBoolean::false_value();
-                let err = AXUIElementSetAttributeValue(
-                    t,
-                    min_attr.as_concrete_TypeRef(),
-                    f.as_CFTypeRef(),
-                );
-                if err != kAXErrorSuccess {
-                    tracing::warn!("AX un-minimize failed err={err}");
+            match target {
+                Some(t) => {
+                    let min_attr = CFString::from_static_string(kAXMinimizedAttribute);
+                    let f = CFBoolean::false_value();
+                    let err = AXUIElementSetAttributeValue(
+                        t,
+                        min_attr.as_concrete_TypeRef(),
+                        f.as_CFTypeRef(),
+                    );
+                    if err == kAXErrorSuccess {
+                        unminimized_now = true;
+                        tracing::debug!(pid = win.pid, wid = win.id, "AX un-minimize ok");
+                    } else {
+                        tracing::warn!(pid = win.pid, wid = win.id, err, "AX un-minimize failed");
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        pid = win.pid,
+                        wid = win.id,
+                        title = %win.title,
+                        "cannot un-minimize: AX window element not found in app's kAXWindows"
+                    );
                 }
             }
         }
@@ -182,16 +205,27 @@ pub fn activate_window(win: &WindowRef) -> Result<()> {
         // Do NOT write kAXMain / kAXFocused afterwards: those race the SLPS-
         // driven key-window transition and produce "window forward but
         // keyboard focus still on previous app". AltTab and yabai omit them.
+        //
+        // Skip SLPS entirely when we just un-miniaturized: firing SLPS while
+        // Chrome's Dock-restore animation is in flight puts the window in a
+        // half-restored state (visually still minimized, AX state says
+        // restored). The AX un-minimize alone pulls the window to front on
+        // the current Space; combined with the NSRunningApplication activate
+        // above, that's sufficient for the common case. Cross-Space
+        // miniaturized targets are rare enough to skip here — the user can
+        // re-pick once the window has restored.
         let wid: Option<u32> = if win.id > 0 && win.id <= u32::MAX as u64 {
             Some(win.id as u32)
         } else {
             target.and_then(|t| ax_window_id(t)).map(|id| id as u32)
         };
-        match wid {
-            Some(wid) => cross_space_focus(win.pid, wid),
-            None => {
-                tracing::debug!(pid = win.pid, "no CGWindowID available, falling back to app-level focus");
-                focus_pid(win.pid)?;
+        if !unminimized_now {
+            match wid {
+                Some(wid) => cross_space_focus(win.pid, wid),
+                None => {
+                    tracing::debug!(pid = win.pid, "no CGWindowID available, falling back to app-level focus");
+                    focus_pid(win.pid)?;
+                }
             }
         }
 
