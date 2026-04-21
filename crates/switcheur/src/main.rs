@@ -2827,6 +2827,7 @@ fn start_update_download(entity: Entity<SwitcherView>, state: AppState, cx: &mut
     };
     *state.update_stage.borrow_mut() = UpdateBannerState::Downloading;
     cx.spawn(async move |cx: &mut AsyncApp| {
+        let executor = cx.background_executor().clone();
         let (tx, rx) = async_channel::bounded::<Option<std::path::PathBuf>>(1);
         let url = info.url.clone();
         let version = info.version.clone();
@@ -2834,7 +2835,7 @@ fn start_update_download(entity: Entity<SwitcherView>, state: AppState, cx: &mut
             let _ = tx.send_blocking(blocking_download_dmg(&url, &version));
         });
         let path = rx.recv().await.ok().flatten();
-        let _ = cx.update(|cx| match path {
+        let opened = cx.update(|cx| match path {
             Some(p) => {
                 if let Err(e) = open::that(&p) {
                     tracing::warn!("open DMG: {e}");
@@ -2842,6 +2843,7 @@ fn start_update_download(entity: Entity<SwitcherView>, state: AppState, cx: &mut
                 *state.update_stage.borrow_mut() = UpdateBannerState::Ready;
                 let _ = entity
                     .update(cx, |v, cx| v.set_update_banner(UpdateBannerState::Ready, cx));
+                true
             }
             None => {
                 // Revert to Available so the user can retry.
@@ -2849,8 +2851,13 @@ fn start_update_download(entity: Entity<SwitcherView>, state: AppState, cx: &mut
                 let _ = entity.update(cx, |v, cx| {
                     v.set_update_banner(UpdateBannerState::Available, cx)
                 });
+                false
             }
         });
+        if opened {
+            executor.timer(Duration::from_secs(2)).await;
+            cx.update(|cx| cx.quit());
+        }
     })
     .detach();
 }
