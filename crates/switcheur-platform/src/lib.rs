@@ -4,8 +4,11 @@
 //! The trait is intentionally narrow — if we ever port to Linux or Windows,
 //! only this crate needs implementing.
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use anyhow::Result;
-use switcheur_core::{AppRef, BrowserTabRef, HotkeySpec, LlmProvider, ProgramRef, WindowRef};
+use switcheur_core::{AppRef, BrowserTabRef, DirSourceId, HotkeySpec, LlmProvider, ProgramRef, WindowRef};
 
 /// Source of truth for what's currently runnable and how to focus it.
 pub trait WindowSource: Send + Sync {
@@ -59,6 +62,91 @@ pub trait LlmLauncher: Send + Sync {
 pub trait BrowserTabSource: Send + Sync {
     fn list_browser_tabs(&self) -> (Vec<BrowserTabRef>, bool);
     fn activate_browser_tab(&self, t: &BrowserTabRef) -> Result<()>;
+}
+
+/// One result from a [`DirectorySource`] query — a path the UI turns into a
+/// `DirRef` row in the right-side pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirHit {
+    pub path: PathBuf,
+    /// True for directories, false for files. Drives the reduced Open-With
+    /// popover for file rows.
+    pub is_dir: bool,
+}
+
+/// Backend that feeds the right-side directory pane. Implementations must be
+/// cheap to `query` (results are fetched on every keystroke off the UI
+/// thread) and must degrade silently to an empty vec on error — the rest of
+/// the switcher has to keep working.
+pub trait DirectorySource: Send + Sync {
+    /// Identity of this source. Used for telemetry and to stamp hits with a
+    /// `switcheur_core::DirSource` label.
+    fn id(&self) -> DirSourceId;
+
+    /// Top-N hits matching `terms`. Empty `terms` returns the source's native
+    /// "most relevant" list (e.g. zoxide's top frecency entries).
+    fn query(&self, terms: &str, limit: usize) -> Vec<DirHit>;
+
+    /// Remove a path from the source's index (zoxide's "forget this entry"
+    /// action, surfaced as the × button on each row). Sources that don't
+    /// own a mutable index return an error and advertise `supports_remove()
+    /// == false` so the UI hides the button.
+    fn remove(&self, path: &Path) -> Result<()>;
+
+    /// Whether the × button should be rendered on this source's rows.
+    fn supports_remove(&self) -> bool {
+        false
+    }
+}
+
+/// Describes a [`DirectorySource`] the user can pick from the Settings
+/// dropdown, including whether the backing tool is currently available.
+/// `install_url` is only surfaced when `available == false`.
+#[derive(Debug, Clone)]
+pub struct DirSourceEntry {
+    pub id: DirSourceId,
+    pub available: bool,
+    pub install_url: Option<&'static str>,
+}
+
+/// Enumerate every known directory source with its current availability on
+/// this machine. `Disabled` is always present and always available.
+pub fn detect_dir_sources() -> Vec<DirSourceEntry> {
+    let zoxide_available = zoxide::detect().is_some();
+    vec![
+        DirSourceEntry {
+            id: DirSourceId::Disabled,
+            available: true,
+            install_url: None,
+        },
+        DirSourceEntry {
+            id: DirSourceId::Zoxide,
+            available: zoxide_available,
+            install_url: Some("https://github.com/ajeetdsouza/zoxide#installation"),
+        },
+        DirSourceEntry {
+            id: DirSourceId::Spotlight,
+            available: cfg!(target_os = "macos"),
+            install_url: None,
+        },
+    ]
+}
+
+/// Instantiate a concrete [`DirectorySource`] for the given id, or `None`
+/// when the backing tool isn't installed (or when `id == Disabled`).
+pub fn build_dir_source(id: DirSourceId) -> Option<Arc<dyn DirectorySource>> {
+    match id {
+        DirSourceId::Disabled => None,
+        DirSourceId::Zoxide => zoxide::detect().map(|bin| {
+            Arc::new(zoxide::ZoxideSource::new(bin)) as Arc<dyn DirectorySource>
+        }),
+        #[cfg(target_os = "macos")]
+        DirSourceId::Spotlight => {
+            Some(Arc::new(macos::spotlight::SpotlightSource::new()) as Arc<dyn DirectorySource>)
+        }
+        #[cfg(not(target_os = "macos"))]
+        DirSourceId::Spotlight => None,
+    }
 }
 
 /// Events delivered when the user presses the registered hotkey.

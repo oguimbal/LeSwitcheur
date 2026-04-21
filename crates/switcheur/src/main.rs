@@ -20,15 +20,17 @@ use gpui::{
     WindowOptions,
 };
 use switcheur_core::{
-    sort_items, AppMatchSet, Appearance, Config, ExclusionFilter, Item, RecencyTracker, SortOrder,
+    sort_items, AppMatchSet, Appearance, Config, DirSourceId, ExclusionFilter, Item,
+    RecencyTracker, SortOrder,
 };
 use switcheur_platform::{
-    default_platform, ensure_accessibility, has_screen_recording_permission,
-    prompt_input_monitoring, register_hotkey, request_accessibility_prompt,
-    request_screen_recording_permission, set_accessory_activation_policy, startup,
-    BrowserTabSource, ExclusionCell, FocusedAppCell, HotkeyEvent, LlmLauncher, MacHotkeyService,
-    MacPlatform, ProgramSource, QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService,
-    ScrollDir, SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService, WindowSource,
+    build_dir_source, default_platform, detect_dir_sources, ensure_accessibility,
+    has_screen_recording_permission, prompt_input_monitoring, register_hotkey,
+    request_accessibility_prompt, request_screen_recording_permission,
+    set_accessory_activation_policy, startup, BrowserTabSource, DirSourceEntry, DirectorySource,
+    ExclusionCell, FocusedAppCell, HotkeyEvent, LlmLauncher, MacHotkeyService, MacPlatform,
+    ProgramSource, QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService, ScrollDir,
+    SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService, WindowSource,
 };
 use switcheur_ui::{
     onboarding_view::{OnboardingView, OnboardingViewEvent},
@@ -266,6 +268,7 @@ fn main() -> Result<()> {
             None => false,
         };
 
+        let initial_dir_source_id = config.dir_source;
         let state = AppState {
             platform,
             hotkey,
@@ -289,12 +292,16 @@ fn main() -> Result<()> {
             focused,
             hotkey_excluded,
             quick_type_excluded,
-            // Resolve once at boot. macOS GUI apps don't see the user's
-            // shell PATH unless we walk it explicitly, so the detector
-            // probes both PATH and well-known absolute install locations.
-            zoxide_bin: Rc::new(RefCell::new(switcheur_platform::zoxide::detect())),
+            // Resolve once at boot. Pick the source from config (zoxide,
+            // spotlight, disabled) and ask the platform to build it. Zoxide
+            // degrades to `None` here when the binary isn't on disk even if
+            // the config still says `Zoxide` — matches the silent-degrade
+            // behaviour the old toggle had.
+            dir_source: Rc::new(RefCell::new(build_dir_source(initial_dir_source_id))),
             open_with: Rc::new(RefCell::new(None)),
             open_with_entries: Rc::new(RefCell::new(Vec::new())),
+            open_with_file_entries: Rc::new(RefCell::new(Vec::new())),
+            dir_query_gen: Rc::new(Cell::new(0)),
         };
         if open_on_start {
             tracing::info!("cold launch: triggering switcher on startup");
@@ -375,19 +382,30 @@ struct AppState {
     hotkey_excluded: ExclusionCell,
     /// Apps where Quick Type passes through instead of intercepting.
     quick_type_excluded: ExclusionCell,
-    /// Path to the user's `zoxide` binary, resolved once at boot. `None` when
-    /// zoxide isn't installed — the right-side dirs panel stays hidden then.
-    zoxide_bin: Rc<RefCell<Option<std::path::PathBuf>>>,
-    /// The floating "Open With" popover attached to the selected zoxide row.
+    /// Active backend feeding the right-side directory pane: zoxide,
+    /// Spotlight, or nothing at all. Rebuilt from `Config::dir_source` at
+    /// boot and whenever the user changes the Settings dropdown.
+    dir_source: Rc<RefCell<Option<Arc<dyn DirectorySource>>>>,
+    /// The floating "Open With" popover attached to the selected dir row.
     /// Opened lazily the first time the Dirs pane gains focus with at least
     /// one alternative app detected; closed whenever the switcher itself
     /// closes or the pane loses focus.
     open_with: Rc<RefCell<Option<OpenWithSlot>>>,
-    /// Popover entry list computed for the current switcher session. First
-    /// entry is the default (greyed), rest are the selectable alternatives
-    /// (MRU-first). Rebuilt on every switcher open so the user sees apps
-    /// installed between sessions, and cleared when the switcher closes.
+    /// Popover entry list for *folder* rows. First entry is the default
+    /// (greyed), rest are the selectable alternatives (MRU-first). Rebuilt
+    /// on every switcher open so the user sees apps installed between
+    /// sessions, and cleared when the switcher closes.
     open_with_entries: Rc<RefCell<Vec<OpenWithEntry>>>,
+    /// Popover entry list for *file* rows (Spotlight only — zoxide never
+    /// returns files). Two entries: `Open` (system default, greyed) and
+    /// `Show in <default folder opener>` (reveal + select the file in the
+    /// chosen Finder / Marta / ForkLift). Built once per session alongside
+    /// `open_with_entries`.
+    open_with_file_entries: Rc<RefCell<Vec<OpenWithEntry>>>,
+    /// Monotonic generation bumped on every `QueryChanged` so slow in-flight
+    /// dir-source queries whose results arrive after a newer keystroke can
+    /// drop their output (and avoid clearing the spinner prematurely).
+    dir_query_gen: Rc<Cell<u64>>,
 }
 
 /// Live popover window + its state. Mirrors [`WindowSlot`] but carries the
@@ -905,30 +923,42 @@ fn open_switcher_with_items(
     );
     let llm_order = state.config.borrow().llm_provider_order.clone();
     let ask_llm_enabled = state.config.borrow().ask_llm_enabled;
-    // Zoxide is enabled only if both the user setting is on AND the binary
-    // was found at boot. The view emits QueryChanged events only when on,
-    // so the host's zoxide call below stays cheap when off.
-    let zoxide_enabled = state.config.borrow().zoxide_integration
-        && state.zoxide_bin.borrow().is_some();
+    // Dirs pane is enabled iff a source was successfully built: user picked
+    // a backend and its tool is actually available. The view emits
+    // QueryChanged events only when on, so the host's source.query() call
+    // below stays cheap when off.
+    let dirs_enabled = state.dir_source.borrow().is_some();
+    let dirs_removable = state
+        .dir_source
+        .borrow()
+        .as_ref()
+        .map(|s| s.supports_remove())
+        .unwrap_or(false);
     let browser_tabs_enabled = state.config.borrow().browser_tabs_integration;
 
-    // Compute the "Open With" popover entry list once per switcher session
-    // so we don't re-scan the Applications directory on every hover. Stored
-    // on AppState; consulted by the popover open/activate handlers below.
+    // Compute the "Open With" popover entry lists once per switcher session
+    // so we don't re-scan the Applications directory on every hover. One
+    // list for folder rows (full opener list), one for file rows (default
+    // + "Show in X"). Stored on AppState; consulted by the popover
+    // open/activate handlers below.
     let open_with_entries = build_open_with_entries(&state.config.borrow());
-    let open_with_selectable = open_with_entries.len().saturating_sub(1);
+    let open_with_file_entries = build_open_with_file_entries(&state.config.borrow());
+    let open_with_folder_count = open_with_entries.len().saturating_sub(1);
+    let open_with_file_count = open_with_file_entries.len().saturating_sub(1);
     *state.open_with_entries.borrow_mut() = open_with_entries;
+    *state.open_with_file_entries.borrow_mut() = open_with_file_entries;
     let handle: WindowHandle<SwitcherView> = cx.open_window(options, move |window, cx| {
         let entity = cx.new(|cx| {
             let mut view = SwitcherView::new(cx);
             view.set_theme(theme, cx);
-            view.set_zoxide_enabled(zoxide_enabled, cx);
+            view.set_dirs_enabled(dirs_enabled, cx);
+            view.set_dirs_removable(dirs_removable, cx);
             view.set_browser_tabs_integration(browser_tabs_enabled, cx);
             view.set_items(items_for_builder, cx);
             view.set_programs(programs_for_builder, cx);
             view.set_llm_provider_order(llm_order, cx);
             view.set_ask_llm_enabled(ask_llm_enabled, cx);
-            view.set_open_with_count(open_with_selectable, cx);
+            view.set_open_with_counts(open_with_folder_count, open_with_file_count, cx);
             if show_nag {
                 view.set_nag_phase(NagPhase::Visible, cx);
             }
@@ -1043,12 +1073,15 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             return;
         }
         SwitcherViewEvent::RemoveDirRequested(d) => {
-            let Some(bin) = state.zoxide_bin.borrow().clone() else {
+            let Some(source) = state.dir_source.borrow().clone() else {
                 return;
             };
+            if !source.supports_remove() {
+                return;
+            }
             // Drop the row up front so the click feels instant. If the
             // subprocess ends up failing (missing entry, permission issue)
-            // the next zoxide query will just not bring the path back.
+            // the next query will just not bring the path back.
             let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
             if let Some(entity) = entity_opt {
                 let path = d.path.clone();
@@ -1059,13 +1092,13 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                 let res = cx
                     .background_executor()
                     .spawn({
-                        let bin = bin.clone();
+                        let source = source.clone();
                         let path = path.clone();
-                        async move { switcheur_platform::zoxide::remove(&bin, &path) }
+                        async move { source.remove(&path) }
                     })
                     .await;
                 if let Err(e) = res {
-                    tracing::warn!("zoxide remove {}: {e:#}", path.display());
+                    tracing::warn!("dir source remove {}: {e:#}", path.display());
                 }
             })
             .detach();
@@ -1115,12 +1148,13 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             return;
         }
         SwitcherViewEvent::QueryChanged(query) => {
-            // The view emits QueryChanged on every keystroke when zoxide is
-            // enabled. Spawn the subprocess on the background executor so a
-            // slow disk doesn't stutter the UI; cancellation is implicit
-            // via a per-view generation counter inside the view itself —
-            // here we just deliver the freshest result we can compute.
-            let Some(bin) = state.zoxide_bin.borrow().clone() else {
+            // The view emits QueryChanged on every keystroke when the dirs
+            // pane is enabled. Spawn the subprocess on the background
+            // executor so a slow disk doesn't stutter the UI; cancellation
+            // is implicit via a per-view generation counter inside the view
+            // itself — here we just deliver the freshest result we can
+            // compute.
+            let Some(source) = state.dir_source.borrow().clone() else {
                 return;
             };
             let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
@@ -1129,48 +1163,81 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             };
             let query = query.clone();
             let weak = entity.downgrade();
+            // Empty search → empty pane, no subprocess. Both zoxide and
+            // Spotlight otherwise disagree: zoxide returns its top
+            // frecency list, Spotlight returns nothing. Uniform "no
+            // query means no suggestions" is less surprising, and keeps
+            // the pane visually quiet when the switcher first opens.
+            if query.trim().is_empty() {
+                // Still bump the gen so any in-flight task's late
+                // delivery doesn't overwrite this empty state.
+                let my_gen = state.dir_query_gen.get().wrapping_add(1);
+                state.dir_query_gen.set(my_gen);
+                let _ = cx.update_entity(&entity, |view, cx| {
+                    view.set_dirs(Vec::new(), cx);
+                    view.set_dirs_loading(false, cx);
+                });
+                return;
+            }
+            // Bump the generation. A stale task whose subprocess returns
+            // after a newer keystroke will see a mismatch and bail,
+            // leaving the spinner on until the freshest task lands.
+            let my_gen = state.dir_query_gen.get().wrapping_add(1);
+            state.dir_query_gen.set(my_gen);
+            let gen_cell = state.dir_query_gen.clone();
+            // Flip the spinner on right away so the user sees feedback
+            // even while the debounce is holding. Turned back off when
+            // the hits land (or the update window has gone stale).
+            let _ = cx.update_entity(&entity, |view, cx| view.set_dirs_loading(true, cx));
             cx.spawn(async move |cx: &mut AsyncApp| {
-                // 30 ms debounce so a fast typist doesn't fire a subprocess
-                // per keystroke. Held even on empty queries to keep the
-                // pane stable while the user clears the input.
+                // 150 ms debounce so a fast typist doesn't fire a
+                // subprocess per keystroke. Zoxide queries are ~5 ms on a
+                // warm cache; Spotlight's `mdfind` is 100-500 ms depending
+                // on how indexed the haystack is, so 30 ms was too tight.
+                // Held even on empty queries to keep the pane stable
+                // while the user clears the input.
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(30))
+                    .timer(std::time::Duration::from_millis(150))
                     .await;
-                let bin_for_task = bin.clone();
+                let source_for_task = source.clone();
                 let query_for_task = query.clone();
                 let hits = cx
                     .background_executor()
-                    .spawn(async move {
-                        switcheur_platform::zoxide::query(
-                            &bin_for_task,
-                            &query_for_task,
-                            8,
-                        )
-                    })
+                    .spawn(async move { source_for_task.query(&query_for_task, 8) })
                     .await;
-                // One generic folder icon shared by every row. Resolved on
-                // the worker so the synchronous AppKit calls don't run on
-                // the GPUI main thread; the result is OnceLock-cached
-                // inside the platform crate so this is free after the
-                // first call.
-                let icon = switcheur_platform::macos::icons::folder_icon_path();
+                let label = match source.id() {
+                    DirSourceId::Spotlight => switcheur_core::DirSource::Spotlight,
+                    _ => switcheur_core::DirSource::Zoxide,
+                };
+                // Resolve icons on the worker so the synchronous AppKit
+                // calls don't run on the GPUI main thread. Folders share
+                // one generic manila icon (OnceLock-cached); files get
+                // per-extension LaunchServices icons (per-extension cache
+                // on disk — the first .pdf hit writes a PNG, every later
+                // .pdf reuses it).
                 let items: Vec<Item> = hits
                     .into_iter()
                     .map(|h| {
-                        Item::Dir(Arc::new(switcheur_core::DirRef::new(
-                            h.path,
-                            switcheur_core::DirSource::Zoxide,
-                            icon.clone(),
+                        let icon = switcheur_platform::macos::icons::icon_for_path(
+                            &h.path, h.is_dir,
+                        );
+                        Item::Dir(Arc::new(switcheur_core::DirRef::with_kind(
+                            h.path, label, h.is_dir, icon,
                         )))
                     })
                     .collect();
+                // Drop stale results: a later keystroke bumped `gen_cell`
+                // while we were waiting. Leaving the spinner on also lets
+                // the freshest task's `set_dirs_loading(false)` turn it
+                // off atomically with its results.
+                if gen_cell.get() != my_gen {
+                    return;
+                }
                 let _ = weak.update(cx, |view, cx| {
-                    // Apply only if the live query still matches what we
-                    // queried for. Avoids flashing stale results past the
-                    // user mid-typing.
-                    if view.zoxide_enabled() {
+                    if view.dirs_enabled() {
                         view.set_dirs(items, cx);
                     }
+                    view.set_dirs_loading(false, cx);
                 });
             })
             .detach();
@@ -1252,11 +1319,18 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                 }
                 Item::OpenUrl(url) => state.platform.open_url(url),
                 Item::Dir(d) => {
-                    let bundle_id = resolve_file_manager_bundle_id(&state.config.borrow());
-                    switcheur_platform::file_manager::open_folder_with(
-                        bundle_id.as_deref(),
-                        &d.path,
-                    )
+                    if d.is_dir {
+                        let bundle_id = resolve_file_manager_bundle_id(&state.config.borrow());
+                        switcheur_platform::file_manager::open_folder_with(
+                            bundle_id.as_deref(),
+                            &d.path,
+                        )
+                    } else {
+                        // File row (Spotlight only): LaunchServices picks the
+                        // right default app via extension. Revealing is the
+                        // secondary action surfaced through Open With.
+                        open::that(&d.path).map_err(|e| anyhow::anyhow!(e))
+                    }
                 }
                 Item::BrowserTab(t) => state.platform.activate_browser_tab(t),
             };
@@ -1312,16 +1386,29 @@ fn sync_open_with_popover(state: &AppState, cx: &mut App) {
     let Some(slot) = state.current.borrow().as_ref().cloned_entity() else {
         return;
     };
-    let (visible, popover_idx, panel_top_y, selected_dir, entries_len) =
+    let (visible, popover_idx, panel_top_y, selected_dir, selected_is_file) =
         cx.update_entity(&slot, |view, _cx| {
+            let is_file = view
+                .dirs()
+                .get(view.selected_dir_idx())
+                .and_then(|it| match it {
+                    Item::Dir(d) => Some(!d.is_dir),
+                    _ => None,
+                })
+                .unwrap_or(false);
             (
                 view.open_with_visible(),
                 view.open_with_index(),
                 view.dirs_panel_top_y(),
                 view.selected_dir_idx(),
-                state.open_with_entries.borrow().len(),
+                is_file,
             )
         });
+    let entries_len = if selected_is_file {
+        state.open_with_file_entries.borrow().len()
+    } else {
+        state.open_with_entries.borrow().len()
+    };
 
     if !visible || entries_len <= 1 {
         close_open_with_popover(state, cx);
@@ -1386,7 +1473,11 @@ fn sync_open_with_popover(state: &AppState, cx: &mut App) {
 
     // Sync entries + selection into the popover entity.
     if let Some(open_with) = state.open_with.borrow().as_ref() {
-        let entries = state.open_with_entries.borrow().clone();
+        let entries = if selected_is_file {
+            state.open_with_file_entries.borrow().clone()
+        } else {
+            state.open_with_entries.borrow().clone()
+        };
         let entity = open_with.entity.clone();
         let selected = popover_idx;
         cx.update_entity(&entity, |v, cx| {
@@ -1466,61 +1557,70 @@ fn handle_popover_event(ev: &OpenWithPopoverEvent, state: &AppState, cx: &mut Ap
             cx.update_entity(&switcher, |v, cx| v.on_open_with_hover(idx, cx));
         }
         OpenWithPopoverEvent::Confirmed(id) => {
-            // Resolve id to its selectable index (entries[0] is default).
-            let entries = state.open_with_entries.borrow();
-            let Some(sel_idx) = entries
-                .iter()
-                .skip(1)
-                .position(|e| e.id == *id)
-            else {
+            // Which entry list is live depends on whether the selected dir
+            // row is a folder or a file — the popover sees both as opaque
+            // OpenWithEntry lists.
+            let entries = active_open_with_entries(state, &switcher, cx);
+            let Some(sel_idx) = entries.iter().skip(1).position(|e| e.id == *id) else {
                 return;
             };
-            drop(entries);
             cx.update_entity(&switcher, |v, cx| v.on_open_with_click(sel_idx, cx));
         }
     }
 }
 
-/// Activate the folder under the popover-focused row. `sel_idx` is into the
-/// selectable entries list (default excluded). Launches via LaunchServices,
-/// promotes the picked opener in the MRU list, persists config, and closes
-/// the switcher.
+/// Activate the file-system item under the popover-focused row. Branches on
+/// the selected row's `is_dir`: folders go through the full folder-opener
+/// flow (LaunchServices + MRU promotion); files use a reduced flow — one
+/// "reveal in <default folder opener>" action. `sel_idx` is into the
+/// selectable entries list (default excluded).
 fn activate_open_with(sel_idx: usize, state: &AppState, cx: &mut App) {
     let Some(switcher) = state.current.borrow().as_ref().cloned_entity() else {
         return;
     };
-    // Pull the selected dir path off the view.
-    let dir_path: Option<std::path::PathBuf> = cx.update_entity(&switcher, |v, _cx| {
+    let selected: Option<(std::path::PathBuf, bool)> = cx.update_entity(&switcher, |v, _cx| {
         v.dirs()
             .get(v.selected_dir_idx())
             .and_then(|it| match it {
-                Item::Dir(d) => Some(d.path.clone()),
+                Item::Dir(d) => Some((d.path.clone(), d.is_dir)),
                 _ => None,
             })
     });
-    let Some(dir_path) = dir_path else {
+    let Some((path, is_dir)) = selected else {
         return;
     };
-    let entries = state.open_with_entries.borrow();
-    // entries[0] is the default; selectable indices start at entries[1].
-    let Some(entry) = entries.get(sel_idx + 1) else {
+
+    let entry = if is_dir {
+        state.open_with_entries.borrow().get(sel_idx + 1).cloned()
+    } else {
+        state
+            .open_with_file_entries
+            .borrow()
+            .get(sel_idx + 1)
+            .cloned()
+    };
+    let Some(entry) = entry else {
         return;
     };
-    let bundle_id = entry.bundle_id.clone();
-    let id = entry.id.clone();
-    drop(entries);
 
-    if let Err(e) =
-        switcheur_platform::file_manager::open_folder_with(Some(&bundle_id), &dir_path)
-    {
-        tracing::warn!("open_folder_with {}: {e:#}", bundle_id);
-    }
-
-    {
+    if is_dir {
+        if let Err(e) =
+            switcheur_platform::file_manager::open_folder_with(Some(&entry.bundle_id), &path)
+        {
+            tracing::warn!("open_folder_with {}: {e:#}", entry.bundle_id);
+        }
+        // Promote the MRU for folder rows only; file rows have a single
+        // selectable action so promotion is a no-op.
         let mut cfg = state.config.borrow_mut();
-        cfg.promote_folder_opener(&id);
+        cfg.promote_folder_opener(&entry.id);
         if let Err(e) = cfg.save() {
             tracing::warn!("save config after folder opener promote: {e:#}");
+        }
+    } else {
+        if let Err(e) =
+            switcheur_platform::file_manager::reveal_file_with(Some(&entry.bundle_id), &path)
+        {
+            tracing::warn!("reveal_file_with {}: {e:#}", entry.bundle_id);
         }
     }
 
@@ -1530,6 +1630,30 @@ fn activate_open_with(sel_idx: usize, state: &AppState, cx: &mut App) {
         let _ = cx.update_window(slot.handle, |_ent, window, _cx| {
             window.remove_window();
         });
+    }
+}
+
+/// Pick the entry list — folders or files — that matches the currently
+/// selected dir row. Returned as a cloned Vec so callers can drop
+/// `state.open_with_*` borrows before calling into the view.
+fn active_open_with_entries(
+    state: &AppState,
+    switcher: &Entity<SwitcherView>,
+    cx: &mut App,
+) -> Vec<OpenWithEntry> {
+    let is_dir = cx.update_entity(switcher, |v, _cx| {
+        v.dirs()
+            .get(v.selected_dir_idx())
+            .and_then(|it| match it {
+                Item::Dir(d) => Some(d.is_dir),
+                _ => None,
+            })
+            .unwrap_or(true)
+    });
+    if is_dir {
+        state.open_with_entries.borrow().clone()
+    } else {
+        state.open_with_file_entries.borrow().clone()
     }
 }
 
@@ -1800,18 +1924,26 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
             .and_then(|t| switcheur_core::license::verify_embedded(t).ok())
             .map(|t| t.key)
     });
-    let zoxide_integration = cfg.zoxide_integration;
+    let dir_source_id = cfg.dir_source;
     let browser_tabs_integration = cfg.browser_tabs_integration;
     let file_manager = cfg.file_manager.clone();
     drop(cfg);
     // Freshly check at open-time so the warning's initial state matches
     // reality (user might have granted the permission between runs).
     let screen_recording_granted = has_screen_recording_permission();
-    // Same idea for zoxide — if the user installed it between runs the
-    // toggle should light up immediately. Refresh the cached path too.
-    let detected = switcheur_platform::zoxide::detect();
-    let zoxide_available = detected.is_some();
-    *state.zoxide_bin.borrow_mut() = detected;
+    // Same idea for the dir sources — if the user installed zoxide between
+    // runs the dropdown entry should light up immediately. Refresh the
+    // cached source too.
+    let detected_dir_sources: Vec<DirSourceEntry> = detect_dir_sources();
+    let dir_source_entries: Vec<switcheur_ui::settings_view::DirSourceOption> =
+        detected_dir_sources
+            .iter()
+            .map(|e| switcheur_ui::settings_view::DirSourceOption {
+                id: e.id,
+                available: e.available,
+            })
+            .collect();
+    *state.dir_source.borrow_mut() = build_dir_source(dir_source_id);
 
     // Re-scan installed folder openers (file managers + editors) on settings
     // open so the list tracks apps installed between runs (or mid-session).
@@ -1856,8 +1988,8 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
                 hotkey_excluded_apps,
                 quick_type_excluded_apps,
                 license_key,
-                zoxide_integration,
-                zoxide_available,
+                dir_source_id,
+                dir_source_entries,
                 browser_tabs_integration,
                 file_manager,
                 available_folder_openers,
@@ -2034,21 +2166,28 @@ fn handle_settings_event(
                 tracing::warn!("save config: {e:#}");
             }
         }
-        SettingsViewEvent::ZoxideIntegrationChanged(on) => {
+        SettingsViewEvent::DirSourceChanged(id) => {
             {
                 let mut c = state.config.borrow_mut();
-                c.zoxide_integration = *on;
+                c.dir_source = *id;
                 if let Err(e) = c.save() {
                     tracing::warn!("save config: {e:#}");
                 }
             }
-            // Push the new state to the live switcher view if one is open
-            // so the right pane appears/disappears immediately. Effective
-            // on-state still requires the binary to be present.
-            let effective = *on && state.zoxide_bin.borrow().is_some();
+            // Rebuild the live source so the pane reflects the new pick
+            // without needing a relaunch. `build_dir_source` returns None
+            // for Disabled or for a source whose tool isn't installed —
+            // same silent-degrade as boot-time.
+            let built = build_dir_source(*id);
+            let enabled = built.is_some();
+            let removable = built.as_ref().map(|s| s.supports_remove()).unwrap_or(false);
+            *state.dir_source.borrow_mut() = built;
             let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
             if let Some(entity) = entity_opt {
-                entity.update(cx, |view, cx| view.set_zoxide_enabled(effective, cx));
+                entity.update(cx, |view, cx| {
+                    view.set_dirs_enabled(enabled, cx);
+                    view.set_dirs_removable(removable, cx);
+                });
             }
         }
         SettingsViewEvent::OpenZoxideHomepageRequested => {
@@ -2860,6 +2999,86 @@ fn build_open_with_entries(cfg: &Config) -> Vec<OpenWithEntry> {
     let avail = switcheur_core::file_manager::available_folder_openers(&installed);
     let default_id = cfg.file_manager.as_deref().unwrap_or(FINDER_ID).to_string();
     let ordered = order_folder_openers(avail, &cfg.folder_opener_order, &default_id);
+    build_entries_from_ordered(ordered, &default_id)
+}
+
+/// Build the Open-With popover entry list for *file* rows. Spotlight can
+/// return files alongside folders; a file row only has two actions:
+///
+/// - `entries[0]` — implicit default "Open", rendered greyed. Pressing
+///   Enter on the dir row bypasses the popover and goes through
+///   `open::that(path)` — LaunchServices picks the right app by
+///   extension. The `OpenWithEntry` only exists so the popover layout
+///   matches the folder variant.
+/// - `entries[1]` — "Show in <file manager>", where the file manager is
+///   the user's configured default folder opener (Finder, Marta,
+///   ForkLift, …). Activation reveals + selects the file there.
+///
+/// When the default folder opener isn't actually installed we fall back to
+/// Finder so the popover always has one selectable row.
+fn build_open_with_file_entries(cfg: &Config) -> Vec<OpenWithEntry> {
+    use switcheur_core::file_manager::{display_name_for, FINDER_BUNDLE_ID, FINDER_ID};
+    let default_id = cfg.file_manager.as_deref().unwrap_or(FINDER_ID).to_string();
+    let installed = switcheur_platform::file_manager::detected_folder_opener_bundle_ids();
+    let (reveal_id, reveal_bundle_id) =
+        match switcheur_core::file_manager::resolve_bundle_id(&default_id, &installed) {
+            Some(b) => (default_id.clone(), b),
+            None => (FINDER_ID.to_string(), FINDER_BUNDLE_ID.to_string()),
+        };
+
+    // Find an icon for the reveal target. Finder isn't in the Applications
+    // scan — use its well-known system path like `build_open_with_entries`
+    // does — others resolve through the program catalogue.
+    let programs = switcheur_platform::macos::programs::list_programs_cached();
+    let icon_path = if reveal_id == FINDER_ID {
+        switcheur_platform::macos::icons::icon_for_bundle(
+            "/System/Library/CoreServices/Finder.app",
+            FINDER_BUNDLE_ID,
+        )
+    } else {
+        programs
+            .iter()
+            .find(|p| p.bundle_id.as_deref() == Some(&reveal_bundle_id))
+            .and_then(|p| {
+                switcheur_platform::macos::icons::icon_for_bundle(
+                    p.bundle_path.to_string_lossy().as_ref(),
+                    &reveal_bundle_id,
+                )
+            })
+    };
+
+    let reveal_label: String = switcheur_i18n::tr_sub(
+        "open_with.reveal_in",
+        &[("app", display_name_for(&reveal_id))],
+    );
+
+    vec![
+        OpenWithEntry {
+            // "Open" default row — non-selectable, renders greyed with the
+            // "default" tag. `id` matches nothing on purpose; the popover
+            // never hands it back to the host.
+            id: "__open_default__".to_string(),
+            display_name: switcheur_i18n::tr("open_with.open"),
+            bundle_id: String::new(),
+            icon_path: None,
+            is_default: true,
+        },
+        OpenWithEntry {
+            id: format!("reveal:{reveal_id}"),
+            display_name: reveal_label,
+            bundle_id: reveal_bundle_id,
+            icon_path,
+            is_default: false,
+        },
+    ]
+}
+
+fn build_entries_from_ordered(
+    ordered: Vec<switcheur_core::file_manager::AvailableFolderOpener>,
+    default_id: &str,
+) -> Vec<OpenWithEntry> {
+    use switcheur_core::file_manager::FINDER_ID;
+    let _ = default_id;
 
     let programs = switcheur_platform::macos::programs::list_programs_cached();
     let mut out = Vec::with_capacity(ordered.len());

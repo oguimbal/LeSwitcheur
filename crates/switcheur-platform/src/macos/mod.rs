@@ -10,6 +10,7 @@ pub mod panel;
 pub mod permissions;
 pub mod programs;
 pub mod quick_type;
+pub mod spotlight;
 pub mod recency;
 pub mod startup;
 pub mod system_switcher;

@@ -20,8 +20,11 @@ settings:
   show_all_spaces_needs_permission: "This option requires the Screen Recording permission."
   open_screen_recording_settings: "Grant permission"
   screen_recording_permission_granted: "Permission granted"
-  zoxide_integration: "Zoxide integration"
-  zoxide_integration_hint: "Suggest directories from zoxide's frecency database in a side panel. Tab cycles focus to it; Enter opens the folder in your file manager."
+  dir_source: "Right-side suggestions"
+  dir_source_hint: "Populate the side panel from a data source. Tab cycles focus to it; Enter opens the target. Sources not installed on this system appear greyed out."
+  dir_source.disabled: "Disabled"
+  dir_source.zoxide: "Zoxide"
+  dir_source.spotlight: "Spotlight"
   zoxide_not_installed: "Zoxide is not installed."
   zoxide_install: "Install zoxide"
   browser_tabs_integration: "Browser tabs"
@@ -72,7 +75,7 @@ switcher:
   no_windows: "No windows found"
   no_results: "No results"
   searching_browser_tabs: "Searching browser tabs…"
-  dirs_header: "Zoxide dirs"
+  dirs_header: "Suggestions"
 
 llm:
   ask_claude: "Ask Claude"
@@ -86,6 +89,8 @@ launcher:
 open_with:
   default: "default"
   header: "Open with…"
+  open: "Open"
+  reveal_in: "Show in %{app}"
 
 keys:
   space: "Space"

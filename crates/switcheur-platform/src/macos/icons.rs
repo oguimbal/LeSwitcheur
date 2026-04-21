@@ -35,6 +35,43 @@ pub fn icon_for_bundle(bundle_path: &str, cache_key: &str) -> Option<PathBuf> {
     }
 }
 
+/// Resolve a cached PNG for the OS's assigned icon of `path`. Keyed by
+/// extension for non-directory files (`.plist`, `.pdf`, … all share one
+/// cache entry each) and by the shared folder icon for directories.
+/// Returns `None` on extraction failure; callers fall back to the generic
+/// placeholder.
+pub fn icon_for_path(path: &Path, is_dir: bool) -> Option<PathBuf> {
+    if is_dir {
+        return folder_icon_path();
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let key = if ext.is_empty() {
+        "ext__none".to_string()
+    } else {
+        format!("ext_{ext}")
+    };
+    let dir = cache_dir()?;
+    let out = dir.join(format!("{}.png", sanitize(&key)));
+    if out.exists() {
+        return Some(out);
+    }
+    // Extract from the actual file — NSWorkspace.iconForFile consults the
+    // type binding registered with LaunchServices, so the icon matches
+    // whatever Finder would draw for that extension.
+    let path_str = path.to_str()?;
+    match write_png_icon(path_str, &out) {
+        Ok(()) => Some(out),
+        Err(e) => {
+            tracing::debug!(path = %path.display(), "per-path icon extract failed: {e:#}");
+            None
+        }
+    }
+}
+
 /// Path to the cached PNG of the system's generic folder icon, used by every
 /// row in the right-side dirs panel. We extract from `NSImageNameFolder`
 /// rather than `iconForFile` on a sample directory — `/Applications` and

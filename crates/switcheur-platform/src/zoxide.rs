@@ -9,11 +9,52 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use switcheur_core::DirSourceId;
+
+use crate::{DirHit, DirectorySource};
+
 /// Hit returned by `zoxide query`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZoxideHit {
     pub path: PathBuf,
     pub score: f64,
+}
+
+/// Adapter exposing the free functions in this module as a
+/// [`DirectorySource`]. Holds a resolved binary path so detection only
+/// happens once.
+pub struct ZoxideSource {
+    bin: PathBuf,
+}
+
+impl ZoxideSource {
+    pub fn new(bin: PathBuf) -> Self {
+        Self { bin }
+    }
+}
+
+impl DirectorySource for ZoxideSource {
+    fn id(&self) -> DirSourceId {
+        DirSourceId::Zoxide
+    }
+
+    fn query(&self, terms: &str, limit: usize) -> Vec<DirHit> {
+        query(&self.bin, terms, limit)
+            .into_iter()
+            .map(|h| DirHit {
+                path: h.path,
+                is_dir: true,
+            })
+            .collect()
+    }
+
+    fn remove(&self, path: &Path) -> Result<()> {
+        remove(&self.bin, path)
+    }
+
+    fn supports_remove(&self) -> bool {
+        true
+    }
 }
 
 /// Locate the `zoxide` binary. Returns the resolved path, or `None` when

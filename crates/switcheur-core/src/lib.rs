@@ -16,7 +16,7 @@ pub mod state;
 pub mod url;
 
 pub use app_match::{AppMatch, AppMatchSet};
-pub use config::{Appearance, Config, HotkeySpec};
+pub use config::{Appearance, Config, DirSourceId, HotkeySpec};
 pub use exclusions::{ExclusionFilter, ExclusionRule};
 pub use matcher::{FuzzyMatcher, MatchResult};
 pub use model::{

@@ -20,8 +20,11 @@ settings:
   show_all_spaces_needs_permission: "Cette option nécessite la permission Screen Recording."
   open_screen_recording_settings: "Accorder la permission"
   screen_recording_permission_granted: "Permission accordée"
-  zoxide_integration: "Intégration zoxide"
-  zoxide_integration_hint: "Suggérer des dossiers issus de la base de fréquence de zoxide dans un panneau latéral. Tab y déplace le focus ; Entrée ouvre le dossier dans votre gestionnaire de fichiers."
+  dir_source: "Suggestions du panneau latéral"
+  dir_source_hint: "Alimente le panneau latéral à partir d'une source de données. Tab y déplace le focus ; Entrée ouvre l'élément. Les sources non installées sur le système apparaissent en grisé."
+  dir_source.disabled: "Désactivé"
+  dir_source.zoxide: "Zoxide"
+  dir_source.spotlight: "Spotlight"
   zoxide_not_installed: "Zoxide n'est pas installé."
   zoxide_install: "Installer zoxide"
   browser_tabs_integration: "Onglets de navigateur"
@@ -72,7 +75,7 @@ switcher:
   no_windows: "Aucune fenêtre trouvée"
   no_results: "Aucun résultat"
   searching_browser_tabs: "Recherche des onglets…"
-  dirs_header: "Dossiers zoxide"
+  dirs_header: "Suggestions"
 
 llm:
   ask_claude: "Demander à Claude"
@@ -86,6 +89,8 @@ launcher:
 open_with:
   default: "défaut"
   header: "Ouvrir avec…"
+  open: "Ouvrir"
+  reveal_in: "Afficher dans %{app}"
 
 keys:
   space: "Espace"

@@ -110,11 +110,21 @@ pub struct SwitcherView {
     last_list_shrink: f32,
     nag_phase: NagPhase,
     update_banner: UpdateBannerState,
-    /// Mirrors the user's `zoxide_integration` setting. When false, no
-    /// `QueryChanged` event is emitted and the right pane stays empty.
-    /// The host (main.rs) is the one that actually shells out to zoxide
-    /// — keeps platform code out of the UI crate.
-    zoxide_enabled: bool,
+    /// True when a directory source (zoxide, Spotlight, …) is live. When
+    /// false, no `QueryChanged` event is emitted and the right pane stays
+    /// empty. The host (main.rs) is the one that actually shells out to the
+    /// backing tool — keeps platform code out of the UI crate.
+    dirs_enabled: bool,
+    /// True while an off-thread dir-source query is in flight. Swaps the
+    /// settings cog at the top-right for a rotating spinner so slow
+    /// Spotlight queries visibly register. Host toggles via
+    /// [`Self::set_dirs_loading`] on either side of the subprocess.
+    dirs_loading: bool,
+    /// Whether the active source supports removing entries. Zoxide does
+    /// (`zoxide remove …`), Spotlight doesn't. Drives the × button render;
+    /// host also refuses the action at the `RemoveDirRequested` boundary as
+    /// defence-in-depth.
+    dirs_removable: bool,
     /// Has a `NeedsBrowserTabs` event already been fired for the current
     /// switcher session? Prevents re-requesting on every subsequent
     /// keystroke after the first fallback-tier hit. Reset in `set_items`
@@ -128,11 +138,16 @@ pub struct SwitcherView {
     /// keystroke. `None` = no cooldown (either no failure yet, or cooldown
     /// elapsed).
     browser_tabs_retry_after: Option<Instant>,
-    /// Number of *selectable* rows in the "Open With" popover — alternative
-    /// apps, default excluded. Host sets this whenever its detected-apps
-    /// list changes. When zero, the popover must not show and keyboard nav
+    /// Number of *selectable* rows in the "Open With" popover for folder
+    /// rows — alternative folder openers, default excluded. Host sets this
+    /// whenever its detected-apps list changes. When zero (and the current
+    /// dir row is a folder), the popover must not show and keyboard nav
     /// into it is a no-op.
-    open_with_count: usize,
+    open_with_folder_count: usize,
+    /// Same idea for *file* rows (Spotlight only). Today this is always
+    /// either 0 (no file manager detected beyond Finder, which maps to a
+    /// single "Show in Finder" action — handled explicitly) or 1.
+    open_with_file_count: usize,
     /// Window-local Y (top-down, points) of the dirs panel's top edge,
     /// captured during render via a canvas probe. Invariant across
     /// selection changes inside the panel — only shifts when the banner,
@@ -161,37 +176,66 @@ impl SwitcherView {
             last_list_shrink: 0.0,
             nag_phase: NagPhase::Hidden,
             update_banner: UpdateBannerState::Hidden,
-            zoxide_enabled: false,
+            dirs_enabled: false,
+            dirs_removable: false,
+            dirs_loading: false,
             browser_tabs_requested: false,
             browser_tabs_retry_after: None,
-            open_with_count: 0,
+            open_with_folder_count: 0,
+            open_with_file_count: 0,
             dirs_panel_top_y: Rc::new(Cell::new(None)),
         }
     }
 
-    /// Install the host-computed count of alternative "open with" entries
-    /// (file managers + editors, default excluded). Emitting
-    /// `OpenWithStateChanged` here keeps the popover window in sync even
-    /// when the count flips between 0 and non-zero (triggering show/hide).
-    pub fn set_open_with_count(&mut self, count: usize, cx: &mut Context<Self>) {
-        if self.open_with_count == count {
+    /// Install the host-computed counts of "open with" selectable rows for
+    /// folder and file dir rows. The view picks which one applies for the
+    /// currently selected row via [`Self::current_open_with_count`].
+    /// Emitting `OpenWithStateChanged` keeps the popover window in sync
+    /// even when the count flips between 0 and non-zero.
+    pub fn set_open_with_counts(
+        &mut self,
+        folder: usize,
+        file: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if self.open_with_folder_count == folder && self.open_with_file_count == file {
             return;
         }
-        self.open_with_count = count;
-        if count == 0 {
+        self.open_with_folder_count = folder;
+        self.open_with_file_count = file;
+        if self.current_open_with_count() == 0 {
             self.state.exit_open_with();
         }
         cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         cx.notify();
     }
 
+    /// Which Open-With selectable count applies right now — file vs folder —
+    /// based on the currently highlighted dir row. Defaults to the folder
+    /// count when the selection isn't a `DirRef` (e.g. no dirs yet), which
+    /// keeps the popover sized sensibly for the common case.
+    fn current_open_with_count(&self) -> usize {
+        let is_file = self
+            .state
+            .dirs()
+            .get(self.state.selected_dir_idx())
+            .map(|it| matches!(it, Item::Dir(d) if !d.is_dir))
+            .unwrap_or(false);
+        if is_file {
+            self.open_with_file_count
+        } else {
+            self.open_with_folder_count
+        }
+    }
+
     /// Mouse hover on a popover row — mirrors the pointer in the popover's
     /// keyboard selection so Enter hits what the cursor is over.
     pub fn on_open_with_hover(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if self.open_with_count == 0 {
+        let count = self.current_open_with_count();
+        if count == 0 {
             return;
         }
-        self.state.set_open_with_index(idx, self.open_with_count);
+        self.state.set_open_with_index(idx, count);
         cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         cx.notify();
     }
@@ -199,7 +243,7 @@ impl SwitcherView {
     /// Mouse click on a popover row — same effect as Enter with that row
     /// selected. The host performs the actual launch.
     pub fn on_open_with_click(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if idx >= self.open_with_count {
+        if idx >= self.current_open_with_count() {
             return;
         }
         cx.emit(SwitcherViewEvent::OpenWithActivated(idx));
@@ -207,11 +251,11 @@ impl SwitcherView {
 
     /// Should the popover window currently be visible? True when the dirs
     /// pane has focus, at least one dir row exists, and at least one
-    /// alternative opener was detected.
+    /// alternative opener was detected for the selected row's kind.
     pub fn open_with_visible(&self) -> bool {
         self.state.active_section() == Section::Dirs
             && self.state.dirs_visible()
-            && self.open_with_count > 0
+            && self.current_open_with_count() > 0
     }
 
     /// Keyboard index inside the popover. `None` while the popover is
@@ -253,15 +297,15 @@ impl SwitcherView {
     }
 
 
-    /// Mirror the user's zoxide_integration setting. When flipped off, the
+    /// Mirror the host's live directory-source state. When flipped off the
     /// right-pane suggestions are cleared immediately. When flipped on, the
     /// host should emit a fresh `QueryChanged` synthetically (or the user's
     /// next keystroke triggers one).
-    pub fn set_zoxide_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.zoxide_enabled == enabled {
+    pub fn set_dirs_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.dirs_enabled == enabled {
             return;
         }
-        self.zoxide_enabled = enabled;
+        self.dirs_enabled = enabled;
         if !enabled {
             self.state.set_dirs(Vec::new());
             cx.emit(SwitcherViewEvent::OpenWithStateChanged);
@@ -275,8 +319,34 @@ impl SwitcherView {
         }
     }
 
-    pub fn zoxide_enabled(&self) -> bool {
-        self.zoxide_enabled
+    pub fn dirs_enabled(&self) -> bool {
+        self.dirs_enabled
+    }
+
+    /// Mirror the active source's `supports_remove()`. Drives the × button
+    /// render on each dir row; false hides the button entirely.
+    pub fn set_dirs_removable(&mut self, removable: bool, cx: &mut Context<Self>) {
+        if self.dirs_removable == removable {
+            return;
+        }
+        self.dirs_removable = removable;
+        cx.notify();
+    }
+
+    pub fn dirs_removable(&self) -> bool {
+        self.dirs_removable
+    }
+
+    /// Flip the spinner-in-place-of-cog state from the host. Called on
+    /// every keystroke pair: `true` right before the host spawns the
+    /// subprocess, `false` when the result lands (or the request is
+    /// superseded).
+    pub fn set_dirs_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
+        if self.dirs_loading == loading {
+            return;
+        }
+        self.dirs_loading = loading;
+        cx.notify();
     }
 
     pub fn set_update_banner(&mut self, state: UpdateBannerState, cx: &mut Context<Self>) {
@@ -303,7 +373,7 @@ impl SwitcherView {
         self.state.clear_browser_tabs();
         self.browser_tabs_requested = false;
         self.browser_tabs_retry_after = None;
-        if self.zoxide_enabled {
+        if self.dirs_enabled {
             cx.emit(SwitcherViewEvent::QueryChanged(String::new()));
         }
         self.emit_height_delta_if_changed(cx);
@@ -496,7 +566,7 @@ impl SwitcherView {
             return;
         }
         if self.state.open_with_index().is_some() {
-            self.state.open_with_prev(self.open_with_count);
+            self.state.open_with_prev(self.current_open_with_count());
             cx.emit(SwitcherViewEvent::OpenWithStateChanged);
             cx.notify();
             return;
@@ -510,7 +580,7 @@ impl SwitcherView {
             return;
         }
         if self.state.open_with_index().is_some() {
-            self.state.open_with_next(self.open_with_count);
+            self.state.open_with_next(self.current_open_with_count());
             cx.emit(SwitcherViewEvent::OpenWithStateChanged);
             cx.notify();
             return;
@@ -756,11 +826,12 @@ impl SwitcherView {
     fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
         // In the Dirs pane, Right enters the "Open With" popover when one
         // is available. Activates keyboard focus on its first row.
+        let owc = self.current_open_with_count();
         if self.state.active_section() == Section::Dirs
-            && self.open_with_count > 0
+            && owc > 0
             && self.state.open_with_index().is_none()
         {
-            self.state.enter_open_with(self.open_with_count);
+            self.state.enter_open_with(owc);
             cx.emit(SwitcherViewEvent::OpenWithStateChanged);
             cx.notify();
             return;
@@ -923,7 +994,7 @@ impl SwitcherView {
     fn sync_query(&mut self, cx: &mut Context<Self>) {
         self.state.set_query(self.input.text());
         self.scroll_selection_into_view();
-        if self.zoxide_enabled {
+        if self.dirs_enabled {
             cx.emit(SwitcherViewEvent::QueryChanged(
                 self.state.query().to_string(),
             ));
@@ -1113,24 +1184,7 @@ impl Render for SwitcherView {
                             .flex_1()
                             .child(render_query(&self.input, &placeholder, &theme)),
                     )
-                    .child(
-                        div()
-                            .ml_2()
-                            .w(px(24.0))
-                            .h(px(24.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_size(px(16.0))
-                            .text_color(theme.muted)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(Self::on_cog_click),
-                            )
-                            .child("⚙"),
-                    ),
+                    .child(render_cog_or_spinner(self.dirs_loading, &theme, cx)),
             )
             .children(self.state.eval_result().map(|res| {
                 let size = if res.len() > 30 { px(16.0) } else { px(22.0) };
@@ -1195,11 +1249,11 @@ impl Render for SwitcherView {
                             .flex_row()
                             .flex_1()
                             .overflow_hidden()
-                            .child(render_dirs_panel(&self.state, &theme, cx, true, self.dirs_panel_top_y.clone())),
+                            .child(render_dirs_panel(&self.state, &theme, cx, true, self.dirs_removable, self.dirs_panel_top_y.clone())),
                     )
                 } else {
                     let dirs_pane = dirs_visible
-                        .then(|| render_dirs_panel(&self.state, &theme, cx, false, self.dirs_panel_top_y.clone()));
+                        .then(|| render_dirs_panel(&self.state, &theme, cx, false, self.dirs_removable, self.dirs_panel_top_y.clone()));
                     Some(
                         div()
                             .flex()
@@ -1430,6 +1484,7 @@ fn render_dirs_panel(
     theme: &Theme,
     cx: &mut Context<SwitcherView>,
     full_width: bool,
+    removable: bool,
     dirs_panel_top_y: Rc<Cell<Option<f32>>>,
 ) -> AnyElement {
     use switcheur_core::MatchResult;
@@ -1443,16 +1498,18 @@ fn render_dirs_panel(
         .enumerate()
         .map(|(i, item)| {
             // `render_row` takes a MatchResult; dirs aren't fuzzy-ranked
-            // through the matcher (zoxide already ranks them), so wrap with a
-            // zero score and no highlight indices.
+            // through the matcher (the source already ranks them), so wrap
+            // with a zero score and no highlight indices.
             let mr = MatchResult {
                 item: item.clone(),
                 score: 0,
                 indices: Vec::new(),
             };
-            render_row(&mr, section_active && i == selected, theme)
-                .child(render_dir_remove_button(i, theme, cx))
-                .id(("switcher-dir-row", i))
+            let mut row = render_row(&mr, section_active && i == selected, theme);
+            if removable {
+                row = row.child(render_dir_remove_button(i, theme, cx));
+            }
+            row.id(("switcher-dir-row", i))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                     this.on_dir_row_click(i, cx);
@@ -1503,6 +1560,49 @@ fn render_dirs_panel(
         )
         .children(rows)
         .into_any_element()
+}
+
+/// Top-right affordance: settings cog normally, rotating spinner while a
+/// dir-source query is in flight. Same footprint both ways so the layout
+/// doesn't jitter between states.
+fn render_cog_or_spinner(
+    loading: bool,
+    theme: &Theme,
+    cx: &mut Context<SwitcherView>,
+) -> AnyElement {
+    let base = div()
+        .ml_2()
+        .w(px(24.0))
+        .h(px(24.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .text_size(px(16.0))
+        .text_color(theme.muted);
+    if loading {
+        let spinner = svg()
+            .path("browser_icons/spinner.svg")
+            .w(px(14.0))
+            .h(px(14.0))
+            .text_color(theme.muted)
+            .with_animation(
+                "dirs_search_spinner",
+                Animation::new(std::time::Duration::from_millis(900))
+                    .repeat()
+                    .with_easing(linear),
+                |s, delta| s.with_transformation(Transformation::rotate(percentage(delta))),
+            );
+        base.child(spinner).into_any_element()
+    } else {
+        base.cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(SwitcherView::on_cog_click),
+            )
+            .child("⚙")
+            .into_any_element()
+    }
 }
 
 /// Inline "scanning browser tabs" row shown while the AppleScript fetch is

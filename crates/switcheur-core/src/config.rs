@@ -96,11 +96,18 @@ pub struct Config {
     /// get false via [`Config::default`] and see the wizard on first run.
     #[serde(default = "default_true")]
     pub onboarding_completed: bool,
-    /// When true, the switcher shows zoxide directory suggestions in a right
-    /// panel. No-op when zoxide is not installed (the integration silently
-    /// degrades). On by default.
-    #[serde(default = "default_true")]
-    pub zoxide_integration: bool,
+    /// Which backend feeds the right-side directory pane. `Disabled` hides the
+    /// pane entirely; `Zoxide` degrades silently to Disabled at runtime when
+    /// the binary isn't found. On a fresh install this defaults to `Zoxide`
+    /// — existing behaviour — and gets cleared to `Disabled` at boot if
+    /// detection fails, so the pane stays hidden until the user picks
+    /// another source.
+    #[serde(default)]
+    pub dir_source: DirSourceId,
+    /// Deprecated: pre-multi-source toggle. Migrated into `dir_source` on
+    /// next save (`true → Zoxide`, `false → Disabled`) and dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    zoxide_integration: Option<bool>,
     /// When true, if no window / program / URL / eval matches the query, the
     /// switcher scrapes the running browsers (Chrome today) for open tabs and
     /// offers them as results before falling back to "Ask AI". Fetch runs off
@@ -144,6 +151,24 @@ pub enum Appearance {
     Dark,
 }
 
+/// Which backend populates the right-side directory pane.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum DirSourceId {
+    Disabled,
+    Zoxide,
+    Spotlight,
+}
+
+impl Default for DirSourceId {
+    /// New installs start on Zoxide so the existing out-of-the-box behaviour
+    /// is preserved. Host code downgrades to `Disabled` at boot if zoxide
+    /// isn't actually installed.
+    fn default() -> Self {
+        Self::Zoxide
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -168,7 +193,8 @@ impl Default for Config {
             llm_provider_order: LlmProvider::default_order(),
             ask_llm_enabled: true,
             onboarding_completed: false,
-            zoxide_integration: true,
+            dir_source: DirSourceId::default(),
+            zoxide_integration: None,
             browser_tabs_integration: true,
             file_manager: None,
             folder_opener_order: Vec::new(),
@@ -222,6 +248,14 @@ impl Config {
         }
         if self.include_apps.take().is_some() {
             // Deprecated feature removed; drop the field on next save.
+            changed = true;
+        }
+        if let Some(legacy) = self.zoxide_integration.take() {
+            self.dir_source = if legacy {
+                DirSourceId::Zoxide
+            } else {
+                DirSourceId::Disabled
+            };
             changed = true;
         }
         // Fill in any LLM providers added after the config was first written
@@ -444,6 +478,49 @@ mod tests {
     fn default_config_triggers_onboarding_for_new_users() {
         let c = Config::default();
         assert!(!c.onboarding_completed);
+    }
+
+    #[test]
+    fn legacy_zoxide_integration_true_migrates_to_zoxide() {
+        let text = "hotkey = { modifiers = [\"ctrl\"], key = \"=\" }\n\
+            include_minimized = false\n\
+            launch_at_startup = false\n\
+            appearance = \"system\"\n\
+            zoxide_integration = true\n";
+        let mut c: Config = toml::from_str(text).unwrap();
+        assert_eq!(c.zoxide_integration, Some(true));
+        let changed = c.migrate_legacy_fields();
+        assert!(changed);
+        assert_eq!(c.dir_source, DirSourceId::Zoxide);
+        assert_eq!(c.zoxide_integration, None);
+        let out = toml::to_string_pretty(&c).unwrap();
+        assert!(!out.contains("zoxide_integration"));
+        assert!(out.contains("dir_source"));
+    }
+
+    #[test]
+    fn legacy_zoxide_integration_false_migrates_to_disabled() {
+        let text = "hotkey = { modifiers = [\"ctrl\"], key = \"=\" }\n\
+            include_minimized = false\n\
+            launch_at_startup = false\n\
+            appearance = \"system\"\n\
+            zoxide_integration = false\n";
+        let mut c: Config = toml::from_str(text).unwrap();
+        let changed = c.migrate_legacy_fields();
+        assert!(changed);
+        assert_eq!(c.dir_source, DirSourceId::Disabled);
+    }
+
+    #[test]
+    fn missing_dir_source_defaults_to_zoxide() {
+        // No `dir_source` and no legacy `zoxide_integration` — fresh install
+        // path. `Default` keeps today's behaviour.
+        let text = "hotkey = { modifiers = [\"ctrl\"], key = \"=\" }\n\
+            include_minimized = false\n\
+            launch_at_startup = false\n\
+            appearance = \"system\"\n";
+        let c: Config = toml::from_str(text).unwrap();
+        assert_eq!(c.dir_source, DirSourceId::Zoxide);
     }
 
     #[test]

@@ -43,12 +43,12 @@ pub struct ProgramRef {
     pub icon_path: Option<PathBuf>,
 }
 
-/// Where a [`DirRef`] came from. Today only zoxide; the variant exists so a
-/// future Spotlight / fasd / autojump source can plug in next to it without
-/// re-shaping [`Item`].
+/// Where a [`DirRef`] came from. Currently zoxide or Spotlight; a future fasd
+/// / autojump source can plug in next to them without re-shaping [`Item`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirSource {
     Zoxide,
+    Spotlight,
 }
 
 /// Which browser a [`BrowserTabRef`] was scraped from. The enum shape lets
@@ -154,6 +154,10 @@ fn extract_host(url: &str) -> Option<String> {
 pub struct DirRef {
     pub path: PathBuf,
     pub source: DirSource,
+    /// True for directories, false for files. Zoxide hits are always `true`;
+    /// Spotlight hits can be either. Drives the Open-With popover variant the
+    /// UI shows when this row is selected.
+    pub is_dir: bool,
     /// Cached PNG of the macOS folder icon, populated by the host. `None`
     /// falls back to the `📁` placeholder so non-macOS targets keep building.
     pub icon_path: Option<PathBuf>,
@@ -163,6 +167,15 @@ pub struct DirRef {
 
 impl DirRef {
     pub fn new(path: PathBuf, source: DirSource, icon_path: Option<PathBuf>) -> Self {
+        Self::with_kind(path, source, true, icon_path)
+    }
+
+    pub fn with_kind(
+        path: PathBuf,
+        source: DirSource,
+        is_dir: bool,
+        icon_path: Option<PathBuf>,
+    ) -> Self {
         let basename = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -174,6 +187,7 @@ impl DirRef {
         Self {
             path,
             source,
+            is_dir,
             icon_path,
             basename,
             parent,

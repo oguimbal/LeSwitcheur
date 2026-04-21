@@ -33,6 +33,56 @@ pub fn detected_file_manager_bundle_ids() -> HashSet<String> {
     detected_folder_opener_bundle_ids()
 }
 
+/// Reveal `path` (typically a file — Spotlight results can include files)
+/// inside the given folder-opener app. Uses `/usr/bin/open -R` so the
+/// target is selected, not just opened. Callers that don't care about the
+/// specific app can pass `None` to land in Finder via the default handler.
+///
+/// `open -R -b <bundle_id>` ignores apps that don't understand the
+/// "selector" concept (most editors), in which case the OS falls back to
+/// Finder. That's fine for our use case — "Show in VS Code" doesn't make
+/// sense semantically, and the UI only surfaces this action against the
+/// user's default *folder opener* (Finder / Marta / ForkLift / …), which
+/// all support reveal.
+pub fn reveal_file_with(bundle_id: Option<&str>, path: &Path) -> Result<()> {
+    let Some(path_str) = path.to_str() else {
+        anyhow::bail!("non-utf8 path: {:?}", path);
+    };
+    let mut cmd = Command::new("/usr/bin/open");
+    cmd.arg("-R");
+    if let Some(b) = bundle_id {
+        if b != FINDER_BUNDLE_ID {
+            cmd.args(["-b", b]);
+        }
+    }
+    cmd.arg(path_str);
+    match cmd.status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => {
+            tracing::warn!(
+                bundle_id = ?bundle_id,
+                exit = ?s.code(),
+                "open -R failed, falling back to Finder"
+            );
+            Command::new("/usr/bin/open")
+                .args(["-R", path_str])
+                .status()
+                .map_err(|e| anyhow::anyhow!(e))
+                .and_then(|s| {
+                    if s.success() {
+                        Ok(())
+                    } else {
+                        anyhow::bail!("open -R (Finder fallback) exited with {s}")
+                    }
+                })
+        }
+        Err(e) => {
+            tracing::warn!(bundle_id = ?bundle_id, error = %e, "open -R spawn failed");
+            anyhow::bail!(e)
+        }
+    }
+}
+
 /// Open a folder, optionally targeting a specific app by bundle id. Finder
 /// (or `None`) goes through LaunchServices' default handler — same channel
 /// as before the feature existed. Other bundle ids are dispatched via

@@ -12,7 +12,7 @@ use gpui::{
 };
 use switcheur_core::{
     file_manager::{AvailableFolderOpener, FINDER_ID},
-    AppMatch, ExclusionFilter, ExclusionRule, HotkeySpec, SortOrder,
+    AppMatch, DirSourceId, ExclusionFilter, ExclusionRule, HotkeySpec, SortOrder,
 };
 use switcheur_i18n::{modifier_symbol, tr as _tr, tr_sub};
 
@@ -20,6 +20,14 @@ use crate::theme::Theme;
 
 fn tr(key: &str) -> SharedString {
     SharedString::from(_tr(key))
+}
+
+fn dir_source_label(id: DirSourceId) -> SharedString {
+    match id {
+        DirSourceId::Disabled => tr("settings.dir_source.disabled"),
+        DirSourceId::Zoxide => tr("settings.dir_source.zoxide"),
+        DirSourceId::Spotlight => tr("settings.dir_source.spotlight"),
+    }
 }
 
 /// Which list the app-picker modal is feeding when the user finally selects
@@ -40,6 +48,15 @@ impl Default for PickerTarget {
     fn default() -> Self {
         PickerTarget::Exclusion(None)
     }
+}
+
+/// One row the user can pick in the directory-source dropdown. Unavailable
+/// options stay visible but greyed — the UI pattern mirrors the old
+/// "greyed zoxide toggle with Install link" shape.
+#[derive(Debug, Clone)]
+pub struct DirSourceOption {
+    pub id: DirSourceId,
+    pub available: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,11 +108,13 @@ pub enum SettingsViewEvent {
     /// User clicked "Sign out" on a licensed install. Host should clear the
     /// stored token + key and re-show the nag popup at next boot.
     LicenseLogoutRequested,
-    /// User flipped the zoxide-integration toggle. Host persists and pushes
-    /// the new value down to any open switcher view.
-    ZoxideIntegrationChanged(bool),
-    /// User clicked "Install zoxide" under the disabled toggle. Host opens
-    /// the zoxide install page in the default browser.
+    /// User picked a different backend for the right-side directory pane
+    /// (Disabled / Zoxide / Spotlight). Host persists the new id, rebuilds
+    /// the live source, and pushes the new enabled state down to any open
+    /// switcher view.
+    DirSourceChanged(DirSourceId),
+    /// User clicked "Install zoxide" under the greyed-out Zoxide dropdown
+    /// row. Host opens the zoxide install page in the default browser.
     OpenZoxideHomepageRequested,
     /// User flipped the browser-tabs integration toggle. Host persists and
     /// pushes the new value down to any open switcher view.
@@ -173,12 +192,14 @@ pub struct SettingsView {
     /// Same pattern as `quit_pending`, but for the "Remove license" button.
     license_remove_pending: bool,
     license_remove_gen: u64,
-    /// Mirrors `Config::zoxide_integration`. When zoxide isn't installed the
-    /// toggle is forced off + grayed out regardless of this value.
-    zoxide_integration: bool,
-    /// Whether the host found a `zoxide` binary on this machine. Drives the
-    /// toggle's enabled state and the "Install zoxide" inline link.
-    zoxide_available: bool,
+    /// Mirrors `Config::dir_source`. The dropdown picker reads from this to
+    /// highlight the current pick; changes emit `DirSourceChanged`.
+    dir_source: DirSourceId,
+    /// Every source the UI should list in the dropdown, with its
+    /// availability flag. Unavailable entries render greyed + non-clickable.
+    dir_sources: Vec<DirSourceOption>,
+    /// Whether the dropdown popover is currently expanded.
+    dir_source_picker_open: bool,
     /// Mirrors `Config::browser_tabs_integration`. Drives the fallback tier
     /// that scrapes open Chrome tabs when no window / program / URL matches.
     browser_tabs_integration: bool,
@@ -207,8 +228,8 @@ impl SettingsView {
         hotkey_exceptions: Vec<AppMatch>,
         quick_type_exceptions: Vec<AppMatch>,
         license_key: Option<String>,
-        zoxide_integration: bool,
-        zoxide_available: bool,
+        dir_source_id: DirSourceId,
+        dir_source_entries: Vec<DirSourceOption>,
         browser_tabs_integration: bool,
         file_manager: Option<String>,
         available_folder_openers: Vec<AvailableFolderOpener>,
@@ -253,8 +274,9 @@ impl SettingsView {
             quit_gen: 0,
             license_remove_pending: false,
             license_remove_gen: 0,
-            zoxide_integration,
-            zoxide_available,
+            dir_source: dir_source_id,
+            dir_sources: dir_source_entries,
+            dir_source_picker_open: false,
             browser_tabs_integration,
             file_manager,
             available_folder_openers,
@@ -329,6 +351,7 @@ impl SettingsView {
         self.hotkey_popover_open = false;
         self.quick_type_popover_open = false;
         self.file_manager_picker_open = false;
+        self.dir_source_picker_open = false;
     }
 
     fn recompute_errors(&mut self) {
@@ -455,33 +478,39 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn toggle_zoxide(
+    fn toggle_dir_source_picker(
         &mut self,
         _: &MouseDownEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Toggle is inert when zoxide isn't installed. The visual is grayed
-        // out and we still get the click event, so guard explicitly.
-        if !self.zoxide_available {
-            return;
-        }
-        self.zoxide_integration = !self.zoxide_integration;
-        cx.emit(SettingsViewEvent::ZoxideIntegrationChanged(
-            self.zoxide_integration,
-        ));
+        let was_open = self.dir_source_picker_open;
+        self.close_all_popovers();
+        self.dir_source_picker_open = !was_open;
         cx.notify();
     }
 
-    /// Reflect a re-detection of zoxide while settings is open. If zoxide
-    /// disappeared (binary uninstalled mid-session), the toggle visually
-    /// flips off; the persisted preference itself isn't changed so the
-    /// integration comes back automatically when zoxide is reinstalled.
-    pub fn set_zoxide_available(&mut self, available: bool, cx: &mut Context<Self>) {
-        if self.zoxide_available == available {
+    fn pick_dir_source(&mut self, id: DirSourceId, cx: &mut Context<Self>) {
+        self.dir_source_picker_open = false;
+        if self.dir_source != id {
+            self.dir_source = id;
+            cx.emit(SettingsViewEvent::DirSourceChanged(id));
+        }
+        cx.notify();
+    }
+
+    /// Reflect a re-detection of available dir sources while Settings is
+    /// open (e.g. user installed zoxide mid-session). Persisted preference
+    /// is untouched; the dropdown row just lights up.
+    pub fn set_dir_sources(&mut self, entries: Vec<DirSourceOption>, cx: &mut Context<Self>) {
+        if self.dir_sources.len() == entries.len()
+            && self.dir_sources.iter().zip(entries.iter()).all(|(a, b)| {
+                a.id == b.id && a.available == b.available
+            })
+        {
             return;
         }
-        self.zoxide_available = available;
+        self.dir_sources = entries;
         cx.notify();
     }
 
@@ -881,6 +910,7 @@ impl SettingsView {
                 || self.hotkey_popover_open
                 || self.quick_type_popover_open
                 || self.file_manager_picker_open
+                || self.dir_source_picker_open
             {
                 self.close_all_popovers();
                 cx.notify();
@@ -1052,7 +1082,7 @@ impl SettingsView {
                 cx.listener(Self::toggle_include_minimized),
             ))
             .child(self.render_show_all_spaces_block(cx))
-            .child(self.render_zoxide_block(cx))
+            .child(self.render_dir_source_block(cx))
             .child(self.render_browser_tabs_block(cx))
             .child(self.render_file_manager_row(cx))
             .child(self.render_sort_row(cx))
@@ -1060,92 +1090,157 @@ impl SettingsView {
             .into_any_element()
     }
 
-    fn render_zoxide_block(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_dir_source_block(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
-        // When zoxide isn't installed, the toggle is locked off (regardless
-        // of the persisted preference) and a "Install zoxide" link sits
-        // beneath it. Same UX shape as the Screen Recording warning so the
-        // user only has to learn one pattern.
-        let effective_on = self.zoxide_integration && self.zoxide_available;
-        let track_color = if !self.zoxide_available {
-            theme.border
-        } else if effective_on {
-            theme.accent
-        } else {
-            theme.border
-        };
-        let label_color = if self.zoxide_available {
+        let current_label: SharedString = dir_source_label(self.dir_source);
+
+        let field = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_3()
+            .py_1p5()
+            .rounded_md()
+            .border_1()
+            .border_color(if self.dir_source_picker_open {
+                theme.accent
+            } else {
+                theme.border
+            })
+            .bg(theme.selection)
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(Self::toggle_dir_source_picker),
+            )
+            .text_color(theme.foreground)
+            .child(current_label)
+            .child(div().text_color(theme.muted).child("▾"));
+
+        let mut field_container = div().relative().flex_1().child(field);
+        if self.dir_source_picker_open {
+            field_container = field_container.child(
+                deferred(self.render_dir_source_popover(cx)).with_priority(10),
+            );
+        }
+
+        let header_row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_color(theme.foreground)
+                            .child(tr("settings.dir_source")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme.muted)
+                            .child(tr("settings.dir_source_hint")),
+                    ),
+            )
+            .child(field_container);
+
+        // Install link surfaces only when the user's pick is Zoxide and
+        // zoxide isn't actually on the machine — same "do the thing that
+        // makes this setting functional" shape as the Screen Recording
+        // warning.
+        let zoxide_missing = self.dir_source == DirSourceId::Zoxide
+            && !self
+                .dir_sources
+                .iter()
+                .any(|s| s.id == DirSourceId::Zoxide && s.available);
+
+        let mut block = div().flex().flex_col().gap_1p5().child(header_row);
+        if zoxide_missing {
+            block = block.child(self.render_zoxide_install_row(cx));
+        }
+        block.into_any_element()
+    }
+
+    fn render_dir_source_popover(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let current = self.dir_source;
+        let mut popover = div()
+            .id("settings-dir-source-popover")
+            .absolute()
+            .top(px(38.0))
+            .left(px(0.0))
+            .w_full()
+            .max_h(px(220.0))
+            .overflow_y_scroll()
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_md()
+            .shadow_md()
+            .flex()
+            .flex_col()
+            .py_1();
+
+        for entry in &self.dir_sources {
+            let selected = entry.id == current;
+            let id = entry.id;
+            let available = entry.available;
+            let label = dir_source_label(id);
+            popover =
+                popover.child(self.render_dir_source_option(label, id, available, selected, cx));
+        }
+
+        popover.into_any_element()
+    }
+
+    fn render_dir_source_option(
+        &self,
+        label: SharedString,
+        id: DirSourceId,
+        available: bool,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = self.theme;
+        let fg = if available {
             theme.foreground
         } else {
             theme.muted
         };
-
-        let mut track = div()
-            .w(px(36.0))
-            .h(px(20.0))
-            .rounded_full()
-            .bg(track_color)
+        let mut row = div()
             .flex()
+            .flex_row()
             .items_center()
-            .px(px(2.0));
-        track = if effective_on {
-            track.justify_end()
-        } else {
-            track.justify_start()
-        };
-        let track = track.child(
-            div()
-                .w(px(16.0))
-                .h(px(16.0))
-                .rounded_full()
-                .bg(gpui::rgb(0xffffff)),
-        );
-
-        let text = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .gap_0p5()
-            .child(
-                div()
-                    .text_color(label_color)
-                    .child(tr("settings.zoxide_integration")),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(theme.muted)
-                    .child(tr("settings.zoxide_integration_hint")),
+            .justify_between()
+            .gap_2()
+            .px_3()
+            .py_1p5();
+        if available {
+            row = row.cursor_pointer().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                    this.pick_dir_source(id, cx);
+                }),
             );
-
-        let toggle_row = if self.zoxide_available {
-            div()
-                .flex()
-                .flex_row()
-                .items_start()
-                .gap_3()
-                .w_full()
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, cx.listener(Self::toggle_zoxide))
-                .child(track)
-                .child(text)
-        } else {
-            div()
-                .flex()
-                .flex_row()
-                .items_start()
-                .gap_3()
-                .w_full()
-                .child(track)
-                .child(text)
-        };
-
-        let mut block = div().flex().flex_col().gap_1p5().child(toggle_row);
-        if !self.zoxide_available {
-            block = block.child(self.render_zoxide_install_row(cx));
         }
-        block.into_any_element()
+        if selected {
+            row = row.bg(theme.selection);
+        }
+        row.child(div().flex_1().text_color(fg).child(label))
+            .child(
+                div()
+                    .text_color(theme.accent)
+                    .child(if selected { "✓" } else { "" }),
+            )
+            .into_any_element()
     }
 
     fn render_browser_tabs_block(&self, cx: &mut Context<Self>) -> AnyElement {
