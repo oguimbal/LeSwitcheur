@@ -82,7 +82,10 @@ pub use macos::{
 };
 
 #[cfg(target_os = "macos")]
-pub use macos::panel::adjust_key_window_frame;
+pub use macos::panel::{
+    adjust_key_window_frame, configure_open_with_popover, key_window_frame,
+    set_open_with_popover_frame, OPEN_WITH_POPOVER_WIDTH,
+};
 
 #[cfg(target_os = "macos")]
 pub use macos::app_policy::set_accessory as set_accessory_activation_policy;

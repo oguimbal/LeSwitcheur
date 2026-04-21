@@ -1,12 +1,14 @@
 //! The switcher panel itself. Owns a [`SwitcherState`] and renders it.
 
 use gpui::{
-    div, linear, percentage, prelude::*, px, svg, uniform_list, Animation, AnimationExt, AnyElement,
-    App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, ParentElement, Render, ScrollStrategy, SharedString, Styled,
-    Subscription, Transformation, UniformListScrollHandle, Window,
+    canvas, div, linear, percentage, prelude::*, px, svg, uniform_list, Animation, AnimationExt,
+    AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, ScrollStrategy, SharedString,
+    Styled, Subscription, Transformation, UniformListScrollHandle, Window,
 };
+use std::cell::Cell;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -65,6 +67,17 @@ pub enum SwitcherViewEvent {
     /// [`SwitcherView::set_browser_tabs`]. One-shot per switcher session —
     /// emission is gated by a view-level flag reset in `set_items`.
     NeedsBrowserTabs,
+    /// Any state touching the "Open With" popover just changed: the dir
+    /// selection moved, the popover gained/lost keyboard focus, or the
+    /// popover index shifted. The host reads [`SwitcherView`] accessors to
+    /// decide whether to show/move/hide the popover window and to sync its
+    /// view contents.
+    OpenWithStateChanged,
+    /// User pressed Enter (or clicked a row) while the popover was
+    /// keyboard-focused. Carries the 0-based index into the *selectable*
+    /// popover rows (default row excluded). The host resolves it to a
+    /// bundle id and launches the selected folder with that app.
+    OpenWithActivated(usize),
 }
 
 /// Top-of-panel banner shown when the startup update check reported a newer
@@ -115,6 +128,18 @@ pub struct SwitcherView {
     /// keystroke. `None` = no cooldown (either no failure yet, or cooldown
     /// elapsed).
     browser_tabs_retry_after: Option<Instant>,
+    /// Number of *selectable* rows in the "Open With" popover — alternative
+    /// apps, default excluded. Host sets this whenever its detected-apps
+    /// list changes. When zero, the popover must not show and keyboard nav
+    /// into it is a no-op.
+    open_with_count: usize,
+    /// Window-local Y (top-down, points) of the dirs panel's top edge,
+    /// captured during render via a canvas probe. Invariant across
+    /// selection changes inside the panel — only shifts when the banner,
+    /// programs section, or eval row appear/disappear. Cleared to `None`
+    /// when the dirs panel isn't visible so the host can skip popover
+    /// placement until a fresh measurement lands.
+    dirs_panel_top_y: Rc<Cell<Option<f32>>>,
 }
 
 /// Cooldown between scan-failure retries. Long enough that a slow Chrome
@@ -139,8 +164,94 @@ impl SwitcherView {
             zoxide_enabled: false,
             browser_tabs_requested: false,
             browser_tabs_retry_after: None,
+            open_with_count: 0,
+            dirs_panel_top_y: Rc::new(Cell::new(None)),
         }
     }
+
+    /// Install the host-computed count of alternative "open with" entries
+    /// (file managers + editors, default excluded). Emitting
+    /// `OpenWithStateChanged` here keeps the popover window in sync even
+    /// when the count flips between 0 and non-zero (triggering show/hide).
+    pub fn set_open_with_count(&mut self, count: usize, cx: &mut Context<Self>) {
+        if self.open_with_count == count {
+            return;
+        }
+        self.open_with_count = count;
+        if count == 0 {
+            self.state.exit_open_with();
+        }
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
+        cx.notify();
+    }
+
+    /// Mouse hover on a popover row — mirrors the pointer in the popover's
+    /// keyboard selection so Enter hits what the cursor is over.
+    pub fn on_open_with_hover(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.open_with_count == 0 {
+            return;
+        }
+        self.state.set_open_with_index(idx, self.open_with_count);
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
+        cx.notify();
+    }
+
+    /// Mouse click on a popover row — same effect as Enter with that row
+    /// selected. The host performs the actual launch.
+    pub fn on_open_with_click(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx >= self.open_with_count {
+            return;
+        }
+        cx.emit(SwitcherViewEvent::OpenWithActivated(idx));
+    }
+
+    /// Should the popover window currently be visible? True when the dirs
+    /// pane has focus, at least one dir row exists, and at least one
+    /// alternative opener was detected.
+    pub fn open_with_visible(&self) -> bool {
+        self.state.active_section() == Section::Dirs
+            && self.state.dirs_visible()
+            && self.open_with_count > 0
+    }
+
+    /// Keyboard index inside the popover. `None` while the popover is
+    /// passive (dir row still focused).
+    pub fn open_with_index(&self) -> Option<usize> {
+        self.state.open_with_index()
+    }
+
+    /// Index of the currently highlighted dir row — used by the host to
+    /// compute where the popover should be drawn.
+    pub fn selected_dir_idx(&self) -> usize {
+        self.state.selected_dir_idx()
+    }
+
+    /// Window-local Y (top-down, logical points) of the dirs panel's top
+    /// edge, or `None` before it has rendered. Captured once per frame via
+    /// a canvas probe placed on the panel container. The host combines it
+    /// with `selected_dir_idx()` and the known row/header dimensions to
+    /// anchor the floating popover — stable across popover-selection
+    /// changes, no stale-value races.
+    pub fn dirs_panel_top_y(&self) -> Option<f32> {
+        self.dirs_panel_top_y.get()
+    }
+
+    /// Layout constants of the dirs panel used by the host to translate
+    /// `selected_dir_idx()` into a window-local row centre without needing
+    /// per-row probes. Mirrors [`list::ROW_HEIGHT`] + the panel's own
+    /// padding/header. Kept in sync with [`render_dirs_panel`].
+    pub fn dirs_row_center_from_panel_top(&self, selected_dir: usize) -> f32 {
+        const HEADER_OFFSET: f32 = 28.0; // py_2 top (8) + header line (~18) + gap_0p5 (2)
+        const ROW_HEIGHT: f32 = 44.0;
+        HEADER_OFFSET + (selected_dir as f32 + 0.5) * ROW_HEIGHT
+    }
+
+    /// Read-only view of the dirs pane contents, used by the host to resolve
+    /// the highlighted row's target path without pulling state out.
+    pub fn dirs(&self) -> &[Item] {
+        self.state.dirs()
+    }
+
 
     /// Mirror the user's zoxide_integration setting. When flipped off, the
     /// right-pane suggestions are cleared immediately. When flipped on, the
@@ -153,6 +264,7 @@ impl SwitcherView {
         self.zoxide_enabled = enabled;
         if !enabled {
             self.state.set_dirs(Vec::new());
+            cx.emit(SwitcherViewEvent::OpenWithStateChanged);
             cx.notify();
         } else {
             // Ask the host to refresh dirs against the current query so the
@@ -195,6 +307,7 @@ impl SwitcherView {
             cx.emit(SwitcherViewEvent::QueryChanged(String::new()));
         }
         self.emit_height_delta_if_changed(cx);
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         cx.notify();
     }
 
@@ -221,6 +334,7 @@ impl SwitcherView {
     pub fn drop_dir(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.state.remove_dir(path);
         self.emit_height_delta_if_changed(cx);
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         cx.notify();
     }
 
@@ -253,6 +367,7 @@ impl SwitcherView {
     /// the result of an off-thread zoxide query (debounced per keystroke).
     pub fn set_dirs(&mut self, dirs: Vec<Item>, cx: &mut Context<Self>) {
         self.state.set_dirs(dirs);
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         cx.notify();
     }
 
@@ -292,6 +407,7 @@ impl SwitcherView {
     /// turned off in settings or zoxide returns an empty list.
     pub fn clear_dirs(&mut self, cx: &mut Context<Self>) {
         self.state.set_dirs(Vec::new());
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         cx.notify();
     }
 
@@ -361,6 +477,13 @@ impl SwitcherView {
             if view.nag_phase == NagPhase::Activating {
                 return;
             }
+            // Clicking the floating "Open With" popover briefly flips main
+            // to inactive even though the popover is a nonactivating panel
+            // we own. Without this check, picking an app via the mouse
+            // would dismiss the whole switcher before the click even fires.
+            if view.open_with_visible() {
+                return;
+            }
             cx.emit(SwitcherViewEvent::Dismissed);
         });
         self._activation_sub = Some(sub);
@@ -372,14 +495,35 @@ impl SwitcherView {
         if self.nag_phase != NagPhase::Hidden {
             return;
         }
+        if self.state.open_with_index().is_some() {
+            self.state.open_with_prev(self.open_with_count);
+            cx.emit(SwitcherViewEvent::OpenWithStateChanged);
+            cx.notify();
+            return;
+        }
         self.select_prev_external(cx);
+        self.emit_open_with_if_dirs(cx);
     }
 
     fn on_select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
         if self.nag_phase != NagPhase::Hidden {
             return;
         }
+        if self.state.open_with_index().is_some() {
+            self.state.open_with_next(self.open_with_count);
+            cx.emit(SwitcherViewEvent::OpenWithStateChanged);
+            cx.notify();
+            return;
+        }
         self.select_next_external(cx);
+        self.emit_open_with_if_dirs(cx);
+    }
+
+    /// Helper: every time the user's selection may have moved inside (or
+    /// into) the Dirs pane, fire [`SwitcherViewEvent::OpenWithStateChanged`]
+    /// so the host can reposition / hide the popover window accordingly.
+    fn emit_open_with_if_dirs(&mut self, cx: &mut Context<Self>) {
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
     }
 
     fn scroll_selection_into_view(&self) {
@@ -432,6 +576,12 @@ impl SwitcherView {
 
     fn on_confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
         if self.nag_phase != NagPhase::Hidden {
+            return;
+        }
+        // Popover has keyboard focus → hand off to the host so it launches
+        // the dir with the selected app instead of the default handler.
+        if let Some(i) = self.state.open_with_index() {
+            cx.emit(SwitcherViewEvent::OpenWithActivated(i));
             return;
         }
         if let Some(item) = self.state.selected().cloned() {
@@ -493,6 +643,7 @@ impl SwitcherView {
 
     fn on_dir_row_click(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.state.set_selected_dir(idx);
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         if let Some(item) = self.state.selected().cloned() {
             self._activation_sub = None;
             cx.emit(SwitcherViewEvent::Confirmed(item));
@@ -504,6 +655,7 @@ impl SwitcherView {
             return;
         }
         self.state.set_selected_dir(idx);
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         cx.notify();
     }
 
@@ -530,6 +682,7 @@ impl SwitcherView {
         } else {
             return;
         }
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         cx.notify();
     }
 
@@ -544,10 +697,18 @@ impl SwitcherView {
         } else {
             return;
         }
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         cx.notify();
     }
 
     fn on_dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
+        // Escape while the popover is focused just closes the popover.
+        if self.state.open_with_index().is_some() {
+            self.state.exit_open_with();
+            cx.emit(SwitcherViewEvent::OpenWithStateChanged);
+            cx.notify();
+            return;
+        }
         self._activation_sub = None;
         cx.emit(SwitcherViewEvent::Dismissed);
     }
@@ -571,12 +732,21 @@ impl SwitcherView {
     }
 
     fn on_move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        // Left while the popover is focused exits the popover and returns
+        // focus to the dir row. Keeps the input caret untouched.
+        if self.state.open_with_index().is_some() {
+            self.state.exit_open_with();
+            cx.emit(SwitcherViewEvent::OpenWithStateChanged);
+            cx.notify();
+            return;
+        }
         // When the dirs pane is focused, Left snaps focus back to the
         // windows pane (the input doesn't have a visible caret while a
         // dir row is selected, so consuming the keystroke here costs
         // nothing). Otherwise behave as a normal text-caret motion.
         if self.state.active_section() == Section::Dirs {
             self.state.focus_windows();
+            cx.emit(SwitcherViewEvent::OpenWithStateChanged);
             cx.notify();
             return;
         }
@@ -584,6 +754,17 @@ impl SwitcherView {
         cx.notify();
     }
     fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        // In the Dirs pane, Right enters the "Open With" popover when one
+        // is available. Activates keyboard focus on its first row.
+        if self.state.active_section() == Section::Dirs
+            && self.open_with_count > 0
+            && self.state.open_with_index().is_none()
+        {
+            self.state.enter_open_with(self.open_with_count);
+            cx.emit(SwitcherViewEvent::OpenWithStateChanged);
+            cx.notify();
+            return;
+        }
         // From the windows/programs pane, Right at the end of the input
         // jumps focus into the dirs pane (when one is visible). The
         // caret-at-end check preserves normal text editing — typing a
@@ -593,6 +774,7 @@ impl SwitcherView {
             && self.input.cursor() >= self.input.text().len()
         {
             self.state.focus_dirs();
+            cx.emit(SwitcherViewEvent::OpenWithStateChanged);
             cx.notify();
             return;
         }
@@ -1013,11 +1195,11 @@ impl Render for SwitcherView {
                             .flex_row()
                             .flex_1()
                             .overflow_hidden()
-                            .child(render_dirs_panel(&self.state, &theme, cx, true)),
+                            .child(render_dirs_panel(&self.state, &theme, cx, true, self.dirs_panel_top_y.clone())),
                     )
                 } else {
                     let dirs_pane = dirs_visible
-                        .then(|| render_dirs_panel(&self.state, &theme, cx, false));
+                        .then(|| render_dirs_panel(&self.state, &theme, cx, false, self.dirs_panel_top_y.clone()));
                     Some(
                         div()
                             .flex()
@@ -1248,6 +1430,7 @@ fn render_dirs_panel(
     theme: &Theme,
     cx: &mut Context<SwitcherView>,
     full_width: bool,
+    dirs_panel_top_y: Rc<Cell<Option<f32>>>,
 ) -> AnyElement {
     use switcheur_core::MatchResult;
 
@@ -1283,17 +1466,33 @@ fn render_dirs_panel(
         })
         .collect();
 
-    let mut panel = div().flex().flex_col();
+    let mut panel = div().relative().flex().flex_col();
     if full_width {
         panel = panel.flex_1().min_w_0();
     } else {
         panel = panel.w(px(260.0)).border_l_1().border_color(theme.border);
     }
+    // Zero-area canvas pinned at the panel's top-left whose prepaint fires
+    // every frame with the panel's actual bounds — a single, selection-
+    // independent probe the host uses to anchor the "Open With" popover.
+    let cell = dirs_panel_top_y.clone();
+    let probe = canvas(
+        move |bounds, _w, _cx| {
+            cell.set(Some(bounds.origin.y.into()));
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .left(px(0.0))
+    .top(px(0.0))
+    .w(px(1.0))
+    .h(px(1.0));
     panel
         .px_2()
         .py_2()
         .gap_0p5()
         .overflow_hidden()
+        .child(probe)
         .child(
             div()
                 .px_2()

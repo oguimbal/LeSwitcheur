@@ -108,12 +108,18 @@ pub struct Config {
     /// fallback tier is actually reached. On by default.
     #[serde(default = "default_true")]
     pub browser_tabs_integration: bool,
-    /// Stable id of the file manager used to open folders picked from the
+    /// Stable id of the app used by default to open folders picked from the
     /// switcher. `None` (or an unknown / uninstalled id) resolves to the
     /// system default (Finder). See
-    /// [`crate::file_manager::KNOWN_FILE_MANAGERS`].
+    /// [`crate::file_manager::known_folder_openers`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_manager: Option<String>,
+    /// MRU order for the "Open With" popover attached to zoxide rows. Stores
+    /// stable `id`s (not bundle ids). Most-recently-used first; the default
+    /// opener is always rendered first in the popover regardless of its
+    /// position here.
+    #[serde(default)]
+    pub folder_opener_order: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -165,6 +171,7 @@ impl Default for Config {
             zoxide_integration: true,
             browser_tabs_integration: true,
             file_manager: None,
+            folder_opener_order: Vec::new(),
         }
     }
 }
@@ -233,6 +240,14 @@ impl Config {
     pub fn promote_llm_provider(&mut self, p: LlmProvider) {
         self.llm_provider_order.retain(|x| *x != p);
         self.llm_provider_order.insert(0, p);
+    }
+
+    /// Move `id` to the front of the "open with" MRU list, preserving the
+    /// relative order of the rest. Called after a successful folder launch so
+    /// the next popover render floats the user's habitual editor up top.
+    pub fn promote_folder_opener(&mut self, id: &str) {
+        self.folder_opener_order.retain(|x| x != id);
+        self.folder_opener_order.insert(0, id.to_string());
     }
 
     fn try_load() -> Result<Option<Self>> {

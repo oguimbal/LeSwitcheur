@@ -32,6 +32,7 @@ use switcheur_platform::{
 };
 use switcheur_ui::{
     onboarding_view::{OnboardingView, OnboardingViewEvent},
+    open_with_popover::{OpenWithEntry, OpenWithPopoverEvent, OpenWithPopoverView},
     settings_view::{SettingsView, SettingsViewEvent},
     switcher_view::{NagPhase, SwitcherView, SwitcherViewEvent, UpdateBannerState},
     thanks_view::{ThanksState, ThanksView, ThanksViewEvent},
@@ -292,6 +293,8 @@ fn main() -> Result<()> {
             // shell PATH unless we walk it explicitly, so the detector
             // probes both PATH and well-known absolute install locations.
             zoxide_bin: Rc::new(RefCell::new(switcheur_platform::zoxide::detect())),
+            open_with: Rc::new(RefCell::new(None)),
+            open_with_entries: Rc::new(RefCell::new(Vec::new())),
         };
         if open_on_start {
             tracing::info!("cold launch: triggering switcher on startup");
@@ -375,6 +378,27 @@ struct AppState {
     /// Path to the user's `zoxide` binary, resolved once at boot. `None` when
     /// zoxide isn't installed — the right-side dirs panel stays hidden then.
     zoxide_bin: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// The floating "Open With" popover attached to the selected zoxide row.
+    /// Opened lazily the first time the Dirs pane gains focus with at least
+    /// one alternative app detected; closed whenever the switcher itself
+    /// closes or the pane loses focus.
+    open_with: Rc<RefCell<Option<OpenWithSlot>>>,
+    /// Popover entry list computed for the current switcher session. First
+    /// entry is the default (greyed), rest are the selectable alternatives
+    /// (MRU-first). Rebuilt on every switcher open so the user sees apps
+    /// installed between sessions, and cleared when the switcher closes.
+    open_with_entries: Rc<RefCell<Vec<OpenWithEntry>>>,
+}
+
+/// Live popover window + its state. Mirrors [`WindowSlot`] but carries the
+/// typed entity so the host can push fresh entries/selection into the view
+/// without bouncing through events. The entry list itself lives on
+/// [`AppState::open_with_entries`] so click-to-id resolution doesn't need a
+/// borrow dance through this struct.
+struct OpenWithSlot {
+    handle: AnyWindowHandle,
+    entity: Entity<OpenWithPopoverView>,
+    _sub: Subscription,
 }
 
 /// In-flight Cmd+Tab cycle whose panel hasn't been shown yet. Lives entirely
@@ -771,9 +795,22 @@ fn promote_pending_to_panel(cx: &mut AsyncApp, state: &AppState) -> Result<()> {
 
 fn close_current(cx: &mut AsyncApp, state: &AppState) {
     let slot = state.current.borrow_mut().take();
+    let popover = state.open_with.borrow_mut().take();
+    state.open_with_entries.borrow_mut().clear();
     if let Some(slot) = slot {
         let _ = cx.update(|cx| {
+            if let Some(popover) = popover {
+                let _ = cx.update_window(popover.handle, |_ent, window, _cx| {
+                    window.remove_window();
+                });
+            }
             let _ = cx.update_window(slot.handle, |_ent, window, _cx| {
+                window.remove_window();
+            });
+        });
+    } else if let Some(popover) = popover {
+        let _ = cx.update(|cx| {
+            let _ = cx.update_window(popover.handle, |_ent, window, _cx| {
                 window.remove_window();
             });
         });
@@ -874,6 +911,13 @@ fn open_switcher_with_items(
     let zoxide_enabled = state.config.borrow().zoxide_integration
         && state.zoxide_bin.borrow().is_some();
     let browser_tabs_enabled = state.config.borrow().browser_tabs_integration;
+
+    // Compute the "Open With" popover entry list once per switcher session
+    // so we don't re-scan the Applications directory on every hover. Stored
+    // on AppState; consulted by the popover open/activate handlers below.
+    let open_with_entries = build_open_with_entries(&state.config.borrow());
+    let open_with_selectable = open_with_entries.len().saturating_sub(1);
+    *state.open_with_entries.borrow_mut() = open_with_entries;
     let handle: WindowHandle<SwitcherView> = cx.open_window(options, move |window, cx| {
         let entity = cx.new(|cx| {
             let mut view = SwitcherView::new(cx);
@@ -884,6 +928,7 @@ fn open_switcher_with_items(
             view.set_programs(programs_for_builder, cx);
             view.set_llm_provider_order(llm_order, cx);
             view.set_ask_llm_enabled(ask_llm_enabled, cx);
+            view.set_open_with_count(open_with_selectable, cx);
             if show_nag {
                 view.set_nag_phase(NagPhase::Visible, cx);
             }
@@ -1024,6 +1069,19 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                 }
             })
             .detach();
+            return;
+        }
+        SwitcherViewEvent::OpenWithStateChanged => {
+            // Defer so the SwitcherView's entity is off the stack by the
+            // time we re-enter `cx.update_entity` — avoids the noisy
+            // "RefCell already borrowed" log GPUI emits when a subscriber
+            // tries to touch the emitting entity synchronously.
+            let state_def = state.clone();
+            cx.defer(move |cx| sync_open_with_popover(&state_def, cx));
+            return;
+        }
+        SwitcherViewEvent::OpenWithActivated(idx) => {
+            activate_open_with(*idx, state, cx);
             return;
         }
         SwitcherViewEvent::NeedsBrowserTabs => {
@@ -1215,7 +1273,9 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             }
             slot
         }
-        SwitcherViewEvent::FrameDeltaChanged { .. } => unreachable!("handled above"),
+        SwitcherViewEvent::FrameDeltaChanged { .. }
+        | SwitcherViewEvent::OpenWithStateChanged
+        | SwitcherViewEvent::OpenWithActivated(_) => unreachable!("handled above"),
         SwitcherViewEvent::LicenseActivateRequested
         | SwitcherViewEvent::LicenseDismissed
         | SwitcherViewEvent::CloseWindowRequested(_)
@@ -1227,11 +1287,273 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
     };
 
     if let Some(slot) = slot_to_close {
+        // The popover rides with the main window — close it first so it
+        // doesn't linger on screen while the switcher fades out.
+        close_open_with_popover(state, cx);
+        state.open_with_entries.borrow_mut().clear();
         let _ = cx.update_window(slot.handle, |_ent, window, _cx| {
             window.remove_window();
         });
     }
     reset_system_switcher_cycle(state);
+}
+
+/// Horizontal offset between the main window's right edge and the popover
+/// window. The popover's arrow notch has its tip at the popover's left
+/// edge (x=0), so a negative value makes the tip visually bite into the
+/// main window — the connection reads as intentional rather than detached.
+const POPOVER_GAP: f32 = -4.0;
+
+/// Reconcile popover window state with the current switcher view state. Called
+/// on every [`SwitcherViewEvent::OpenWithStateChanged`] — decides whether to
+/// open, close, or reposition the floating popover, and pushes the latest
+/// entry list + selection into its view.
+fn sync_open_with_popover(state: &AppState, cx: &mut App) {
+    let Some(slot) = state.current.borrow().as_ref().cloned_entity() else {
+        return;
+    };
+    let (visible, popover_idx, panel_top_y, selected_dir, entries_len) =
+        cx.update_entity(&slot, |view, _cx| {
+            (
+                view.open_with_visible(),
+                view.open_with_index(),
+                view.dirs_panel_top_y(),
+                view.selected_dir_idx(),
+                state.open_with_entries.borrow().len(),
+            )
+        });
+
+    if !visible || entries_len <= 1 {
+        close_open_with_popover(state, cx);
+        return;
+    }
+
+    // `panel_top_y` is populated by a canvas probe on the dirs panel
+    // container. It only shifts when the banner, programs section, or
+    // eval row appear/disappear — not when the popover selection moves —
+    // so one fresh reading per layout change is enough and no stale-value
+    // races occur. If we haven't gotten a reading yet, retry on the next
+    // frame via a second defer so the popover never flashes wrong.
+    let Some(panel_top_y) = panel_top_y else {
+        let state_retry = state.clone();
+        cx.defer(move |cx| sync_open_with_popover(&state_retry, cx));
+        return;
+    };
+    // Row centre from window top = panel_top + header + (idx + 0.5) * row.
+    let row_center_from_top = cx.update_entity(&slot, |view, _cx| {
+        view.dirs_row_center_from_panel_top(selected_dir)
+    }) + panel_top_y;
+
+    // Compute popover position relative to the main switcher's NSWindow
+    // (bottom-left screen coords). Row centre is measured from the top of
+    // the main window so we compensate with `my + mh - offset`.
+    let Some((mx, my, mw, mh)) = switcheur_platform::key_window_frame() else {
+        return;
+    };
+    let row_middle_y = my + mh - row_center_from_top as f64;
+
+    let popover_height = 16.0 + 32.0 * entries_len as f64 + 16.0;
+    // Small gap between the main window's right edge and the popover's
+    // left edge. The notch tip sits at x=0 of the popover, so this value
+    // is the visible breathing room between the arrow point and the
+    // switcher border.
+    let popover_origin_x = mx + mw + POPOVER_GAP as f64;
+    let popover_origin_y = row_middle_y - popover_height / 2.0;
+
+    let just_opened = state.open_with.borrow().is_none();
+    if just_opened {
+        if let Err(e) = open_open_with_popover_window(state, cx) {
+            tracing::warn!("open popover window: {e:#}");
+            return;
+        }
+    }
+    // NSWindow setFrame triggers `windowDidMove:` on the window delegate,
+    // which GPUI handles by re-borrowing the App. Doing that synchronously
+    // from inside our own `cx` borrow produces "RefCell already borrowed"
+    // logs, so push the setFrame call (and the post-create polish) through
+    // the foreground executor — runs on the main thread at the next tick
+    // when the App is no longer borrowed.
+    let (ox, oy, oh) = (popover_origin_x, popover_origin_y, popover_height);
+    let configure_after = just_opened;
+    cx.foreground_executor()
+        .spawn(async move {
+            if configure_after {
+                switcheur_platform::configure_open_with_popover();
+            }
+            switcheur_platform::set_open_with_popover_frame(ox, oy, oh);
+        })
+        .detach();
+
+    // Sync entries + selection into the popover entity.
+    if let Some(open_with) = state.open_with.borrow().as_ref() {
+        let entries = state.open_with_entries.borrow().clone();
+        let entity = open_with.entity.clone();
+        let selected = popover_idx;
+        cx.update_entity(&entity, |v, cx| {
+            v.set_entries(entries, cx);
+            v.set_selected(selected, cx);
+        });
+    }
+}
+
+/// Open the popover NSWindow (via GPUI), wire its event subscription, and
+/// apply the transparent / no-shadow / no-Cmd-Tab polish that keeps it
+/// feeling like a bubble instead of a second application window.
+///
+/// The `WindowBounds` passed here only sets the window size — the actual
+/// screen position is applied by the caller immediately afterwards via
+/// `set_open_with_popover_frame` (NSWindow bottom-left coords), so we can
+/// avoid converting from GPUI's top-down convention every time.
+fn open_open_with_popover_window(state: &AppState, cx: &mut App) -> Result<()> {
+    let appearance = state.config.borrow().appearance;
+    let theme = theme_for(appearance);
+
+    let bounds = Bounds {
+        origin: point(px(0.0), px(0.0)),
+        size: size(
+            px(switcheur_platform::OPEN_WITH_POPOVER_WIDTH as f32),
+            px(100.0),
+        ),
+    };
+    let options = WindowOptions {
+        titlebar: None,
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        kind: WindowKind::PopUp,
+        is_movable: false,
+        focus: false,
+        show: true,
+        window_background: WindowBackgroundAppearance::Transparent,
+        ..Default::default()
+    };
+
+    let entity_slot: Rc<RefCell<Option<Entity<OpenWithPopoverView>>>> =
+        Rc::new(RefCell::new(None));
+    let slot_for_builder = entity_slot.clone();
+    let handle: WindowHandle<OpenWithPopoverView> = cx.open_window(options, move |_w, cx| {
+        let entity = cx.new(|cx| OpenWithPopoverView::new(theme, cx));
+        *slot_for_builder.borrow_mut() = Some(entity.clone());
+        entity
+    })?;
+
+    // Transparent-bg / no-shadow / Cmd-Tab-excluded tweaks are applied by
+    // the caller via the foreground executor so they don't race with the
+    // App borrow held by `cx.open_window`.
+
+    let entity = entity_slot.borrow().clone().expect("builder populated slot");
+    let state_sub = state.clone();
+    let sub = cx.subscribe(
+        &entity,
+        move |_ent, ev: &OpenWithPopoverEvent, cx: &mut App| {
+            handle_popover_event(ev, &state_sub, cx);
+        },
+    );
+
+    *state.open_with.borrow_mut() = Some(OpenWithSlot {
+        handle: handle.into(),
+        entity,
+        _sub: sub,
+    });
+    Ok(())
+}
+
+fn handle_popover_event(ev: &OpenWithPopoverEvent, state: &AppState, cx: &mut App) {
+    let Some(switcher) = state.current.borrow().as_ref().cloned_entity() else {
+        return;
+    };
+    match ev {
+        OpenWithPopoverEvent::Hovered(idx) => {
+            let idx = *idx;
+            cx.update_entity(&switcher, |v, cx| v.on_open_with_hover(idx, cx));
+        }
+        OpenWithPopoverEvent::Confirmed(id) => {
+            // Resolve id to its selectable index (entries[0] is default).
+            let entries = state.open_with_entries.borrow();
+            let Some(sel_idx) = entries
+                .iter()
+                .skip(1)
+                .position(|e| e.id == *id)
+            else {
+                return;
+            };
+            drop(entries);
+            cx.update_entity(&switcher, |v, cx| v.on_open_with_click(sel_idx, cx));
+        }
+    }
+}
+
+/// Activate the folder under the popover-focused row. `sel_idx` is into the
+/// selectable entries list (default excluded). Launches via LaunchServices,
+/// promotes the picked opener in the MRU list, persists config, and closes
+/// the switcher.
+fn activate_open_with(sel_idx: usize, state: &AppState, cx: &mut App) {
+    let Some(switcher) = state.current.borrow().as_ref().cloned_entity() else {
+        return;
+    };
+    // Pull the selected dir path off the view.
+    let dir_path: Option<std::path::PathBuf> = cx.update_entity(&switcher, |v, _cx| {
+        v.dirs()
+            .get(v.selected_dir_idx())
+            .and_then(|it| match it {
+                Item::Dir(d) => Some(d.path.clone()),
+                _ => None,
+            })
+    });
+    let Some(dir_path) = dir_path else {
+        return;
+    };
+    let entries = state.open_with_entries.borrow();
+    // entries[0] is the default; selectable indices start at entries[1].
+    let Some(entry) = entries.get(sel_idx + 1) else {
+        return;
+    };
+    let bundle_id = entry.bundle_id.clone();
+    let id = entry.id.clone();
+    drop(entries);
+
+    if let Err(e) =
+        switcheur_platform::file_manager::open_folder_with(Some(&bundle_id), &dir_path)
+    {
+        tracing::warn!("open_folder_with {}: {e:#}", bundle_id);
+    }
+
+    {
+        let mut cfg = state.config.borrow_mut();
+        cfg.promote_folder_opener(&id);
+        if let Err(e) = cfg.save() {
+            tracing::warn!("save config after folder opener promote: {e:#}");
+        }
+    }
+
+    close_open_with_popover(state, cx);
+    let slot = state.current.borrow_mut().take();
+    if let Some(slot) = slot {
+        let _ = cx.update_window(slot.handle, |_ent, window, _cx| {
+            window.remove_window();
+        });
+    }
+}
+
+/// Close the popover window if one is open. Safe to call when there is no
+/// popover (no-op). Matches the `close_current` helper for the main switcher.
+fn close_open_with_popover(state: &AppState, cx: &mut App) {
+    let Some(slot) = state.open_with.borrow_mut().take() else {
+        return;
+    };
+    let _ = cx.update_window(slot.handle, |_ent, window, _cx| {
+        window.remove_window();
+    });
+}
+
+/// Convenience: pull a cloned [`Entity<SwitcherView>`] out of the current
+/// switcher slot without holding the borrow across the await / entity update.
+trait SwitcherSlotExt {
+    fn cloned_entity(&self) -> Option<Entity<SwitcherView>>;
+}
+
+impl SwitcherSlotExt for Option<&SwitcherSlot> {
+    fn cloned_entity(&self) -> Option<Entity<SwitcherView>> {
+        self.map(|s| s.entity.clone())
+    }
 }
 
 fn open_onboarding_window(state: &AppState, cx: &mut App) -> Result<()> {
@@ -1491,10 +1813,10 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
     let zoxide_available = detected.is_some();
     *state.zoxide_bin.borrow_mut() = detected;
 
-    // Re-scan installed file managers on settings open so the list tracks
-    // apps installed between runs (or mid-session).
-    let available_file_managers = switcheur_core::file_manager::available_file_managers(
-        &switcheur_platform::file_manager::detected_file_manager_bundle_ids(),
+    // Re-scan installed folder openers (file managers + editors) on settings
+    // open so the list tracks apps installed between runs (or mid-session).
+    let available_folder_openers = switcheur_core::file_manager::available_folder_openers(
+        &switcheur_platform::file_manager::detected_folder_opener_bundle_ids(),
     );
 
     let bounds = initial_bounds(cx, SETTINGS_WIDTH, SETTINGS_HEIGHT);
@@ -1538,7 +1860,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
                 zoxide_available,
                 browser_tabs_integration,
                 file_manager,
-                available_file_managers,
+                available_folder_openers,
                 cx,
             );
             v.set_theme(theme, cx);
@@ -2521,8 +2843,55 @@ fn theme_for(appearance: Appearance) -> Theme {
 /// the system default handler (Finder).
 fn resolve_file_manager_bundle_id(cfg: &Config) -> Option<String> {
     let id = cfg.file_manager.as_deref()?;
-    let installed = switcheur_platform::file_manager::detected_file_manager_bundle_ids();
+    let installed = switcheur_platform::file_manager::detected_folder_opener_bundle_ids();
     switcheur_core::file_manager::resolve_bundle_id(id, &installed)
+}
+
+/// Build the "Open With" popover entry list. Finder always appears even when
+/// absent from the Applications scan (macOS ships it). Layout:
+///
+/// - `entries[0]` is the user's current default, rendered greyed + tagged
+///   "default" + non-selectable.
+/// - `entries[1..]` are the alternatives, MRU-first, then the rest in their
+///   canonical order. These are the rows the user can keyboard-nav into.
+fn build_open_with_entries(cfg: &Config) -> Vec<OpenWithEntry> {
+    use switcheur_core::file_manager::{order_folder_openers, FINDER_ID};
+    let installed = switcheur_platform::file_manager::detected_folder_opener_bundle_ids();
+    let avail = switcheur_core::file_manager::available_folder_openers(&installed);
+    let default_id = cfg.file_manager.as_deref().unwrap_or(FINDER_ID).to_string();
+    let ordered = order_folder_openers(avail, &cfg.folder_opener_order, &default_id);
+
+    let programs = switcheur_platform::macos::programs::list_programs_cached();
+    let mut out = Vec::with_capacity(ordered.len());
+    for (i, a) in ordered.iter().enumerate() {
+        let bundle_path = programs
+            .iter()
+            .find(|p| p.bundle_id.as_deref() == Some(&a.bundle_id))
+            .map(|p| p.bundle_path.clone());
+        let icon_path = match (&bundle_path, a.id) {
+            (Some(bp), _) => switcheur_platform::macos::icons::icon_for_bundle(
+                bp.to_string_lossy().as_ref(),
+                &a.bundle_id,
+            ),
+            (None, id) if id == FINDER_ID => {
+                // Finder isn't in the Applications scan — hit its well-known
+                // system path so the default row isn't left with a blank.
+                switcheur_platform::macos::icons::icon_for_bundle(
+                    "/System/Library/CoreServices/Finder.app",
+                    a.bundle_id.as_str(),
+                )
+            }
+            _ => None,
+        };
+        out.push(OpenWithEntry {
+            id: a.id.to_string(),
+            display_name: a.display_name.to_string(),
+            bundle_id: a.bundle_id.clone(),
+            icon_path,
+            is_default: i == 0,
+        });
+    }
+    out
 }
 
 fn initial_bounds(cx: &mut App, width: f32, height: f32) -> Bounds<Pixels> {

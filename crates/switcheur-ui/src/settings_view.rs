@@ -11,7 +11,7 @@ use gpui::{
     SharedString, Styled, Window,
 };
 use switcheur_core::{
-    file_manager::{AvailableFileManager, FINDER_ID},
+    file_manager::{AvailableFolderOpener, FINDER_ID},
     AppMatch, ExclusionFilter, ExclusionRule, HotkeySpec, SortOrder,
 };
 use switcheur_i18n::{modifier_symbol, tr as _tr, tr_sub};
@@ -187,7 +187,7 @@ pub struct SettingsView {
     file_manager: Option<String>,
     /// Managers the host detected installed. Finder is always first; the
     /// rest are only included when their bundle was found on disk.
-    available_file_managers: Vec<AvailableFileManager>,
+    available_folder_openers: Vec<AvailableFolderOpener>,
     file_manager_picker_open: bool,
 }
 
@@ -211,7 +211,7 @@ impl SettingsView {
         zoxide_available: bool,
         browser_tabs_integration: bool,
         file_manager: Option<String>,
-        available_file_managers: Vec<AvailableFileManager>,
+        available_folder_openers: Vec<AvailableFolderOpener>,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
@@ -257,7 +257,7 @@ impl SettingsView {
             zoxide_available,
             browser_tabs_integration,
             file_manager,
-            available_file_managers,
+            available_folder_openers,
             file_manager_picker_open: false,
         };
         view.recompute_errors();
@@ -2020,7 +2020,7 @@ impl SettingsView {
         let theme = self.theme;
         let current_id: &str = self.file_manager.as_deref().unwrap_or(FINDER_ID);
         let current_label: SharedString = self
-            .available_file_managers
+            .available_folder_openers
             .iter()
             .find(|m| m.id == current_id)
             .map(|m| SharedString::from(m.display_name))
@@ -2078,10 +2078,13 @@ impl SettingsView {
         let current_id: &str = self.file_manager.as_deref().unwrap_or(FINDER_ID);
 
         let mut popover = div()
+            .id("settings-folder-opener-popover")
             .absolute()
             .top(px(38.0))
             .left(px(0.0))
             .w_full()
+            .max_h(px(360.0))
+            .overflow_y_scroll()
             .bg(theme.background)
             .border_1()
             .border_color(theme.border)
@@ -2091,7 +2094,7 @@ impl SettingsView {
             .flex_col()
             .py_1();
 
-        for entry in &self.available_file_managers {
+        for entry in &self.available_folder_openers {
             let selected = entry.id == current_id;
             // Finder is the default → emit None so the config stays clean.
             let payload: Option<String> = if entry.id == FINDER_ID {

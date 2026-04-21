@@ -83,6 +83,10 @@ llm:
 launcher:
   open_url: "Open URL"
 
+open_with:
+  default: "default"
+  header: "Open with…"
+
 keys:
   space: "Space"
   tab: "Tab"

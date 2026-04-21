@@ -62,6 +62,12 @@ pub struct SwitcherState {
     detected_url: Option<Arc<str>>,
     llm_provider_order: Vec<LlmProvider>,
     ask_llm_enabled: bool,
+    /// When the Dirs pane is active and the user has pressed Right (or clicked
+    /// a popover row), this tracks the selection inside the floating "Open
+    /// With" popover. `None` means the popover is passive — shown next to the
+    /// selected dir row, but keyboard focus still belongs to the dir list so
+    /// Enter opens the folder in the default app.
+    open_with_index: Option<usize>,
 }
 
 impl SwitcherState {
@@ -84,6 +90,7 @@ impl SwitcherState {
             detected_url: None,
             llm_provider_order: LlmProvider::default_order(),
             ask_llm_enabled: true,
+            open_with_index: None,
         }
     }
 
@@ -189,6 +196,7 @@ impl SwitcherState {
         if self.dirs.len() == before {
             return;
         }
+        self.open_with_index = None;
         if self.dirs.is_empty() {
             // Emptying the pane: hand focus back to windows and rerank so the
             // "Ask LLM" fallback can come back in (it was suppressed while
@@ -219,6 +227,7 @@ impl SwitcherState {
         let presence_changed = self.dirs.is_empty() != dirs.is_empty();
         self.dirs = dirs;
         self.selected_dir = 0;
+        self.open_with_index = None;
         if was_focus && self.dirs.is_empty() {
             self.active_section = Section::Windows;
         }
@@ -268,6 +277,7 @@ impl SwitcherState {
     /// Move keyboard focus back to the windows pane (the default home).
     pub fn focus_windows(&mut self) {
         self.active_section = Section::Windows;
+        self.open_with_index = None;
     }
 
     /// Jump the dirs selection to a specific index + activate the section.
@@ -276,8 +286,63 @@ impl SwitcherState {
         if self.dirs.is_empty() {
             return;
         }
+        let changed = self.active_section != Section::Dirs || self.selected_dir != idx;
         self.active_section = Section::Dirs;
         self.selected_dir = idx.min(self.dirs.len() - 1);
+        // Reset popover focus whenever the row under the popover changes so
+        // the next Right-arrow lands on the top item.
+        if changed {
+            self.open_with_index = None;
+        }
+    }
+
+    /// Popover selection index, or `None` while the popover is passive
+    /// (keyboard still on the dir row).
+    pub fn open_with_index(&self) -> Option<usize> {
+        self.open_with_index
+    }
+
+    /// Activate the popover on its first row. No-op if `count == 0`.
+    pub fn enter_open_with(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.open_with_index = Some(0);
+    }
+
+    /// Clear popover focus so Enter falls back to the default opener.
+    pub fn exit_open_with(&mut self) {
+        self.open_with_index = None;
+    }
+
+    /// Jump the popover selection to a specific index. Used when the user
+    /// clicks a popover row with the mouse (no prior "enter popover" step).
+    pub fn set_open_with_index(&mut self, idx: usize, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.open_with_index = Some(idx.min(count - 1));
+    }
+
+    /// Popover up, wrapping at the top. Exits the popover if nothing is there.
+    pub fn open_with_prev(&mut self, count: usize) {
+        if count == 0 {
+            self.open_with_index = None;
+            return;
+        }
+        let i = self.open_with_index.unwrap_or(0);
+        let next = if i == 0 { count - 1 } else { i - 1 };
+        self.open_with_index = Some(next);
+    }
+
+    /// Popover down, wrapping at the bottom.
+    pub fn open_with_next(&mut self, count: usize) {
+        if count == 0 {
+            self.open_with_index = None;
+            return;
+        }
+        let i = self.open_with_index.unwrap_or(0);
+        self.open_with_index = Some((i + 1) % count);
     }
 
     pub fn set_query(&mut self, q: impl Into<String>) {
@@ -349,6 +414,7 @@ impl SwitcherState {
             } else {
                 self.selected_dir - 1
             };
+            self.open_with_index = None;
             return;
         }
         if self.programs_visible() {
@@ -394,6 +460,7 @@ impl SwitcherState {
                 return;
             }
             self.selected_dir = (self.selected_dir + 1) % self.dirs.len();
+            self.open_with_index = None;
             return;
         }
         if self.programs_visible() {

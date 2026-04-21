@@ -9,16 +9,15 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::Result;
-use switcheur_core::file_manager::{FINDER_BUNDLE_ID, KNOWN_FILE_MANAGERS};
+use switcheur_core::file_manager::{known_folder_openers, FINDER_BUNDLE_ID};
 
 use super::programs;
 
-/// Bundle ids of installed apps that match any [`KNOWN_FILE_MANAGERS`]
-/// entry. Finder is *not* included — it isn't surfaced by the Applications
-/// scan — but callers can assume it's always available on macOS.
-pub fn detected_file_manager_bundle_ids() -> HashSet<String> {
-    let known: HashSet<&str> = KNOWN_FILE_MANAGERS
-        .iter()
+/// Bundle ids of installed apps that match any known folder opener (file
+/// managers + editors). Finder is *not* included — it isn't surfaced by the
+/// Applications scan — but callers can assume it's always available on macOS.
+pub fn detected_folder_opener_bundle_ids() -> HashSet<String> {
+    let known: HashSet<&str> = known_folder_openers()
         .flat_map(|k| k.bundle_ids.iter().copied())
         .collect();
     programs::list_programs_cached()
@@ -26,6 +25,12 @@ pub fn detected_file_manager_bundle_ids() -> HashSet<String> {
         .filter_map(|p| p.bundle_id)
         .filter(|b| known.contains(b.as_str()))
         .collect()
+}
+
+/// Back-compat alias for callers that still think of this list as
+/// "file managers". The detection is identical.
+pub fn detected_file_manager_bundle_ids() -> HashSet<String> {
+    detected_folder_opener_bundle_ids()
 }
 
 /// Open a folder, optionally targeting a specific app by bundle id. Finder

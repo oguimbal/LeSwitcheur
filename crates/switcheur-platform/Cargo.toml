@@ -21,7 +21,7 @@ core-foundation = { workspace = true }
 core-graphics = { workspace = true }
 foreign-types = "0.5"
 objc2 = { workspace = true }
-objc2-app-kit = { workspace = true, features = ["NSRunningApplication", "NSWorkspace", "NSApplication", "NSImage", "NSBitmapImageRep", "NSImageRep", "NSGraphics", "NSPasteboard", "block2"] }
+objc2-app-kit = { workspace = true, features = ["NSRunningApplication", "NSWorkspace", "NSApplication", "NSImage", "NSBitmapImageRep", "NSImageRep", "NSGraphics", "NSPasteboard", "NSWindow", "NSColor", "NSResponder", "NSScreen", "block2"] }
 objc2-foundation = { workspace = true, features = ["NSString", "NSArray", "NSURL", "NSDictionary", "NSData", "NSGeometry", "NSNotification", "NSOperation", "NSBundle", "block2"] }
 block2 = "0.6"
 directories = { workspace = true }
