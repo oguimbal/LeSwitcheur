@@ -5639,7 +5639,7 @@ dependencies = [
 
 [[package]]
 name = "switcheur"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5661,7 +5661,7 @@ dependencies = [
 
 [[package]]
 name = "switcheur-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -5681,7 +5681,7 @@ dependencies = [
 
 [[package]]
 name = "switcheur-i18n"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "rust-i18n",
  "sys-locale",
@@ -5690,7 +5690,7 @@ dependencies = [
 
 [[package]]
 name = "switcheur-platform"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "accessibility-sys",
  "anyhow",
@@ -5717,7 +5717,7 @@ dependencies = [
 
 [[package]]
 name = "switcheur-ui"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "gpui",
