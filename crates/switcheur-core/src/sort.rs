@@ -45,10 +45,16 @@ impl Default for SortOrder {
 /// Tracks when each app and window was last focused, in the current process's
 /// lifetime. Intentionally not persisted — a fresh launch starts empty and
 /// refills from the first few switcher interactions.
+///
+/// Windows are keyed by CGWindowID (stable for the window's lifetime), not
+/// title — Chrome and other browsers rewrite the window title on every tab
+/// switch / navigation without emitting an AX focused-window-changed event,
+/// so title-based keys go stale and the alt-tab-back flow picks the wrong
+/// sibling window.
 #[derive(Debug, Default)]
 pub struct RecencyTracker {
     apps: HashMap<i32, Instant>,
-    windows: HashMap<(i32, String), Instant>,
+    windows: HashMap<u64, Instant>,
 }
 
 impl RecencyTracker {
@@ -60,20 +66,20 @@ impl RecencyTracker {
         self.apps.insert(pid, Instant::now());
     }
 
-    pub fn note_window(&mut self, pid: i32, title: &str) {
+    pub fn note_window(&mut self, pid: i32, window_id: u64) {
         // Also bump the app — if we just focused one of its windows, the app
         // itself is implicitly active too.
         let now = Instant::now();
         self.apps.insert(pid, now);
-        self.windows.insert((pid, title.to_owned()), now);
+        self.windows.insert(window_id, now);
     }
 
     pub fn app_rank(&self, pid: i32) -> Option<Instant> {
         self.apps.get(&pid).copied()
     }
 
-    pub fn window_rank(&self, pid: i32, title: &str) -> Option<Instant> {
-        self.windows.get(&(pid, title.to_owned())).copied()
+    pub fn window_rank(&self, window_id: u64) -> Option<Instant> {
+        self.windows.get(&window_id).copied()
     }
 }
 
@@ -94,11 +100,11 @@ pub fn sort_items(windows: &mut [WindowRef], order: SortOrder, tracker: &Recency
             // ("10 VSCode windows before the previous window").
             let apps_with_ranked_window: HashSet<i32> = windows
                 .iter()
-                .filter(|w| tracker.window_rank(w.pid, &w.title).is_some())
+                .filter(|w| tracker.window_rank(w.id).is_some())
                 .map(|w| w.pid)
                 .collect();
             windows.sort_by_key(|w| {
-                let key = tracker.window_rank(w.pid, &w.title).or_else(|| {
+                let key = tracker.window_rank(w.id).or_else(|| {
                     if apps_with_ranked_window.contains(&w.pid) {
                         None
                     } else {
@@ -137,8 +143,16 @@ mod tests {
     use std::time::Duration;
 
     fn w(pid: i32, app: &str, title: &str) -> WindowRef {
+        // Tests that don't care about recency call this. Use a deterministic
+        // non-zero id so every test row has a distinct CGWindowID-like key.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        w_with_id(id, pid, app, title)
+    }
+
+    fn w_with_id(id: u64, pid: i32, app: &str, title: &str) -> WindowRef {
         WindowRef {
-            id: 0,
+            id,
             pid,
             title: title.into(),
             app_name: app.into(),
@@ -196,16 +210,16 @@ mod tests {
         // every previously-focused window. With it, the new app lands near
         // the top so a second alt-tab lands on it — matching macOS cmd-tab.
         let mut t = RecencyTracker::new();
-        t.note_window(1, "old-a"); // pid 1 has a ranked window
+        t.note_window(1, 101); // pid 1 has a ranked window
         sleep(Duration::from_millis(2));
-        t.note_window(1, "old-b");
+        t.note_window(1, 102);
         sleep(Duration::from_millis(2));
-        t.note_app(2); // pid 2: freshly launched, title not available at activation
+        t.note_app(2); // pid 2: freshly launched, window id not available at activation
 
         let mut ws = vec![
-            w(1, "A", "old-a"),
-            w(1, "A", "old-b"),
-            w(2, "NEW", "just-launched"),
+            w_with_id(101, 1, "A", "old-a"),
+            w_with_id(102, 1, "A", "old-b"),
+            w_with_id(201, 2, "NEW", "just-launched"),
         ];
         sort_items(&mut ws, SortOrder::RecentWindow, &t);
         let ordered: Vec<_> = ws.iter().map(|w| (w.pid, w.title.as_str())).collect();
@@ -223,17 +237,17 @@ mod tests {
         // otherwise they'd all tie at the app's rank and clog the top
         // ahead of the user's previous app.
         let mut t = RecencyTracker::new();
-        t.note_window(99, "prev-app-window"); // previous app focused first
+        t.note_window(99, 9900); // previous app focused first
         sleep(Duration::from_millis(2));
-        t.note_window(1, "vscode-0"); // only window 0 of VSCode focused
+        t.note_window(1, 100); // only window 0 of VSCode focused
         sleep(Duration::from_millis(2));
         t.note_app(1); // VSCode re-activated (Dock click) — bumps app_rank
 
         let mut ws = vec![
-            w(1, "VSCode", "vscode-0"),
-            w(1, "VSCode", "vscode-1"),
-            w(1, "VSCode", "vscode-2"),
-            w(99, "Prev", "prev-app-window"),
+            w_with_id(100, 1, "VSCode", "vscode-0"),
+            w_with_id(101, 1, "VSCode", "vscode-1"),
+            w_with_id(102, 1, "VSCode", "vscode-2"),
+            w_with_id(9900, 99, "Prev", "prev-app-window"),
         ];
         sort_items(&mut ws, SortOrder::RecentWindow, &t);
         let ordered: Vec<_> = ws.iter().map(|w| (w.pid, w.title.as_str())).collect();
@@ -249,16 +263,16 @@ mod tests {
         let mut t = RecencyTracker::new();
         t.note_app(1);
         sleep(Duration::from_millis(2));
-        t.note_window(2, "focused");
-        // Only (2,"focused") has a window_rank. The other rows have none —
+        t.note_window(2, 200);
+        // Only window id 200 has a window_rank. The other rows have none —
         // per-window MRU deliberately does NOT fall back to app_rank, so
         // those sink below, preserving their enumeration order among each
         // other (stable sort).
         let mut ws = vec![
-            w(1, "A", "other"),
-            w(2, "B", "focused"),
-            w(2, "B", "not-focused"),
-            w(3, "C", "unseen"),
+            w_with_id(100, 1, "A", "other"),
+            w_with_id(200, 2, "B", "focused"),
+            w_with_id(201, 2, "B", "not-focused"),
+            w_with_id(300, 3, "C", "unseen"),
         ];
         sort_items(&mut ws, SortOrder::RecentWindow, &t);
         let ordered: Vec<_> = ws.iter().map(|w| (w.pid, w.title.as_str())).collect();
@@ -267,5 +281,29 @@ mod tests {
             &ordered[1..],
             &[(1, "other"), (2, "not-focused"), (3, "unseen")][..]
         );
+    }
+
+    #[test]
+    fn window_title_change_does_not_break_recency() {
+        // Chrome scenario: user focuses window W (cg_id 500) while its title
+        // reads "A — Google Chrome", then navigates inside W so the title
+        // becomes "B — Google Chrome". No AX focused-window-changed event
+        // fires (same focused window), so the enumerator later sees the new
+        // title. With title-keyed recency this window would lose its rank
+        // and a sibling would jump ahead. With id-keyed recency, W stays on
+        // top as the user expects.
+        let mut t = RecencyTracker::new();
+        t.note_window(1, 400); // sibling Chrome window focused first
+        sleep(Duration::from_millis(2));
+        t.note_window(1, 500); // W focused, title was "A — Google Chrome"
+
+        // Later enumeration: W's title has changed to "B — Google Chrome".
+        let mut ws = vec![
+            w_with_id(400, 1, "Chrome", "other-site"),
+            w_with_id(500, 1, "Chrome", "B — Google Chrome"),
+        ];
+        sort_items(&mut ws, SortOrder::RecentWindow, &t);
+        assert_eq!(ws[0].id, 500, "MRU window must stay on top after title change");
+        assert_eq!(ws[1].id, 400);
     }
 }

@@ -44,7 +44,18 @@ if [ "$RESET" -eq 1 ]; then
 fi
 rm -rf "$APP"
 
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-LeSwitcher Code Signing}" \
+# --attach is for debugging — keep symbols so backtraces / `sample` resolve
+# Rust frames. Doesn't touch the shipped release profile (Cargo.toml stays
+# strip="symbols"); these env overrides apply only to this invocation, and
+# Cargo keys its build cache on them so the debug bundle won't poison a
+# subsequent prod `just dmg`.
+BUILD_ENV=()
+if [ "$ATTACH" -eq 1 ]; then
+    BUILD_ENV+=(CARGO_PROFILE_RELEASE_STRIP=none CARGO_PROFILE_RELEASE_DEBUG=true)
+fi
+
+env "${BUILD_ENV[@]}" \
+    CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-LeSwitcher Code Signing}" \
     "$ROOT/bundle/bundle.sh"
 
 echo ">> Signature:"

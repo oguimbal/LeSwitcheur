@@ -26,10 +26,19 @@ use std::sync::{Arc, Mutex};
 
 use accessibility_sys::{
     kAXErrorSuccess, kAXFocusedWindowAttribute, kAXFocusedWindowChangedNotification,
-    kAXTitleAttribute, AXError, AXObserverAddNotification, AXObserverCreate,
-    AXObserverGetRunLoopSource, AXObserverRef, AXObserverRemoveNotification,
-    AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementRef,
+    AXError, AXObserverAddNotification, AXObserverCreate, AXObserverGetRunLoopSource,
+    AXObserverRef, AXObserverRemoveNotification, AXUIElementCopyAttributeValue,
+    AXUIElementCreateApplication, AXUIElementRef,
 };
+
+// Private Accessibility helper — the only way to map an AX window element to
+// its CGWindowID. Used here so the recency tracker can key on the stable
+// window id instead of the (volatile) window title. Same binding as the one
+// in `windows.rs`; duplicated rather than shared to keep modules decoupled.
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> AXError;
+}
 use core_foundation::base::CFType;
 use arc_swap::ArcSwap;
 use block2::RcBlock;
@@ -112,11 +121,11 @@ impl AppActivationObserver {
             // this, an app brought forward by non-switcher means would leave
             // its focused window stuck at an old window_rank, and the user
             // couldn't alt-tab back to it via the per-window sort.
-            let focused_title = ax_focused_window_title(pid);
+            let focused_id = ax_focused_window_id(pid);
             if let Ok(mut t) = tracker.lock() {
                 t.note_app(pid);
-                if let Some(title) = focused_title {
-                    t.note_window(pid, &title);
+                if let Some(id) = focused_id {
+                    t.note_window(pid, id as u64);
                 }
             }
             let snapshot = running_app_snapshot(app);
@@ -234,28 +243,31 @@ unsafe extern "C" fn ax_focused_window_cb(
         return;
     }
     let ctx = unsafe { &*(refcon as *const AxCallbackContext) };
-    let title = unsafe { ax_copy_title(element) }.unwrap_or_default();
+    let Some(cg_id) = (unsafe { ax_window_cg_id(element) }) else {
+        // Window has no CGWindowID (extremely rare for a focused window).
+        // Without it we can't key recency reliably, so skip — the app_rank
+        // fallback still keeps the switcher usable.
+        return;
+    };
     if let Ok(mut t) = ctx.tracker.lock() {
-        t.note_window(ctx.pid, &title);
+        t.note_window(ctx.pid, cg_id as u64);
     }
 }
 
-unsafe fn ax_copy_title(elem: AXUIElementRef) -> Option<String> {
-    let attr = CFString::from_static_string(kAXTitleAttribute);
-    let mut value: *const c_void = ptr::null();
-    let err: AXError =
-        AXUIElementCopyAttributeValue(elem, attr.as_concrete_TypeRef(), &mut value);
-    if err != kAXErrorSuccess || value.is_null() {
-        return None;
+unsafe fn ax_window_cg_id(elem: AXUIElementRef) -> Option<u32> {
+    let mut id: u32 = 0;
+    let err = _AXUIElementGetWindow(elem, &mut id);
+    if err == kAXErrorSuccess && id != 0 {
+        Some(id)
+    } else {
+        None
     }
-    let s: CFString = CFString::wrap_under_create_rule(value as CFStringRef);
-    Some(s.to_string())
 }
 
-/// Query an app's current focused window title via AX. Returns `None` when
-/// the app exposes no focused window (background app, no windows open) or
-/// when the focused window has an empty/missing title.
-fn ax_focused_window_title(pid: c_int) -> Option<String> {
+/// Query an app's currently-focused window and return its CGWindowID.
+/// Returns `None` when the app has no focused window (background app with no
+/// open windows) or when AX refuses to hand out the id.
+fn ax_focused_window_id(pid: c_int) -> Option<u32> {
     unsafe {
         let app_elem = AXUIElementCreateApplication(pid);
         if app_elem.is_null() {
@@ -274,7 +286,7 @@ fn ax_focused_window_title(pid: c_int) -> Option<String> {
         }
         let w: CFType = CFType::wrap_under_create_rule(value as _);
         let w_elem = w.as_CFTypeRef() as AXUIElementRef;
-        ax_copy_title(w_elem).filter(|t| !t.is_empty())
+        ax_window_cg_id(w_elem)
     }
 }
 
@@ -358,8 +370,8 @@ fn seed_window_ranks(tracker: &Arc<Mutex<RecencyTracker>>, pids: &[c_int]) {
         Err(_) => return,
     };
     for &pid in pids {
-        if let Some(title) = ax_focused_window_title(pid) {
-            guard.note_window(pid, &title);
+        if let Some(id) = ax_focused_window_id(pid) {
+            guard.note_window(pid, id as u64);
             seeded += 1;
         }
     }

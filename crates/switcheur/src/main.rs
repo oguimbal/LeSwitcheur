@@ -754,7 +754,7 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
     };
     if let Ok(mut t) = state.tracker.lock() {
         match &item {
-            Item::Window(w) => t.note_window(w.pid, &w.title),
+            Item::Window(w) => t.note_window(w.pid, w.id),
             Item::App(a) => t.note_app(a.pid),
             Item::Program(_)
             | Item::AskLlm { .. }
@@ -1289,7 +1289,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             // if the OS notif is delayed or coalesced.
             if let Ok(mut t) = state.tracker.lock() {
                 match item {
-                    Item::Window(w) => t.note_window(w.pid, &w.title),
+                    Item::Window(w) => t.note_window(w.pid, w.id),
                     Item::App(a) => t.note_app(a.pid),
                     Item::Program(_)
                     | Item::AskLlm { .. }
