@@ -46,9 +46,37 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERT_PATH" -P "$CODESIGN_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PATH" "$KEYCHAIN_PATH" >/dev/null
+          # `-T /usr/bin/codesign` whitelists codesign so it can use the key
+          # without a GUI prompt (no GUI on a runner anyway). `-A` would also
+          # work but is broader. `-f pkcs12` without `-t` lets security import
+          # both the cert and its bundled private key.
+          security import "$CERT_PATH" -P "$CODESIGN_CERT_PASSWORD" \
+              -f pkcs12 -k "$KEYCHAIN_PATH" \
+              -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productsign
+          # `-k` here is the keychain *password*, not the path — needed so the
+          # ACL update doesn't trigger an interactive unlock prompt.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+              -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
           security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+      - name: Verify imported identity
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+        run: |
+          echo ">> Identities in temp keychain:"
+          security find-identity -v -p codesigning "$RUNNER_TEMP/build.keychain-db" || true
+          echo ">> Identities in current search path:"
+          security find-identity -v -p codesigning || true
+          echo ">> CODESIGN_IDENTITY length: ${#CODESIGN_IDENTITY} chars (value masked)"
+          # Fail fast with a clear message if codesign won't find the identity,
+          # rather than letting bundle.sh die with the cryptic "no identity
+          # found" error several lines later.
+          if ! security find-identity -v -p codesigning | grep -q "$CODESIGN_IDENTITY"; then
+              echo "FATAL: CODESIGN_IDENTITY not found in keychain search path." >&2
+              echo "Either the .p12 was exported without its private key, or the" >&2
+              echo "CODESIGN_IDENTITY secret doesn't match the cert's common name." >&2
+              exit 1
+          fi
 
       - name: Bundle .app
         env:

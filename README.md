@@ -101,6 +101,7 @@ just release          # patch bump (0.1.9 -> 0.1.10)
 just release minor    # 0.1.9 -> 0.2.0
 just release major    # 0.1.9 -> 1.0.0
 just release 0.3.1    # explicit version
+just release patch && gh run watch # watch result
 ```
 
 Bumps the version in `Cargo.toml` + `bundle/Info.plist`, commits, tags `vX.Y.Z`, pushes. The tag push triggers `.github/workflows/release.yml`, which builds, signs with the **Developer ID Application** identity (hardened runtime + secure timestamp + `bundle/entitlements.plist`), submits the `.app` and the `.dmg` to Apple's notary service, staples both, and uploads the stapled `.dmg` to a GitHub Release. End users get a Gatekeeper-clean DMG with no right-click → Open dance.
