@@ -31,6 +31,11 @@ bundle: build-release
 dmg: bundle
     ./bundle/dmg.sh
 
+# Cut a new release: bump version, build, sign, notarise, package, tag.
+# Defaults to a patch bump; pass minor / major / X.Y.Z for something else.
+release bump="patch":
+    ./scripts/release.sh {{bump}}
+
 # Wipe saved settings + stale bundle, rebuild signed with the local self-signed
 # identity, verify signature, launch. Handy to test a production build as if
 # it were a fresh install.

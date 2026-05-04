@@ -20,6 +20,10 @@ settings:
   show_all_spaces_needs_permission: "This option requires the Screen Recording permission."
   open_screen_recording_settings: "Grant permission"
   screen_recording_permission_granted: "Permission granted"
+  input_monitoring_helper: "To use a system shortcut (⌘Space, ⌘⇥, ⌃↑…), enable Input Monitoring."
+  input_monitoring_helper_reserved_active: "⚠ Your current shortcut won't fire until Input Monitoring is enabled."
+  open_input_monitoring_settings: "Enable Input Monitoring"
+  input_monitoring_permission_granted: "Input Monitoring enabled"
   dir_source: "Right-side suggestions"
   dir_source_hint: "Populate the side panel from a data source. Tab cycles focus to it; Enter opens the target. Sources not installed on this system appear greyed out."
   dir_source.disabled: "Disabled"
@@ -157,6 +161,7 @@ onboarding:
     next: "Next"
     re_record: "Record again"
     skip: "Skip for now"
+    input_monitoring_helper: "To use a system shortcut (⌘Space, ⌘⇥…), enable Input Monitoring."
   system_switcher:
     title: "Replace the native switcher?"
     body: "LeSwitcheur can intercept the combo above and show its panel instead of the macOS switcher."

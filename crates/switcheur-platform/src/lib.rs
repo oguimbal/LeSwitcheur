@@ -162,11 +162,13 @@ pub mod zoxide;
 
 #[cfg(target_os = "macos")]
 pub use macos::{
-    ensure_accessibility, file_manager, has_screen_recording_permission, prompt_accessibility,
+    ensure_accessibility, file_manager, has_input_monitoring_permission,
+    has_screen_recording_permission, is_system_reserved, prompt_accessibility,
     prompt_input_monitoring, request_accessibility_prompt, request_screen_recording_permission,
-    startup, ExclusionCell, FocusedApp, FocusedAppCell, MacHotkeyService, MacPlatform,
-    QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService, ScrollDir,
-    SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService,
+    startup, ExclusionCell, FocusedApp, FocusedAppCell, HotkeyRecordSession, HotkeyService,
+    HotkeyTapError, MacHotkeyService, MacPlatform, QuickTypeError, QuickTypeEvent,
+    QuickTypeService, RecencyService, RecordOutcome, ScrollDir, SystemSwitcherError,
+    SystemSwitcherEvent, SystemSwitcherService,
 };
 
 #[cfg(target_os = "macos")]
@@ -203,15 +205,17 @@ pub fn default_platform() -> Result<()> {
     anyhow::bail!("switcheur-platform currently only supports macOS")
 }
 
-/// Parse a [`HotkeySpec`] into the platform-specific representation.
+/// Build the unified hotkey service for `spec`. When the spec is
+/// system-reserved (Cmd+Space, Cmd+Tab, Ctrl+arrow, …) and Input Monitoring
+/// has been granted, this installs an HID `CGEventTap` that intercepts the
+/// combo before macOS dispatches it to Spotlight/Mission Control. Otherwise
+/// it falls back to the Carbon `RegisterEventHotKey` path.
 #[cfg(target_os = "macos")]
-pub fn register_hotkey(
-    spec: &HotkeySpec,
-) -> Result<MacHotkeyService> {
-    MacHotkeyService::register(spec)
+pub fn register_hotkey(spec: &HotkeySpec, im_granted: bool) -> Result<HotkeyService> {
+    HotkeyService::start(spec, im_granted)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn register_hotkey(_spec: &HotkeySpec) -> Result<()> {
+pub fn register_hotkey(_spec: &HotkeySpec, _im_granted: bool) -> Result<()> {
     anyhow::bail!("hotkey registration only supported on macOS");
 }

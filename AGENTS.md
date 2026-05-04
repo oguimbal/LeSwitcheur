@@ -23,7 +23,7 @@ Status: v0 scaffolding done. Pure logic (`switcheur-core`) fully tested. macOS p
 
 - **Hotkey**: configurable, default **Ctrl+=** (Cmd+Space clash Spotlight; Opt+Space clash some system shortcuts).
 - **Scope**: windows only by default. `include_apps: bool` in config also list running apps.
-- **Release artifact**: `.app` bundle via `bundle/bundle.sh` + `bundle/Info.plist`.
+- **Release artifact**: `.app` bundle via `bundle/bundle.sh` + `bundle/Info.plist`. Public builds: signed Developer ID + notarised + stapled, packaged as `.dmg`.
 - **GPUI**: git dep on `zed-industries/zed`, **pinned SHA** for reproducibility (manual bump).
 - **Structure**: Cargo workspace, multiple crates. No single-crate design.
 
@@ -123,11 +123,55 @@ Replace SHA in `Cargo.toml` (two entries: `gpui` + `gpui_platform`). Run `cargo 
 - `crates/switcheur/src/main.rs` — boot + async hotkey loop.
 - `bundle/bundle.sh` + `bundle/Info.plist` — `.app` assembly.
 
+## Releasing
+
+When maintainer say "release", run `just release` (or `./scripts/release.sh`). Default bump = patch; `just release minor` / `just release major` / `just release 0.3.1` override. `--no-push` flag for dry run.
+
+`scripts/release.sh` only bump + commit + tag + push. **CI does the heavy lifting** — build, sign, notarise, publish to GitHub Releases, all driven by the tag push (`.github/workflows/release.yml`). Local laptop never produces a public artifact, so the release is reproducible from the tag commit.
+
+Local script step:
+
+1. Refuse if working tree dirty or off master.
+2. Bump `Cargo.toml` workspace version + `bundle/Info.plist` `CFBundleShortVersionString`.
+3. `cargo update --workspace` to refresh `Cargo.lock`.
+4. `bundle/verify-version.sh` to assert Cargo.toml ↔ Info.plist lockstep.
+5. `git commit -m "release vX.Y.Z"` + `git tag -a vX.Y.Z`.
+6. `git push origin master && git push origin vX.Y.Z` (skipped with `--no-push`).
+
+CI step (on tag push):
+
+1. Import Developer ID p12 into temp keychain (from `CODESIGN_CERT_P12_BASE64` + `CODESIGN_CERT_PASSWORD` secrets).
+2. `bundle/bundle.sh` — sign `.app` with hardened runtime + timestamp + `bundle/entitlements.plist`.
+3. `bundle/notarize.sh dist/LeSwitcheur.app` — zip, submit to Apple, staple.
+4. `bundle/dmg.sh` — build + sign DMG.
+5. `bundle/notarize.sh dist/LeSwitcheur.dmg` — submit + staple.
+6. `softprops/action-gh-release@v2` upload stapled DMG to GitHub Release.
+
+### Required GitHub repository secrets
+
+| Secret | Value |
+|---|---|
+| `CODESIGN_CERT_P12_BASE64` | base64 of Developer ID Application `.p12` (cert **+** private key). Export from Keychain Access → right-click identity → Export → format `.p12`. Then `base64 -i cert.p12 \| pbcopy`. |
+| `CODESIGN_CERT_PASSWORD` | Password set during `.p12` export. |
+| `CODESIGN_IDENTITY` | `Developer ID Application: Olivier Guimbal (Q966PUVAXJ)` |
+| `NOTARY_APPLE_ID` | `olivier.guimbal@gmail.com` |
+| `NOTARY_TEAM_ID` | `Q966PUVAXJ` |
+| `NOTARY_PASSWORD` | App-specific password from appleid.apple.com (Sign-In and Security → App-Specific Passwords). |
+
+If any signing/notarisation secret is missing, CI either falls back to ad-hoc (signing) or fails outright (notarisation). The fail-out is intentional — a public build without notarisation would mislead users.
+
+### Local notarisation (rare)
+
+`bundle/notarize.sh` also work locally via `xcrun notarytool` keychain profile `leswitcheur-notary` (override via `$NOTARYTOOL_PROFILE`). Used for one-off manual builds; not part of `just release`.
+
+### Update manifest
+
+`crates/switcheur/src/main.rs:blocking_update_check` poll `https://leswitcheur.app/api/updates/latest` for `{ version, url, ... }`. After CI publish, server-side manifest must be bumped to advertise new GitHub Release `.dmg` URL — otherwise running install never see update. Not yet automated.
+
 ## Not in v0 (roadmap)
 
 - Window / app icons in list (`NSWorkspace::iconForFile`, caching).
 - Graphical preferences pane.
-- Signing + notarization of `.app`.
 - Auto light/dark theme via `effectiveAppearance`.
 - Linux / Windows port — `WindowSource` trait already shaped for it, only need new impl.
 - GPUI UI tests — ecosystem young, revisit later.

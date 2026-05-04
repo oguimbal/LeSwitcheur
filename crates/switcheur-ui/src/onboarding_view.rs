@@ -52,6 +52,18 @@ pub enum OnboardingViewEvent {
     /// state is tracked by config.toml existence, which `load_or_default`
     /// already persisted at boot).
     Finished,
+    /// User clicked "Enable Input Monitoring" under the hotkey step. Host
+    /// calls `prompt_input_monitoring()` and pushes the new grant state via
+    /// [`OnboardingView::set_input_monitoring_granted`].
+    OpenInputMonitoringSettingsRequested,
+    /// User clicked Record on the hotkey step. When IM is granted the host
+    /// should start a `HotkeyRecordSession` so system-reserved combos can
+    /// be captured; the captured spec is pushed via
+    /// [`OnboardingView::set_recorded_spec`].
+    RecordingStarted,
+    /// User cancelled an in-progress recording (Esc, or back/skip). Host
+    /// stops any active `HotkeyRecordSession`.
+    RecordingCancelled,
 }
 
 pub struct OnboardingView {
@@ -61,6 +73,10 @@ pub struct OnboardingView {
     /// Flipped to `true` by the host after polling confirms macOS has granted
     /// Accessibility. Gates the "Next" button on the first step.
     accessibility_granted: bool,
+    /// Whether Input Monitoring is granted. Drives the small helper line
+    /// under the hotkey step that lets the user enable IM if they want to
+    /// bind a system-reserved combo.
+    input_monitoring_granted: bool,
     /// Mirrors `Config::launch_at_startup`. Rendered as a toggle on the final
     /// step; flipping emits `LaunchAtStartupChanged` for the host to enact.
     launch_at_startup: bool,
@@ -69,15 +85,45 @@ pub struct OnboardingView {
 }
 
 impl OnboardingView {
-    pub fn new(launch_at_startup: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        launch_at_startup: bool,
+        input_monitoring_granted: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             step: OnboardingStep::Accessibility,
             recording: false,
             recorded: None,
             accessibility_granted: false,
+            input_monitoring_granted,
             launch_at_startup,
             theme: Theme::default(),
             focus: cx.focus_handle(),
+        }
+    }
+
+    pub fn set_input_monitoring_granted(&mut self, granted: bool, cx: &mut Context<Self>) {
+        if self.input_monitoring_granted != granted {
+            self.input_monitoring_granted = granted;
+            cx.notify();
+        }
+    }
+
+    /// Push a spec captured by an external recorder (the HID tap-driven
+    /// `HotkeyRecordSession` for system-reserved combos).
+    pub fn set_recorded_spec(&mut self, spec: HotkeySpec, cx: &mut Context<Self>) {
+        if !self.recording || self.step != OnboardingStep::Hotkey {
+            return;
+        }
+        self.recorded = Some(spec);
+        self.recording = false;
+        cx.notify();
+    }
+
+    pub fn cancel_recording(&mut self, cx: &mut Context<Self>) {
+        if self.recording {
+            self.recording = false;
+            cx.notify();
         }
     }
 
@@ -134,10 +180,14 @@ impl OnboardingView {
             OnboardingStep::Done => OnboardingStep::Hotkey,
         };
         self.step = prev;
-        self.recording = false;
+        if self.recording {
+            self.recording = false;
+            cx.emit(OnboardingViewEvent::RecordingCancelled);
+        }
         if prev == OnboardingStep::Hotkey && self.recorded.is_none() {
             self.recording = true;
             self.focus.focus(window, cx);
+            cx.emit(OnboardingViewEvent::RecordingStarted);
         }
         cx.notify();
     }
@@ -157,8 +207,15 @@ impl OnboardingView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.recording {
+            self.recording = false;
+            cx.emit(OnboardingViewEvent::RecordingCancelled);
+            cx.notify();
+            return;
+        }
         self.recording = true;
         self.focus.focus(window, cx);
+        cx.emit(OnboardingViewEvent::RecordingStarted);
         cx.notify();
     }
 
@@ -172,13 +229,19 @@ impl OnboardingView {
             cx.emit(OnboardingViewEvent::HotkeyApplied(spec));
         }
         self.step = OnboardingStep::Done;
-        self.recording = false;
+        if self.recording {
+            self.recording = false;
+            cx.emit(OnboardingViewEvent::RecordingCancelled);
+        }
         cx.notify();
     }
 
     fn skip_hotkey(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.step = OnboardingStep::Done;
-        self.recording = false;
+        if self.recording {
+            self.recording = false;
+            cx.emit(OnboardingViewEvent::RecordingCancelled);
+        }
         self.recorded = None;
         cx.notify();
     }
@@ -189,6 +252,7 @@ impl OnboardingView {
         if self.recorded.is_none() {
             self.recording = true;
             self.focus.focus(window, cx);
+            cx.emit(OnboardingViewEvent::RecordingStarted);
         }
         cx.notify();
     }
@@ -210,11 +274,13 @@ impl OnboardingView {
         if let Some(spec) = keystroke_to_spec(k) {
             self.recorded = Some(spec);
             self.recording = false;
+            cx.emit(OnboardingViewEvent::RecordingCancelled);
             cx.notify();
             return;
         }
         if k.key == "escape" {
             self.recording = false;
+            cx.emit(OnboardingViewEvent::RecordingCancelled);
             cx.notify();
         }
     }
@@ -516,6 +582,42 @@ impl OnboardingView {
             )
             .child(secondary_label);
 
+        let im_helper: AnyElement = if self.input_monitoring_granted {
+            div().into_any_element()
+        } else {
+            let msg = div()
+                .text_size(px(11.5))
+                .text_color(theme.muted)
+                .child(tr("onboarding.hotkey.input_monitoring_helper"));
+            let btn = div()
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(12.0))
+                .text_color(theme.foreground)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.selection))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_this, _: &MouseDownEvent, _, cx| {
+                        cx.emit(OnboardingViewEvent::OpenInputMonitoringSettingsRequested);
+                    }),
+                )
+                .child(tr("settings.open_input_monitoring_settings"));
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .max_w(px(440.0))
+                .child(msg)
+                .child(btn)
+                .into_any_element()
+        };
+
         div()
             .flex()
             .flex_col()
@@ -543,6 +645,7 @@ impl OnboardingView {
                     .child(tr("onboarding.hotkey.why")),
             )
             .child(keystroke_pill)
+            .child(im_helper)
             .child(
                 div()
                     .flex()

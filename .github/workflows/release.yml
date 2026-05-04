@@ -23,11 +23,13 @@ jobs:
       - name: Build release binary
         run: cargo build --release -p switcheur
 
-      # Import the self-signed code-signing cert into a temp keychain so
+      # Import the Developer ID Application cert into a temp keychain so
       # `codesign --sign "$CODESIGN_IDENTITY"` inside bundle.sh finds it.
       # Stable identity = TCC grants persist across releases for returning
-      # users (no need to re-tick Accessibility / Screen Recording on each
-      # update). Skipped if secrets are absent — build falls back to ad-hoc.
+      # users. The temp keychain is destroyed when the runner ends, so
+      # there's no leak. Skipped if the secret is absent — bundle falls
+      # back to ad-hoc and the rest of the notarisation chain will fail
+      # explicitly (Apple rejects ad-hoc).
       - name: Import signing certificate
         env:
           CODESIGN_CERT_P12_BASE64: ${{ secrets.CODESIGN_CERT_P12_BASE64 }}
@@ -53,11 +55,31 @@ jobs:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: ./bundle/bundle.sh
 
+      # Notarise the .app first, then staple the ticket back into the
+      # bundle. Stapling the inner .app (in addition to the DMG below)
+      # means a user who copies the app out of the DMG before going
+      # online still gets through Gatekeeper.
+      - name: Notarise .app
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: ./bundle/notarize.sh dist/LeSwitcheur.app
+
       - name: Install create-dmg
         run: brew install create-dmg
 
       - name: Create DMG
+        env:
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
         run: ./bundle/dmg.sh
+
+      - name: Notarise DMG
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: ./bundle/notarize.sh dist/LeSwitcheur.dmg
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

@@ -20,6 +20,10 @@ settings:
   show_all_spaces_needs_permission: "Cette option nécessite la permission Screen Recording."
   open_screen_recording_settings: "Accorder la permission"
   screen_recording_permission_granted: "Permission accordée"
+  input_monitoring_helper: "Pour utiliser un raccourci système (⌘Space, ⌘⇥, ⌃↑…), activez Surveillance de la saisie."
+  input_monitoring_helper_reserved_active: "⚠ Votre raccourci actuel ne fonctionnera pas tant que Surveillance de la saisie n'est pas activée."
+  open_input_monitoring_settings: "Activer Surveillance de la saisie"
+  input_monitoring_permission_granted: "Surveillance de la saisie activée"
   dir_source: "Suggestions du panneau latéral"
   dir_source_hint: "Alimente le panneau latéral à partir d'une source de données. Tab y déplace le focus ; Entrée ouvre l'élément. Les sources non installées sur le système apparaissent en grisé."
   dir_source.disabled: "Désactivé"
@@ -157,6 +161,7 @@ onboarding:
     next: "Suivant"
     re_record: "Recommencer"
     skip: "Passer cette étape"
+    input_monitoring_helper: "Pour utiliser un raccourci système (⌘Space, ⌘⇥…), activez Surveillance de la saisie."
   system_switcher:
     title: "Remplacer le switcher natif ?"
     body: "LeSwitcheur peut intercepter cette combinaison et afficher son panneau à la place du switcher macOS."

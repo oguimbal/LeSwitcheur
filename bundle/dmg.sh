@@ -23,7 +23,7 @@ fi
 rm -f "$DMG_PATH"
 
 # create-dmg returns 2 when codesigning the DMG itself fails but the DMG is
-# otherwise fine; we don't sign the DMG, so treat 2 as success too.
+# otherwise fine; we sign the DMG ourselves below, so treat 2 as success too.
 set +e
 create-dmg \
     --volname "$APP_NAME" \
@@ -40,6 +40,20 @@ rc=$?
 set -e
 if [ $rc -ne 0 ] && [ $rc -ne 2 ]; then
     exit $rc
+fi
+
+# Sign the DMG itself when a real Developer ID identity is available, so that
+# Gatekeeper accepts the .dmg before the user has even mounted it. Auto-detects
+# the same way bundle.sh does; ad-hoc DMGs are left unsigned (notarisation
+# doesn't apply to those anyway).
+IDENTITY="${CODESIGN_IDENTITY:-}"
+if [ -z "$IDENTITY" ]; then
+    IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk -F'"' '/Developer ID Application/ { print $2; exit }')"
+fi
+if [ -n "$IDENTITY" ] && [[ "$IDENTITY" == *"Developer ID Application"* ]]; then
+    codesign --force --sign "$IDENTITY" --timestamp "$DMG_PATH"
+    echo ">> Signed DMG with identity: $IDENTITY"
 fi
 
 echo ">> Built $DMG_PATH"

@@ -38,17 +38,32 @@ if [ -f "$ROOT/bundle/AppIcon.icns" ]; then
 fi
 
 # Sign the bundle. Identity comes from `$CODESIGN_IDENTITY`:
-#   - unset / empty / "-" → ad-hoc (dev default, no stable identity → TCC
-#     grants are lost on every rebuild because the designated requirement
-#     falls back to the raw cdhash).
-#   - otherwise → name of a code-signing identity present in the current
-#     keychain search path. A self-signed cert is enough to stabilise the
-#     designated requirement across rebuilds, which is what TCC keys off
-#     for Accessibility / Screen Recording persistence.
-# No notarisation here — that requires Apple Developer ID, not a self-signed
-# cert. Users of a self-signed build must right-click → Open on first launch.
-IDENTITY="${CODESIGN_IDENTITY:--}"
-codesign --force --deep --sign "$IDENTITY" "$APP_DIR"
+#   - unset / empty → auto-detect: pick the first "Developer ID Application"
+#     identity from the keychain if present, else fall back to ad-hoc "-".
+#   - "-" → ad-hoc (no stable identity → TCC grants are lost on every rebuild
+#     because the designated requirement falls back to the raw cdhash).
+#   - otherwise → exact name of an identity in the keychain search path.
+#     A self-signed cert is enough to stabilise the designated requirement
+#     across rebuilds (which is what TCC keys off for Accessibility / Screen
+#     Recording persistence). A real Developer ID cert is also required for
+#     notarisation — see bundle/notarize.sh.
+IDENTITY="${CODESIGN_IDENTITY:-}"
+if [ -z "$IDENTITY" ]; then
+    IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk -F'"' '/Developer ID Application/ { print $2; exit }')"
+    IDENTITY="${IDENTITY:--}"
+fi
+
+# Hardened runtime + secure timestamp are mandatory for notarisation but only
+# enforceable with a real Developer ID cert; ad-hoc / self-signed builds skip
+# them so dev rebuilds stay offline-capable and fast.
+SIGN_FLAGS=(--force --deep --sign "$IDENTITY")
+if [ "$IDENTITY" != "-" ] && [[ "$IDENTITY" == *"Developer ID Application"* ]]; then
+    SIGN_FLAGS=(--force --deep --options runtime --timestamp \
+        --entitlements "$ROOT/bundle/entitlements.plist" \
+        --sign "$IDENTITY")
+fi
+codesign "${SIGN_FLAGS[@]}" "$APP_DIR"
 echo ">> Signed with identity: $IDENTITY"
 
 echo ">> Built $APP_DIR"

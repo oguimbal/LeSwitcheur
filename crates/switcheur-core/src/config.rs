@@ -143,6 +143,43 @@ pub struct HotkeySpec {
     pub key: String,
 }
 
+impl HotkeySpec {
+    /// Whether this combo collides with a built-in macOS shortcut that the
+    /// system dispatches to its own service before any per-app handler runs
+    /// (Spotlight, System Switcher, Mission Control, …). Hardcoded list —
+    /// can't be probed at runtime. See the platform crate's HID tap for the
+    /// override path that actually intercepts these.
+    pub fn is_system_reserved(&self) -> bool {
+        let mut mods: std::collections::BTreeSet<&'static str> =
+            std::collections::BTreeSet::new();
+        for m in &self.modifiers {
+            let n = match m.to_ascii_lowercase().as_str() {
+                "cmd" | "command" | "super" | "meta" => "cmd",
+                "ctrl" | "control" => "ctrl",
+                "alt" | "opt" | "option" => "alt",
+                "shift" => "shift",
+                _ => return false,
+            };
+            mods.insert(n);
+        }
+        let mods: Vec<&'static str> = mods.into_iter().collect();
+        let key = self.key.to_ascii_lowercase();
+        matches!(
+            (mods.as_slice(), key.as_str()),
+            (["cmd"], "space")
+                | (["alt", "cmd"], "space")
+                | (["cmd"], "tab")
+                | (["cmd", "shift"], "tab")
+                | (["cmd"], "`")
+                | (["cmd", "shift"], "`")
+                | (["ctrl"], "up")
+                | (["ctrl"], "down")
+                | (["ctrl"], "left")
+                | (["ctrl"], "right")
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {

@@ -3,6 +3,8 @@ pub mod app_policy;
 pub mod browser;
 pub mod file_manager;
 pub mod hotkey;
+pub mod hotkey_service;
+pub mod hotkey_tap;
 pub mod icons;
 pub mod llm;
 pub mod machine_id;
@@ -17,9 +19,14 @@ pub mod system_switcher;
 pub mod windows;
 
 pub use hotkey::MacHotkeyService;
+pub use hotkey_service::HotkeyService;
+pub use hotkey_tap::{
+    is_system_reserved, HotkeyRecordSession, HotkeyTapError, HotkeyTapService, RecordOutcome,
+};
 pub use permissions::{
-    ensure_accessibility, has_screen_recording_permission, prompt_accessibility,
-    prompt_input_monitoring, request_accessibility_prompt, request_screen_recording_permission,
+    ensure_accessibility, has_input_monitoring_permission, has_screen_recording_permission,
+    prompt_accessibility, prompt_input_monitoring, request_accessibility_prompt,
+    request_screen_recording_permission,
 };
 pub use quick_type::{ExclusionCell, QuickTypeError, QuickTypeEvent, QuickTypeService, ScrollDir};
 pub use recency::{FocusedApp, FocusedAppCell, RecencyService};

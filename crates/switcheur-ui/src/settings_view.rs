@@ -85,6 +85,21 @@ pub enum SettingsViewEvent {
     /// permission prompt and reflect the new state back via
     /// [`SettingsView::set_screen_recording_granted`].
     OpenScreenRecordingSettingsRequested,
+    /// User clicked the "Enable Input Monitoring" button under the hotkey
+    /// row. Host should call `prompt_input_monitoring()`, then update the
+    /// view via [`SettingsView::set_input_monitoring_granted`]. When the
+    /// current bound hotkey is system-reserved and IM just became granted,
+    /// the host should also swap the underlying hotkey service from Carbon
+    /// to the HID tap so the combo actually fires.
+    OpenInputMonitoringSettingsRequested,
+    /// User clicked the Record button. When Input Monitoring is granted,
+    /// the host should start a `HotkeyRecordSession` (HID tap) so that
+    /// system-reserved combos like Cmd+Space can be captured. The session
+    /// reports back via [`SettingsView::set_recorded_spec`].
+    RecordingStarted,
+    /// User cancelled an in-progress recording (Esc). Host stops any active
+    /// `HotkeyRecordSession`.
+    RecordingCancelled,
     ExclusionsChanged(Vec<ExclusionRule>),
     SortOrderChanged(SortOrder),
     /// Ask the host (main.rs) to load the running-apps list and call
@@ -137,6 +152,11 @@ pub struct SettingsView {
     /// show-all-Spaces toggle to flip on, and to hide the warning once
     /// the user grants the permission.
     screen_recording_granted: bool,
+    /// Whether Input Monitoring is granted. Drives the helper row under
+    /// the hotkey: when off it shows a "Enable Input Monitoring" button;
+    /// when on it shows a green "enabled" badge. Also gates the tap-driven
+    /// recording path for system-reserved combos.
+    input_monitoring_granted: bool,
     /// Visible state of the inline warning under the show-all-Spaces
     /// toggle. Set to true when the user tries to flip it on without
     /// the permission; cleared when they turn the toggle off or the
@@ -221,6 +241,7 @@ impl SettingsView {
         include_minimized: bool,
         show_all_spaces: bool,
         screen_recording_granted: bool,
+        input_monitoring_granted: bool,
         quick_type: bool,
         replace_system_switcher: bool,
         sort_order: SortOrder,
@@ -244,6 +265,7 @@ impl SettingsView {
             include_minimized,
             show_all_spaces,
             screen_recording_granted,
+            input_monitoring_granted,
             show_all_spaces_needs_permission: false,
             quick_type,
             replace_system_switcher,
@@ -442,9 +464,16 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.recording {
+            self.recording = false;
+            cx.emit(SettingsViewEvent::RecordingCancelled);
+            cx.notify();
+            return;
+        }
         self.recording = true;
         self.editing_title = None;
         self.focus.focus(window, cx);
+        cx.emit(SettingsViewEvent::RecordingStarted);
         cx.notify();
     }
 
@@ -590,6 +619,39 @@ impl SettingsView {
             cx.emit(SettingsViewEvent::ShowAllSpacesChanged(true));
         }
         cx.notify();
+    }
+
+    /// Update the cached Input Monitoring grant status. Polled by the host
+    /// while the settings window is visible so the helper under the hotkey
+    /// row reflects toggles flipped in System Settings without requiring a
+    /// settings reopen.
+    pub fn set_input_monitoring_granted(&mut self, granted: bool, cx: &mut Context<Self>) {
+        if self.input_monitoring_granted != granted {
+            self.input_monitoring_granted = granted;
+            cx.notify();
+        }
+    }
+
+    /// Push a hotkey spec captured by an external recorder (the HID tap-
+    /// driven `HotkeyRecordSession` for system-reserved combos). Mirrors
+    /// the path taken by the in-view GPUI keystroke handler.
+    pub fn set_recorded_spec(&mut self, spec: HotkeySpec, cx: &mut Context<Self>) {
+        if !self.recording {
+            return;
+        }
+        self.hotkey = spec.clone();
+        self.recording = false;
+        cx.emit(SettingsViewEvent::HotkeyChanged(spec));
+        cx.notify();
+    }
+
+    /// Cancel an active recording from the outside (host-driven). Used
+    /// when the HID record session reports a cancellation (Esc).
+    pub fn cancel_recording(&mut self, cx: &mut Context<Self>) {
+        if self.recording {
+            self.recording = false;
+            cx.notify();
+        }
     }
 
     fn toggle_sort_picker(
@@ -809,12 +871,14 @@ impl SettingsView {
             if let Some(spec) = keystroke_to_spec(k) {
                 self.hotkey = spec.clone();
                 self.recording = false;
+                cx.emit(SettingsViewEvent::RecordingCancelled);
                 cx.emit(SettingsViewEvent::HotkeyChanged(spec));
                 cx.notify();
                 return;
             }
             if k.key == "escape" {
                 self.recording = false;
+                cx.emit(SettingsViewEvent::RecordingCancelled);
                 cx.notify();
                 return;
             }
@@ -1042,7 +1106,10 @@ impl SettingsView {
         // edits don't reappear on return.
         self.close_all_popovers();
         self.editing_title = None;
-        self.recording = false;
+        if self.recording {
+            self.recording = false;
+            cx.emit(SettingsViewEvent::RecordingCancelled);
+        }
         self.current_tab = tab;
         cx.notify();
     }
@@ -1591,6 +1658,7 @@ impl SettingsView {
                 &theme,
                 cx.listener(Self::start_recording),
             ))
+            .child(self.render_input_monitoring_helper(cx))
             .child(self.render_hotkey_exception_row(cx));
 
         let mut quick_type_block = div().flex().flex_col().gap_1p5().child(toggle_row(
@@ -1633,6 +1701,79 @@ impl SettingsView {
             block = block.child(self.render_screen_recording_warning(cx));
         }
         block.into_any_element()
+    }
+
+    fn render_input_monitoring_helper(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        // Reserved-and-not-granted is a real failure: the bound shortcut
+        // won't fire. Promote the helper to a destructive-coloured warning.
+        let reserved_blocked =
+            self.hotkey.is_system_reserved() && !self.input_monitoring_granted;
+
+        if self.input_monitoring_granted {
+            let granted_color = gpui::rgb(0x22c55e);
+            let badge = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .border_1()
+                .border_color(granted_color)
+                .text_color(granted_color)
+                .child("✓")
+                .child(tr("settings.input_monitoring_permission_granted"));
+            return div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .pl(px(48.0))
+                .child(badge)
+                .into_any_element();
+        }
+
+        let (msg_key, msg_color) = if reserved_blocked {
+            (
+                "settings.input_monitoring_helper_reserved_active",
+                theme.destructive,
+            )
+        } else {
+            ("settings.input_monitoring_helper", theme.muted)
+        };
+
+        let message = div()
+            .flex_1()
+            .text_size(px(12.0))
+            .text_color(msg_color)
+            .child(tr(msg_key));
+        let button = div()
+            .px_3()
+            .py_1p5()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .text_color(theme.foreground)
+            .hover(|s| s.bg(theme.selection))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _: &MouseDownEvent, _, cx| {
+                    cx.emit(SettingsViewEvent::OpenInputMonitoringSettingsRequested);
+                }),
+            )
+            .child(tr("settings.open_input_monitoring_settings"));
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .pl(px(48.0))
+            .child(message)
+            .child(button)
+            .into_any_element()
     }
 
     fn render_screen_recording_warning(&self, cx: &mut Context<Self>) -> AnyElement {

@@ -43,11 +43,38 @@ pub fn request_accessibility_prompt() -> bool {
 
 /// Opens System Settings → Privacy & Security → Input Monitoring so the user
 /// can toggle this app on. Required by `CGEventTap` on macOS 10.15+.
+///
+/// Side-effect: also calls `IOHIDRequestAccess` first, which is what triggers
+/// the *native* macOS Input Monitoring prompt the very first time the app
+/// asks. After the user has answered once (allow or deny), this is a no-op
+/// and the open-pane fallback is what gets the user to the toggle.
 pub fn prompt_input_monitoring() {
+    unsafe {
+        let _granted = IOHIDRequestAccess(K_IO_HID_REQUEST_TYPE_LISTEN_EVENT);
+    }
     let url = "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent";
     if let Err(e) = std::process::Command::new("open").arg(url).spawn() {
         tracing::warn!("failed to open Input Monitoring pane: {e:#}");
     }
+}
+
+/// Non-prompting check: has the user granted Input Monitoring to this bundle?
+/// Used by the boot path and the Settings polling loop to decide between the
+/// Carbon hotkey path and the CGEventTap path for system-reserved combos.
+pub fn has_input_monitoring_permission() -> bool {
+    let access = unsafe { IOHIDCheckAccess(K_IO_HID_REQUEST_TYPE_LISTEN_EVENT) };
+    let granted = access == K_IO_HID_ACCESS_TYPE_GRANTED;
+    tracing::debug!(access, granted, "IOHIDCheckAccess(ListenEvent)");
+    granted
+}
+
+const K_IO_HID_REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
+const K_IO_HID_ACCESS_TYPE_GRANTED: u32 = 0;
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IOHIDCheckAccess(request_type: u32) -> u32;
+    fn IOHIDRequestAccess(request_type: u32) -> bool;
 }
 
 /// Opens System Settings → Privacy & Security → Accessibility. macOS only

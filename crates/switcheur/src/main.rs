@@ -25,11 +25,12 @@ use switcheur_core::{
 };
 use switcheur_platform::{
     build_dir_source, default_platform, detect_dir_sources, ensure_accessibility,
-    has_screen_recording_permission, prompt_input_monitoring, register_hotkey,
-    request_accessibility_prompt, request_screen_recording_permission,
-    set_accessory_activation_policy, startup, BrowserTabSource, DirSourceEntry, DirectorySource,
-    ExclusionCell, FocusedAppCell, HotkeyEvent, LlmLauncher, MacHotkeyService, MacPlatform,
-    ProgramSource, QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService, ScrollDir,
+    has_input_monitoring_permission, has_screen_recording_permission, is_system_reserved,
+    prompt_input_monitoring, register_hotkey, request_accessibility_prompt,
+    request_screen_recording_permission, set_accessory_activation_policy, startup,
+    BrowserTabSource, DirSourceEntry, DirectorySource, ExclusionCell, FocusedAppCell,
+    HotkeyEvent, HotkeyRecordSession, HotkeyService, LlmLauncher, MacPlatform, ProgramSource,
+    QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService, RecordOutcome, ScrollDir,
     SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService, WindowSource,
 };
 use switcheur_ui::{
@@ -206,7 +207,17 @@ fn main() -> Result<()> {
 
     let platform: Arc<MacPlatform> =
         Arc::new(default_platform().context("init macOS platform")?);
-    let hotkey = Arc::new(register_hotkey(&config.hotkey).context("register hotkey")?);
+    let im_granted_at_boot = has_input_monitoring_permission();
+    if is_system_reserved(&config.hotkey) && !im_granted_at_boot {
+        tracing::warn!(
+            "configured hotkey is a system-reserved combo but Input Monitoring is \
+             not granted — falling back to Carbon (won't fire); user must grant IM \
+             in Settings"
+        );
+    }
+    let hotkey = Arc::new(
+        register_hotkey(&config.hotkey, im_granted_at_boot).context("register hotkey")?,
+    );
 
     let app = gpui_platform::application().with_assets(switcheur_ui::Assets);
     // Re-launch via Finder / `open -a LeSwitcheur` lands here on the
@@ -302,6 +313,7 @@ fn main() -> Result<()> {
             open_with_entries: Rc::new(RefCell::new(Vec::new())),
             open_with_file_entries: Rc::new(RefCell::new(Vec::new())),
             dir_query_gen: Rc::new(Cell::new(0)),
+            hotkey_record_session: Rc::new(RefCell::new(None)),
         };
         if open_on_start {
             tracing::info!("cold launch: triggering switcher on startup");
@@ -335,7 +347,7 @@ fn main() -> Result<()> {
 #[derive(Clone)]
 struct AppState {
     platform: Arc<MacPlatform>,
-    hotkey: Arc<MacHotkeyService>,
+    hotkey: Arc<HotkeyService>,
     config: Rc<RefCell<Config>>,
     filter: Rc<RefCell<ExclusionFilter>>,
     quick_type: Rc<RefCell<Option<QuickTypeService>>>,
@@ -406,6 +418,11 @@ struct AppState {
     /// dir-source queries whose results arrive after a newer keystroke can
     /// drop their output (and avoid clearing the spinner prematurely).
     dir_query_gen: Rc<Cell<u64>>,
+    /// HID-tap session driving the "record a system-reserved hotkey" flow
+    /// in Settings/Onboarding. Started when the user clicks Record while
+    /// Input Monitoring is granted; dropped on Cancel/capture so the run
+    /// loop unwinds and the tap is uninstalled.
+    hotkey_record_session: Rc<RefCell<Option<HotkeyRecordSession>>>,
 }
 
 /// Live popover window + its state. Mirrors [`WindowSlot`] but carries the
@@ -1711,11 +1728,12 @@ fn open_onboarding_window(state: &AppState, cx: &mut App) -> Result<()> {
     };
 
     let launch_at_startup = state.config.borrow().launch_at_startup;
+    let im_granted_open = has_input_monitoring_permission();
     let entity_slot: Rc<RefCell<Option<Entity<OnboardingView>>>> = Rc::new(RefCell::new(None));
     let slot_for_builder = entity_slot.clone();
     let handle: WindowHandle<OnboardingView> = cx.open_window(options, move |window, cx| {
         let entity = cx.new(|cx| {
-            let mut v = OnboardingView::new(launch_at_startup, cx);
+            let mut v = OnboardingView::new(launch_at_startup, im_granted_open, cx);
             v.set_theme(theme, cx);
             v
         });
@@ -1743,8 +1761,8 @@ fn open_onboarding_window(state: &AppState, cx: &mut App) -> Result<()> {
     let state_sub = state.clone();
     let sub = cx.subscribe(
         &entity,
-        move |_entity, ev: &OnboardingViewEvent, cx: &mut App| {
-            handle_onboarding_event(ev, &state_sub, cx);
+        move |entity, ev: &OnboardingViewEvent, cx: &mut App| {
+            handle_onboarding_event(ev, &entity, &state_sub, cx);
         },
     );
 
@@ -1788,6 +1806,25 @@ fn open_onboarding_window(state: &AppState, cx: &mut App) -> Result<()> {
     })
     .detach();
 
+    // Independent Input Monitoring poll: runs the lifetime of the wizard so
+    // a grant flipped while the user is on the hotkey step lights up the
+    // helper without requiring a window close/reopen.
+    let entity_for_im = entity.downgrade();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let executor = cx.background_executor().clone();
+        loop {
+            executor.timer(Duration::from_millis(500)).await;
+            let granted = has_input_monitoring_permission();
+            let res = entity_for_im.update(cx, |view, cx| {
+                view.set_input_monitoring_granted(granted, cx);
+            });
+            if res.is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
+
     *state.onboarding.borrow_mut() = Some(WindowSlot {
         handle: handle.into(),
         _sub: sub,
@@ -1795,7 +1832,12 @@ fn open_onboarding_window(state: &AppState, cx: &mut App) -> Result<()> {
     Ok(())
 }
 
-fn handle_onboarding_event(ev: &OnboardingViewEvent, state: &AppState, cx: &mut App) {
+fn handle_onboarding_event(
+    ev: &OnboardingViewEvent,
+    entity: &Entity<OnboardingView>,
+    state: &AppState,
+    cx: &mut App,
+) {
     match ev {
         OnboardingViewEvent::AccessibilityRequested => {
             tracing::info!("onboarding: prompting for Accessibility");
@@ -1805,7 +1847,7 @@ fn handle_onboarding_event(ev: &OnboardingViewEvent, state: &AppState, cx: &mut 
             request_accessibility_prompt();
         }
         OnboardingViewEvent::HotkeyApplied(spec) => {
-            if let Err(e) = state.hotkey.reregister(spec) {
+            if let Err(e) = state.hotkey.reregister(spec, has_input_monitoring_permission()) {
                 tracing::warn!("reregister hotkey (onboarding): {e:#}");
                 return;
             }
@@ -1856,6 +1898,25 @@ fn handle_onboarding_event(ev: &OnboardingViewEvent, state: &AppState, cx: &mut 
             if let Err(e) = c.save() {
                 tracing::warn!("save config (onboarding launch toggle): {e:#}");
             }
+        }
+        OnboardingViewEvent::OpenInputMonitoringSettingsRequested => {
+            prompt_input_monitoring();
+            let granted = has_input_monitoring_permission();
+            entity.update(cx, |v, cx| v.set_input_monitoring_granted(granted, cx));
+            if granted {
+                let spec = state.config.borrow().hotkey.clone();
+                if is_system_reserved(&spec) {
+                    if let Err(e) = state.hotkey.reregister(&spec, true) {
+                        tracing::warn!("reregister hotkey after IM grant (onboarding): {e:#}");
+                    }
+                }
+            }
+        }
+        OnboardingViewEvent::RecordingStarted => {
+            start_recording_session_onboarding(state, entity, cx);
+        }
+        OnboardingViewEvent::RecordingCancelled => {
+            state.hotkey_record_session.borrow_mut().take();
         }
         OnboardingViewEvent::Finished => {
             {
@@ -1931,6 +1992,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
     // Freshly check at open-time so the warning's initial state matches
     // reality (user might have granted the permission between runs).
     let screen_recording_granted = has_screen_recording_permission();
+    let input_monitoring_granted = has_input_monitoring_permission();
     // Same idea for the dir sources — if the user installed zoxide between
     // runs the dropdown entry should light up immediately. Refresh the
     // cached source too.
@@ -1981,6 +2043,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
                 include_min,
                 show_all_spaces,
                 screen_recording_granted,
+                input_monitoring_granted,
                 quick_type,
                 replace_sys,
                 sort_order,
@@ -2016,21 +2079,39 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
         handle_settings_event(ev, &entity, &state_sub, cx);
     });
 
-    // Poll Screen Recording permission while the settings window is visible.
-    // macOS does not notify on grant, so the warning under "Show all spaces"
-    // would otherwise stay stale until the user closes and reopens settings.
-    // Cheap call (CGPreflight…), stops when the entity is dropped.
+    // Poll Screen Recording + Input Monitoring permissions while the
+    // settings window is visible. macOS does not notify on grant, so the
+    // warnings/helpers would otherwise stay stale until the user closes and
+    // reopens settings. Both checks are cheap (CGPreflight… / IOHIDCheckAccess);
+    // stops when the entity is dropped. When IM flips state and the bound
+    // hotkey is system-reserved, swap the underlying hotkey service so the
+    // tap takes over (or hands back to Carbon) live.
     let entity_for_poll = entity.downgrade();
+    let state_for_poll = state.clone();
+    let mut last_im = input_monitoring_granted;
     cx.spawn(async move |cx: &mut AsyncApp| {
         let executor = cx.background_executor().clone();
         loop {
             executor.timer(Duration::from_millis(500)).await;
-            let granted = has_screen_recording_permission();
+            let sr = has_screen_recording_permission();
+            let im = has_input_monitoring_permission();
             let res = entity_for_poll.update(cx, |view, cx| {
-                view.set_screen_recording_granted(granted, cx);
+                view.set_screen_recording_granted(sr, cx);
+                view.set_input_monitoring_granted(im, cx);
             });
             if res.is_err() {
-                break; // entity dropped → window closed
+                break;
+            }
+            if im != last_im {
+                last_im = im;
+                let spec = state_for_poll.config.borrow().hotkey.clone();
+                if is_system_reserved(&spec) {
+                    if let Err(e) = state_for_poll.hotkey.reregister(&spec, im) {
+                        tracing::warn!("settings poll: reregister hotkey: {e:#}");
+                    } else {
+                        tracing::info!(im, "hotkey service swapped on IM change");
+                    }
+                }
             }
         }
     })
@@ -2122,6 +2203,72 @@ fn open_thanks_window(state: &AppState, thanks: ThanksState, cx: &mut App) -> Re
     Ok(())
 }
 
+fn start_recording_session_settings(
+    state: &AppState,
+    entity: &Entity<SettingsView>,
+    cx: &mut App,
+) {
+    if !has_input_monitoring_permission() {
+        // User can still record non-conflicting combos via the in-view GPUI
+        // keystroke handler — we just don't override system shortcuts.
+        return;
+    }
+    let session = match HotkeyRecordSession::start() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("HotkeyRecordSession::start: {e:#}");
+            return;
+        }
+    };
+    let rx = session.receiver();
+    *state.hotkey_record_session.borrow_mut() = Some(session);
+    let entity = entity.downgrade();
+    let state_inner = state.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let outcome = rx.recv().await;
+        // Drop the session early so its run loop unwinds before we touch
+        // the view (otherwise the tap still intercepts the next keystroke).
+        let _ = state_inner.hotkey_record_session.borrow_mut().take();
+        let Ok(outcome) = outcome else { return };
+        let _ = entity.update(cx, |view, cx| match outcome {
+            RecordOutcome::Captured(spec) => view.set_recorded_spec(spec, cx),
+            RecordOutcome::Cancelled => view.cancel_recording(cx),
+        });
+    })
+    .detach();
+}
+
+fn start_recording_session_onboarding(
+    state: &AppState,
+    entity: &Entity<OnboardingView>,
+    cx: &mut App,
+) {
+    if !has_input_monitoring_permission() {
+        return;
+    }
+    let session = match HotkeyRecordSession::start() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("HotkeyRecordSession::start (onboarding): {e:#}");
+            return;
+        }
+    };
+    let rx = session.receiver();
+    *state.hotkey_record_session.borrow_mut() = Some(session);
+    let entity = entity.downgrade();
+    let state_inner = state.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let outcome = rx.recv().await;
+        let _ = state_inner.hotkey_record_session.borrow_mut().take();
+        let Ok(outcome) = outcome else { return };
+        let _ = entity.update(cx, |view, cx| match outcome {
+            RecordOutcome::Captured(spec) => view.set_recorded_spec(spec, cx),
+            RecordOutcome::Cancelled => view.cancel_recording(cx),
+        });
+    })
+    .detach();
+}
+
 fn handle_settings_event(
     ev: &SettingsViewEvent,
     entity: &Entity<SettingsView>,
@@ -2130,7 +2277,7 @@ fn handle_settings_event(
 ) {
     match ev {
         SettingsViewEvent::HotkeyChanged(spec) => {
-            if let Err(e) = state.hotkey.reregister(spec) {
+            if let Err(e) = state.hotkey.reregister(spec, has_input_monitoring_permission()) {
                 tracing::warn!("reregister hotkey: {e:#}");
                 return;
             }
@@ -2253,6 +2400,25 @@ fn handle_settings_event(
             // if the user just granted the permission.
             let granted = request_screen_recording_permission();
             entity.update(cx, |v, cx| v.set_screen_recording_granted(granted, cx));
+        }
+        SettingsViewEvent::OpenInputMonitoringSettingsRequested => {
+            prompt_input_monitoring();
+            let granted = has_input_monitoring_permission();
+            entity.update(cx, |v, cx| v.set_input_monitoring_granted(granted, cx));
+            if granted {
+                let spec = state.config.borrow().hotkey.clone();
+                if is_system_reserved(&spec) {
+                    if let Err(e) = state.hotkey.reregister(&spec, true) {
+                        tracing::warn!("reregister hotkey after IM grant: {e:#}");
+                    }
+                }
+            }
+        }
+        SettingsViewEvent::RecordingStarted => {
+            start_recording_session_settings(state, entity, cx);
+        }
+        SettingsViewEvent::RecordingCancelled => {
+            state.hotkey_record_session.borrow_mut().take();
         }
         SettingsViewEvent::ExclusionsChanged(rules) => {
             let (filter, errs) = ExclusionFilter::compile(rules);

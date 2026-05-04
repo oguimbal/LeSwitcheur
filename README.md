@@ -34,9 +34,7 @@ Hold **Fn** and two-finger scroll on the trackpad to walk back through your rece
 
 ## Installing a release build
 
-LeSwitcheur is signed with a self-signed certificate (no paid Apple Developer ID). Gatekeeper blocks the first launch with *"cannot be opened because the developer cannot be verified"*.
-
-**First launch**: right-click `LeSwitcheur.app` → **Open** → confirm the warning. macOS records the decision, and subsequent launches (including in-place Sparkle updates) run without friction.
+Public builds are signed with a Developer ID certificate, notarised by Apple and stapled, so Gatekeeper accepts them on first launch — no right-click → Open dance required.
 
 ## Required permission
 
@@ -96,10 +94,24 @@ bundle/
 
 TOML file loaded from `~/Library/Application Support/LeSwitcheur/config.toml`. Created with defaults on first launch.
 
+## Releasing
+
+```sh
+just release          # patch bump (0.1.9 -> 0.1.10)
+just release minor    # 0.1.9 -> 0.2.0
+just release major    # 0.1.9 -> 1.0.0
+just release 0.3.1    # explicit version
+```
+
+Bumps the version in `Cargo.toml` + `bundle/Info.plist`, commits, tags `vX.Y.Z`, pushes. The tag push triggers `.github/workflows/release.yml`, which builds, signs with the **Developer ID Application** identity (hardened runtime + secure timestamp + `bundle/entitlements.plist`), submits the `.app` and the `.dmg` to Apple's notary service, staples both, and uploads the stapled `.dmg` to a GitHub Release. End users get a Gatekeeper-clean DMG with no right-click → Open dance.
+
+Pass `--no-push` to commit + tag locally without pushing (handy when reviewing the bump).
+
+Required repository secrets (one-time setup): `CODESIGN_CERT_P12_BASE64`, `CODESIGN_CERT_PASSWORD`, `CODESIGN_IDENTITY`, `NOTARY_APPLE_ID`, `NOTARY_TEAM_ID`, `NOTARY_PASSWORD`. See `AGENTS.md` for the values.
+
 ## Beyond v0
 
 - Window/app icons in the list
 - Auto light/dark theme
 - Graphical preferences pane
-- Signing and notarization of the `.app`
 - Linux / Windows port
