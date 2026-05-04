@@ -1,24 +1,30 @@
 //! Observes focus / activation so the sort layer can order by recency.
 //!
-//! Two observers:
+//! Three observers:
 //!   * [`AppActivationObserver`] — always on. Wraps the NSWorkspace block-based
 //!     notification for `NSWorkspaceDidActivateApplicationNotification`. Cheap:
 //!     one registration, fires only on Cmd+Tab / dock click / our own raises.
-//!   * [`FocusedWindowObserver`] — opt-in, started when the user picks
-//!     `SortOrder::RecentWindow`. One AXObserver per running app on
+//!   * [`FocusedWindowObserver`] — opt-in, one per running app, on
 //!     `kAXFocusedWindowChangedNotification`. Each observer schedules its
 //!     run-loop source on the main thread. Costs ~1% CPU because the kernel
 //!     wakes us on every focus flip system-wide.
+//!   * [`LaunchObserver`] — opt-in, paired with the per-app focus observers.
+//!     Listens to `NSWorkspaceDidLaunchApplication` /
+//!     `NSWorkspaceDidTerminateApplicationNotification` so apps started after
+//!     the switcher boots get an AX focus observer too. Without this, intra-
+//!     app window switches inside any later-launched app silently dropped on
+//!     the floor and `RecencyTracker` ranked the wrong sibling.
 //!
-//! Both observers push into a shared [`RecencyTracker`] behind a mutex. The
-//! service is always driven from the main thread — NSWorkspace and AX call
-//! their blocks/callbacks on the thread that registered them.
+//! All three observers push into a shared [`RecencyTracker`] behind a mutex.
+//! The service is always driven from the main thread — NSWorkspace and AX
+//! call their blocks/callbacks on the thread that registered them.
 //!
 //! The app observer *also* maintains a shared [`FocusedApp`] snapshot so other
 //! subsystems (hotkey gating, Quick Type tap) can cheaply check which app is
 //! currently frontmost. That snapshot lives behind `ArcSwap` for lock-free
 //! reads from the HID tap thread.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::raw::c_int;
 use std::ptr;
@@ -51,8 +57,9 @@ use core_foundation::string::{CFString, CFStringRef};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2_app_kit::{
-    NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
-    NSWorkspaceDidActivateApplicationNotification,
+    NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
+    NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidLaunchApplicationNotification,
+    NSWorkspaceDidTerminateApplicationNotification,
 };
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObjectProtocol};
 use std::ptr::NonNull;
@@ -114,8 +121,20 @@ impl AppActivationObserver {
                 Some(a) => a,
                 None => return,
             };
+            let snapshot = running_app_snapshot(app);
+            // Filter our own activation (Settings / Onboarding panels coming
+            // forward) BEFORE touching the tracker — otherwise the switcher's
+            // own pid lands in the recency maps and inflates `app_rank` for a
+            // window the user can never see in the list.
+            if let (Some(self_bid), Some(bid)) =
+                (self_bundle_id.as_deref(), snapshot.bundle_id.as_deref())
+            {
+                if self_bid.eq_ignore_ascii_case(bid) {
+                    return;
+                }
+            }
             let pid = app.processIdentifier();
-            // Also note the app's currently-focused window so per-window MRU
+            // Note the app's currently-focused window so per-window MRU
             // captures app activations that didn't go through the switcher
             // (Dock click, Cmd-Tab, click-through from another window). Without
             // this, an app brought forward by non-switcher means would leave
@@ -126,14 +145,6 @@ impl AppActivationObserver {
                 t.note_app(pid);
                 if let Some(id) = focused_id {
                     t.note_window(pid, id as u64);
-                }
-            }
-            let snapshot = running_app_snapshot(app);
-            // Ignore our own activation (e.g. Settings window coming forward)
-            // so the remembered "frontmost" stays the user's real app.
-            if let (Some(self_bid), Some(bid)) = (self_bundle_id.as_deref(), snapshot.bundle_id.as_deref()) {
-                if self_bid.eq_ignore_ascii_case(bid) {
-                    return;
                 }
             }
             focused.store(Arc::new(Some(snapshot)));
@@ -163,6 +174,17 @@ pub struct FocusedWindowObserver {
     // this struct. Dropped in `Drop`.
     _cb_box: Box<AxCallbackContext>,
 }
+
+// Safety: every field is either a CF/AX reference or a Box<…> over Send+Sync
+// data. The CF/AX pointers are valid for the lifetime of this struct and we
+// never read or write them from anywhere except the main thread (the only
+// thread that calls AXObserverCreate / CFRelease / CFRunLoopRemoveSource on
+// these handles). The Send+Sync impls exist purely so the observer can sit
+// inside an `Arc<Mutex<HashMap<…>>>` shared with NSWorkspace launch /
+// terminate blocks (whose `RcBlock` captures must satisfy Send+Sync). All
+// access still funnels through the main run-loop in practice.
+unsafe impl Send for FocusedWindowObserver {}
+unsafe impl Sync for FocusedWindowObserver {}
 
 struct AxCallbackContext {
     pid: c_int,
@@ -290,14 +312,22 @@ fn ax_focused_window_id(pid: c_int) -> Option<u32> {
     }
 }
 
+/// Shared map of per-pid focus observers. Wrapped in `Arc<Mutex<>>` so the
+/// NSWorkspace launch / terminate blocks (which fire on the main thread but
+/// require `Send + Sync` captures) can mutate the map alongside
+/// [`RecencyService`].
+type WindowObservers = Arc<Mutex<HashMap<c_int, FocusedWindowObserver>>>;
+
 /// Owns the always-on app observer and, when enabled, a per-pid window-focus
-/// observer. Mutating the tracker happens from the main thread (where all
-/// callbacks fire).
+/// observer plus an NSWorkspace launch/terminate listener that keeps the
+/// per-pid map in sync with the running-apps set. Mutating the tracker
+/// happens from the main thread (where all callbacks fire).
 pub struct RecencyService {
     tracker: Arc<Mutex<RecencyTracker>>,
     focused: FocusedAppCell,
     _app: AppActivationObserver,
-    windows: Vec<FocusedWindowObserver>,
+    windows: WindowObservers,
+    _launch: Option<LaunchObserver>,
 }
 
 impl RecencyService {
@@ -314,7 +344,8 @@ impl RecencyService {
             ),
             tracker,
             focused,
-            windows: Vec::new(),
+            windows: Arc::new(Mutex::new(HashMap::new())),
+            _launch: None,
         }
     }
 
@@ -326,8 +357,10 @@ impl RecencyService {
         self.focused.clone()
     }
 
-    /// Start a window-focus observer for every given pid. Safe to call
-    /// multiple times: any previous observers are dropped first.
+    /// Start a window-focus observer for every given pid + a launch/terminate
+    /// listener that keeps the observer set in sync with the running-apps
+    /// table. Safe to call multiple times: any previous observers are dropped
+    /// first.
     ///
     /// Also seeds [`RecencyTracker`] with each app's currently-focused window,
     /// so per-window MRU ordering has something to work with before any focus
@@ -335,27 +368,155 @@ impl RecencyService {
     /// after launch would have no window ranks at all and fall back to raw
     /// enumeration order — defeating the whole point of the per-window mode.
     pub fn enable_window_tracking(&mut self, pids: &[c_int]) {
-        self.windows.clear();
-        for &pid in pids {
-            if let Some(obs) = FocusedWindowObserver::new(pid, self.tracker.clone()) {
-                self.windows.push(obs);
+        let self_pid = std::process::id() as c_int;
+        let observed = {
+            let mut map = self.windows.lock().expect("poisoned");
+            map.clear();
+            for &pid in pids {
+                if pid == self_pid {
+                    continue;
+                }
+                if let Some(obs) = FocusedWindowObserver::new(pid, self.tracker.clone()) {
+                    map.insert(pid, obs);
+                }
             }
-        }
+            map.len()
+        };
         seed_window_ranks(&self.tracker, pids);
-        tracing::info!(
-            observed = self.windows.len(),
-            total = pids.len(),
-            "enabled window-focus tracking"
-        );
+        // Drop the existing launch observer (if any) before installing a fresh
+        // one — otherwise we'd keep two parallel listeners after a settings-
+        // round-trip and double-attach observers for every newly-launched app.
+        self._launch = None;
+        self._launch = Some(LaunchObserver::new(
+            self.windows.clone(),
+            self.tracker.clone(),
+        ));
+        tracing::info!(observed, total = pids.len(), "enabled window-focus tracking");
     }
 
     pub fn disable_window_tracking(&mut self) {
-        self.windows.clear();
+        // Drop launch observer first so no late notification can sneak in and
+        // re-populate the map after we cleared it.
+        self._launch = None;
+        if let Ok(mut map) = self.windows.lock() {
+            map.clear();
+        }
         tracing::info!("disabled window-focus tracking");
     }
 
     pub fn window_tracking_enabled(&self) -> bool {
-        !self.windows.is_empty()
+        self._launch.is_some()
+    }
+}
+
+/// NSWorkspace listener for application launch + termination. When per-window
+/// tracking is on, attaches a [`FocusedWindowObserver`] to every newly-
+/// launched regular app and detaches it when the app quits.
+///
+/// Without this, intra-app window switches inside any app launched after the
+/// switcher booted (e.g. the user starts Chrome ten minutes after login)
+/// silently dropped on the floor — the switcher would still rank the *first*
+/// focused Chrome window correctly because the activation observer always
+/// seeds it, but subsequent cmd-` flips inside Chrome would not. The user
+/// would then alt-tab and land on the previous app instead of the previous
+/// Chrome window.
+struct LaunchObserver {
+    center: Retained<NSNotificationCenter>,
+    launch_token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+    terminate_token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+}
+
+impl LaunchObserver {
+    fn new(windows: WindowObservers, tracker: Arc<Mutex<RecencyTracker>>) -> Self {
+        let ws = NSWorkspace::sharedWorkspace();
+        let center = ws.notificationCenter();
+        let launch_name = unsafe { NSWorkspaceDidLaunchApplicationNotification };
+        let terminate_name = unsafe { NSWorkspaceDidTerminateApplicationNotification };
+        let key_static = unsafe { NSWorkspaceApplicationKey };
+        let self_pid = std::process::id() as c_int;
+
+        let launch_block = {
+            let windows = windows.clone();
+            let tracker = tracker.clone();
+            RcBlock::new(move |notif: NonNull<NSNotification>| {
+                let notif = unsafe { notif.as_ref() };
+                let Some(info) = notif.userInfo() else { return };
+                let key_obj: &AnyObject = key_static.as_ref();
+                let Some(app_obj) = info.objectForKey(key_obj) else { return };
+                let app: &NSRunningApplication =
+                    match app_obj.downcast_ref::<NSRunningApplication>() {
+                        Some(a) => a,
+                        None => return,
+                    };
+                if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
+                    return;
+                }
+                let pid = app.processIdentifier();
+                if pid == self_pid {
+                    return;
+                }
+                let Some(obs) = FocusedWindowObserver::new(pid, tracker.clone()) else {
+                    tracing::debug!(pid, "could not attach focus observer for new app");
+                    return;
+                };
+                if let Ok(mut map) = windows.lock() {
+                    map.insert(pid, obs);
+                    tracing::info!(pid, "attached focus observer for launched app");
+                }
+            })
+        };
+        let launch_token = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(launch_name),
+                None,
+                None,
+                &launch_block,
+            )
+        };
+
+        let terminate_block = {
+            let windows = windows.clone();
+            RcBlock::new(move |notif: NonNull<NSNotification>| {
+                let notif = unsafe { notif.as_ref() };
+                let Some(info) = notif.userInfo() else { return };
+                let key_obj: &AnyObject = key_static.as_ref();
+                let Some(app_obj) = info.objectForKey(key_obj) else { return };
+                let app: &NSRunningApplication =
+                    match app_obj.downcast_ref::<NSRunningApplication>() {
+                        Some(a) => a,
+                        None => return,
+                    };
+                let pid = app.processIdentifier();
+                if let Ok(mut map) = windows.lock() {
+                    if map.remove(&pid).is_some() {
+                        tracing::debug!(pid, "detached focus observer for terminated app");
+                    }
+                }
+            })
+        };
+        let terminate_token = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(terminate_name),
+                None,
+                None,
+                &terminate_block,
+            )
+        };
+
+        Self {
+            center,
+            launch_token,
+            terminate_token,
+        }
+    }
+}
+
+impl Drop for LaunchObserver {
+    fn drop(&mut self) {
+        unsafe {
+            self.center.removeObserver(self.launch_token.as_ref());
+            self.center.removeObserver(self.terminate_token.as_ref());
+        }
     }
 }
 
