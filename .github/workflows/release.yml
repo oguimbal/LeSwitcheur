@@ -78,6 +78,24 @@ jobs:
               exit 1
           fi
 
+      # Hit the notary service before we spend 30s+ building the bundle, so
+      # a wrong app-specific password fails fast with a useful diagnostic
+      # rather than after a successful sign + zip + upload attempt.
+      - name: Verify notary credentials
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          echo ">> NOTARY_APPLE_ID length: ${#NOTARY_APPLE_ID} chars"
+          echo ">> NOTARY_TEAM_ID length: ${#NOTARY_TEAM_ID} chars"
+          echo ">> NOTARY_PASSWORD length: ${#NOTARY_PASSWORD} chars"
+          xcrun notarytool history \
+              --apple-id "$NOTARY_APPLE_ID" \
+              --team-id "$NOTARY_TEAM_ID" \
+              --password "$NOTARY_PASSWORD" \
+              | head -5
+
       - name: Bundle .app
         env:
           CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
