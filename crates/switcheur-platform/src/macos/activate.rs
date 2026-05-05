@@ -2,17 +2,21 @@
 //! through the Sonoma+ activation lock-down.
 //!
 //! Three cooperating layers are required; removing any one breaks a real
-//! use case:
+//! use case. Order matters: SLPS must fire BEFORE the yield-based activate.
 //!
-//! 1. `NSRunningApplication::activateFromApplication:options:` — the modern
-//!    yield-based activation. It's the only call that crosses the Dock's
-//!    "universal owner" gate to switch Spaces (incl. leaving a fullscreen
-//!    Space) and the only one that isn't silently neutered by the macOS 14+
-//!    "caller must hold activation" rule. Pre-req: we must hold activation,
-//!    which is why the switcher panel opens with `cx.activate(true)`.
-//! 2. SLPS sequence (`_SLPSSetFrontProcessWithOptions` + two "makeKey"
+//! 1. SLPS sequence (`_SLPSSetFrontProcessWithOptions` + two "makeKey"
 //!    event records) — picks the specific `CGWindowID` inside the target
-//!    app's window stack. Needed whenever the user picks window N-of-M.
+//!    app's window stack and triggers the Space switch when the window
+//!    lives elsewhere. Same path AltTab and yabai use. Pre-req: we must
+//!    hold activation (the switcher panel opens with `cx.activate(true)`).
+//! 2. `NSRunningApplication::activateFromApplication:options:` — modern
+//!    yield-based activation. Confirms the front-process change to macOS
+//!    14+'s "caller must hold activation" gate so keyboard focus and the
+//!    menu bar follow the window. MUST run after SLPS: doing it first with
+//!    empty options leaves WindowServer treating the target app as already-
+//!    frontmost on the *current* Space, and the subsequent SLPS call then
+//!    updates the front-window pointer without triggering the Space switch
+//!    — exactly the "click does nothing" symptom for cross-Space picks.
 //! 3. `AXUIElementPerformAction(kAXRaiseAction)` — final same-Space
 //!    z-order nudge when we have the AX element. Skipped when AX doesn't
 //!    surface the window (common for cross-Space targets during a
@@ -138,32 +142,6 @@ pub fn activate_window(win: &WindowRef) -> Result<()> {
             "activate_window invoked"
         );
 
-        // Step 1 (see module doc): yield-based activation. Returns `ok=false`
-        // if we don't currently hold activation — that's the signal that the
-        // switcher panel wasn't opened with `cx.activate(true)`, or the panel
-        // was already closed before we got here.
-        //
-        // Pass empty options (NOT `ActivateAllWindows`): we target one specific
-        // window and let SLPS raise it below. With `ActivateAllWindows`, every
-        // window of the app is lifted above other apps' windows, so a user
-        // with 10 VSCode windows ends up with all 10 stacked above the
-        // previous app — breaking the "alt-tab back" flow.
-        {
-            use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
-            if let Some(running) =
-                NSRunningApplication::runningApplicationWithProcessIdentifier(win.pid)
-            {
-                let us = NSRunningApplication::currentApplication();
-                let ok = running.activateFromApplication_options(
-                    &us,
-                    NSApplicationActivationOptions::empty(),
-                );
-                tracing::debug!(pid = win.pid, ok, "activateFromApplication");
-            } else {
-                tracing::debug!(pid = win.pid, "no NSRunningApplication for activate-from");
-            }
-        }
-
         // Un-minimize BEFORE the SLPS/raise dance. Only works if we have the
         // real AX window element — skip silently otherwise (the target isn't
         // actually minimized from AX's perspective if AX can't see it).
@@ -196,8 +174,9 @@ pub fn activate_window(win: &WindowRef) -> Result<()> {
             }
         }
 
-        // Step 2 (see module doc): SLPS — pick the specific CGWindowID. We
-        // prefer `win.id` captured at enumeration time over re-deriving via
+        // Step 1 (see module doc): SLPS — pick the specific CGWindowID and,
+        // when the target lives on another Space, kick off the Space switch.
+        // Prefer `win.id` captured at enumeration time over re-deriving via
         // `_AXUIElementGetWindow`, because AX often hides cross-Space windows
         // at activation time. `win.id > u32::MAX` means the enumerator
         // resorted to a synthetic pid-encoded fallback and SLPS can't use it.
@@ -210,22 +189,52 @@ pub fn activate_window(win: &WindowRef) -> Result<()> {
         // Chrome's Dock-restore animation is in flight puts the window in a
         // half-restored state (visually still minimized, AX state says
         // restored). The AX un-minimize alone pulls the window to front on
-        // the current Space; combined with the NSRunningApplication activate
-        // above, that's sufficient for the common case. Cross-Space
-        // miniaturized targets are rare enough to skip here — the user can
-        // re-pick once the window has restored.
+        // the current Space; combined with the activateFromApplication call
+        // below, that's sufficient for the common case.
         let wid: Option<u32> = if win.id > 0 && win.id <= u32::MAX as u64 {
             Some(win.id as u32)
         } else {
             target.and_then(|t| ax_window_id(t)).map(|id| id as u32)
         };
+        let mut used_slps = false;
         if !unminimized_now {
             match wid {
-                Some(wid) => cross_space_focus(win.pid, wid),
+                Some(wid) => {
+                    cross_space_focus(win.pid, wid);
+                    used_slps = true;
+                }
                 None => {
                     tracing::debug!(pid = win.pid, "no CGWindowID available, falling back to app-level focus");
                     focus_pid(win.pid)?;
                 }
+            }
+        }
+
+        // Step 2 (see module doc): yield-based activation — confirms the
+        // front-process change under the macOS 14+ "caller must hold
+        // activation" rule. Required even after SLPS so keyboard focus and
+        // the menu bar follow the window cleanly. Returns `ok=false` if we
+        // don't currently hold activation (panel wasn't opened with
+        // `cx.activate(true)`, or it closed before we got here).
+        //
+        // Empty options (NOT `ActivateAllWindows`): SLPS already picked the
+        // specific target window. With `ActivateAllWindows`, every window of
+        // the app is lifted above other apps' windows, so a user with 10
+        // VSCode windows ends up with all 10 stacked above the previous
+        // app — breaking the "alt-tab back" flow.
+        {
+            use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+            if let Some(running) =
+                NSRunningApplication::runningApplicationWithProcessIdentifier(win.pid)
+            {
+                let us = NSRunningApplication::currentApplication();
+                let ok = running.activateFromApplication_options(
+                    &us,
+                    NSApplicationActivationOptions::empty(),
+                );
+                tracing::debug!(pid = win.pid, ok, used_slps, "activateFromApplication");
+            } else {
+                tracing::debug!(pid = win.pid, "no NSRunningApplication for activate-from");
             }
         }
 
