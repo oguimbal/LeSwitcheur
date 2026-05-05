@@ -8,6 +8,7 @@
 //! gpui_macos invokes the `metal` shader compiler in its build script.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,12 +27,13 @@ use switcheur_core::{
 use switcheur_platform::{
     build_dir_source, default_platform, detect_dir_sources, ensure_accessibility,
     has_input_monitoring_permission, has_screen_recording_permission, is_system_reserved,
-    prompt_input_monitoring, register_hotkey, request_accessibility_prompt,
-    request_screen_recording_permission, set_accessory_activation_policy, startup,
-    BrowserTabSource, DirSourceEntry, DirectorySource, ExclusionCell, FocusedAppCell,
-    HotkeyEvent, HotkeyRecordSession, HotkeyService, LlmLauncher, MacPlatform, ProgramSource,
-    QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService, RecordOutcome, ScrollDir,
-    SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService, WindowSource,
+    onscreen_app_window_ids_excluding_pid, prompt_input_monitoring, register_hotkey,
+    request_accessibility_prompt, request_screen_recording_permission,
+    set_accessory_activation_policy, startup, BrowserTabSource, DirSourceEntry, DirectorySource,
+    ExclusionCell, FocusedAppCell, HotkeyEvent, HotkeyRecordSession, HotkeyService, LlmLauncher,
+    MacPlatform, ProgramSource, QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService,
+    RecordOutcome, ScrollDir, SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService,
+    WindowSource,
 };
 use switcheur_ui::{
     onboarding_view::{OnboardingView, OnboardingViewEvent},
@@ -336,6 +338,8 @@ fn main() -> Result<()> {
             spawn_system_switcher_loop(cx, state.clone(), rx);
         }
         spawn_hotkey_loop(cx, state.clone());
+        spawn_app_activation_loop(cx, state.clone());
+        spawn_panel_watch_loop(cx, state.clone());
         spawn_update_checker(cx, state.clone());
         spawn_url_scheme_loop(cx, state.clone(), url_rx);
         spawn_install_drift_watcher(cx, state);
@@ -535,6 +539,84 @@ fn spawn_hotkey_loop(cx: &mut App, state: AppState) {
             close_current(cx, &state);
             if let Err(e) = open_switcher(cx, &state) {
                 tracing::warn!("open_switcher: {e:#}");
+            }
+        }
+    })
+    .detach();
+}
+
+/// Dismiss helper shared by the workspace-activation channel and the panel
+/// z-order watch loop. Reads the view's `should_dismiss_on_foreign_activation`
+/// gate (license-activation flow, owned "Open With" popover) and closes the
+/// panel when allowed. `close_current` is idempotent so a double-fire from
+/// both paths is harmless.
+fn try_dismiss_panel(cx: &mut AsyncApp, state: &AppState) {
+    let entity = match state.current.borrow().as_ref() {
+        Some(slot) => slot.entity.clone(),
+        None => return,
+    };
+    let dismiss = cx.update(|cx| entity.read(cx).should_dismiss_on_foreign_activation());
+    if dismiss {
+        close_current(cx, state);
+    }
+}
+
+/// Dismiss the panel when another app becomes frontmost while it is open.
+/// `WindowKind::PopUp` does not reliably lose key/main when another app
+/// activates underneath, so the GPUI `observe_window_activation` path in
+/// `dismiss_on_blur` misses cases like a Guake-mode global hotkey raising
+/// another app, or a different process calling `NSRunningApplication.activate`.
+/// `NSWorkspaceDidActivateApplication` is the authoritative signal — the
+/// observer in `RecencyService` already filters out self-pid, so every event
+/// here describes a *foreign* app.
+fn spawn_app_activation_loop(cx: &mut App, state: AppState) {
+    let rx = state.recency.borrow().subscribe_app_activations();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        while let Ok(_app) = rx.recv().await {
+            try_dismiss_panel(cx, &state);
+        }
+    })
+    .detach();
+}
+
+/// Poll the on-screen window list while the panel is open, and dismiss when a
+/// new foreign window appears. Catches the cases the workspace-activation
+/// path misses: non-activating panels (Warp's F1 Guake terminal, Spotlight-
+/// like overlays) that show themselves without the owning app gaining
+/// app-level frontmost status.
+///
+/// The trigger is *delta*: snapshot the set of foreign on-screen window ids
+/// the moment the panel opens, then on each tick compare. A new id since
+/// the snapshot means a window the user just summoned — that is the dismiss
+/// signal. Tooltips and HUD scratch surfaces are filtered by minimum bounds
+/// in `onscreen_app_window_ids_excluding_pid`.
+const PANEL_WATCH_TICK: Duration = Duration::from_millis(150);
+
+fn spawn_panel_watch_loop(cx: &mut App, state: AppState) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let executor = cx.background_executor().clone();
+        let self_pid = std::process::id() as i32;
+        let mut snapshot: Option<HashSet<u32>> = None;
+        loop {
+            executor.timer(PANEL_WATCH_TICK).await;
+            let panel_open = state.current.borrow().is_some();
+            if !panel_open {
+                snapshot = None;
+                continue;
+            }
+            let current = onscreen_app_window_ids_excluding_pid(self_pid);
+            match &snapshot {
+                None => {
+                    snapshot = Some(current);
+                }
+                Some(snap) => {
+                    if current.difference(snap).next().is_some() {
+                        try_dismiss_panel(cx, &state);
+                        snapshot = None;
+                    } else {
+                        snapshot = Some(current);
+                    }
+                }
             }
         }
     })

@@ -172,6 +172,9 @@ pub use macos::{
 };
 
 #[cfg(target_os = "macos")]
+pub use macos::windows::onscreen_app_window_ids_excluding_pid;
+
+#[cfg(target_os = "macos")]
 pub use macos::panel::{
     adjust_key_window_frame, configure_open_with_popover, key_window_frame,
     set_open_with_popover_frame, OPEN_WITH_POPOVER_WIDTH,

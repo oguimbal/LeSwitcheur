@@ -141,12 +141,26 @@ If can't test a case: say so explicit, don't claim still work.
 16. **Browser window vs tab** — typing window title hit `Window`, tab title hit `BrowserTab`.
 17. **Tab list refresh async** — UI spinner without blocking switcher.
 
+### Panel dismiss
+
+18. **Foreign-app hotkey while panel open** — open switcher, press global hotkey owned by another app (e.g. Warp Guake-mode F1). Panel must dismiss within ~150ms. Two paths cover this: workspace activation (when the other app gains app-level focus) and CG z-order polling (when the other app shows a non-activating panel that doesn't fire workspace notif). GPUI window-active flip alone unreliable for `WindowKind::PopUp`.
+19. **Programmatic activation by another process** — open switcher, run `osascript -e 'tell application "Safari" to activate'`. Panel must dismiss.
+20. **Dock click while panel open** — click another app in Dock → panel dismisses.
+21. **Same-process panel activation (Settings / Onboarding)** — open switcher, open Settings. Panel must dismiss. Drives **existing GPUI** observer, not workspace path (workspace path filter self-pid).
+22. **License activation flow exempt** — `NagPhase::Activating`: open browser to confirm license must NOT dismiss panel. Outstanding poll keeps running.
+23. **Open With popover exempt** — click inside owned non-activating popover must NOT dismiss panel.
+24. **Cmd+Tab grace period** — silent in-memory cycle (no panel yet, `state.current` is `None`) → loop is no-op, no panel flash.
+
 ### Don't-do
 
 - AppleScript for window mgmt — banned.
 - `kAXMain` / `kAXFocused` write after SLPS — race, key focus stuck on previous app.
 - Cross-Space target with AX-empty: don't fall through to "first window" — that's a sibling on *current* Space, SLPS-targeting it silently no-op.
 - `.ActivateAllWindows` for the N-of-M same-Space case — break #1.
+- Workspace dismiss filter on `bundle_id` alone — self-pid is reliable; bundle id defence in depth only.
+- Per-panel subscribe/unsubscribe to `subscribe_app_activations` — observer always-on, loop short-circuits when `state.current` is `None`.
+- Panel-watch poll without min-bounds filter — tooltips and HUD scratch surfaces flash on/off and would dismiss the panel mid-use. Keep `w >= 200 && h >= 100` in `onscreen_app_window_ids_excluding_pid`.
+- Panel-watch dismiss on first tick — snapshot lazily on the first tick after open, only dismiss when delta appears on a *subsequent* tick, otherwise we'd dismiss on the panel's own appearance noise.
 
 ## User configuration
 

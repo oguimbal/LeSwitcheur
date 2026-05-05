@@ -534,6 +534,16 @@ impl SwitcherView {
         }
     }
 
+    /// Whether the panel should dismiss in response to another app becoming
+    /// frontmost. Mirrors the exemptions of `dismiss_on_blur`: stay open
+    /// during the license-activation browser flow, and stay open while the
+    /// owned "Open With" popover is up. Single source of policy used by both
+    /// the GPUI window-activation observer and the NSWorkspace-activation
+    /// loop in main.rs.
+    pub fn should_dismiss_on_foreign_activation(&self) -> bool {
+        self.nag_phase != NagPhase::Activating && !self.open_with_visible()
+    }
+
     pub fn dismiss_on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let sub = cx.observe_window_activation(window, |view, window, cx| {
             let active = window.is_window_active();

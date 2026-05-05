@@ -747,6 +747,48 @@ unsafe fn ax_copy_size(elem: AXUIElementRef, attr: &str) -> Option<(f64, f64)> {
     Some((s.width, s.height))
 }
 
+/// Snapshot every on-screen window owned by a process *other* than `self_pid`,
+/// returning their CGWindowIDs. Includes panels and overlays at any layer
+/// (we don't filter by `kCGWindowLayer` because Guake-style terminal hotkey
+/// panels — Warp's F1 toggle is the canonical case — sit at non-zero layers
+/// and are exactly what the panel-watch loop needs to detect). Excludes
+/// tooltips and HUD scratch surfaces by requiring a minimum window size.
+///
+/// Used by the panel-watch loop in `main.rs` to dismiss the switcher when a
+/// new foreign window appears on-screen — the case `NSWorkspaceDidActivate-
+/// Application` misses for non-activating panels.
+pub fn onscreen_app_window_ids_excluding_pid(self_pid: i32) -> HashSet<u32> {
+    let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
+    let raw = unsafe { CGWindowListCopyWindowInfo(options, kCGNullWindowID) };
+    if raw.is_null() {
+        return HashSet::new();
+    }
+    let cf_array: CFArray<CFDictionary> = unsafe { CFArray::wrap_under_create_rule(raw) };
+    let mut ids = HashSet::new();
+    for dict in cf_array.iter() {
+        let dict: &CFDictionary = &dict;
+        let Some(pid) = cg_get_i64(dict, "kCGWindowOwnerPID") else {
+            continue;
+        };
+        let pid = pid as i32;
+        if pid == self_pid {
+            continue;
+        }
+        let Some(cg_id) = cg_get_i64(dict, "kCGWindowNumber") else {
+            continue;
+        };
+        if cg_id < 0 {
+            continue;
+        }
+        let (w, h) = cg_get_bounds_size(dict).unwrap_or((0.0, 0.0));
+        if w < 200.0 || h < 100.0 {
+            continue;
+        }
+        ids.insert(cg_id as u32);
+    }
+    ids
+}
+
 // --- CG dict helpers ---
 
 fn cg_get_i64(dict: &CFDictionary, key: &str) -> Option<i64> {

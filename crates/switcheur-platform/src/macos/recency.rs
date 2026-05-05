@@ -94,10 +94,16 @@ fn running_app_snapshot(app: &NSRunningApplication) -> FocusedApp {
     }
 }
 
+/// Type alias for the fan-out subscriber list. The `AppActivationObserver`
+/// keeps these around for the lifetime of the process; consumers (e.g. the
+/// panel-dismiss loop in main.rs) hold the matching receiver.
+type ActivationSubscribers = Arc<Mutex<Vec<async_channel::Sender<FocusedApp>>>>;
+
 /// Observer for NSWorkspace app-activation notifications. Drop unregisters.
 pub struct AppActivationObserver {
     center: Retained<NSNotificationCenter>,
     token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+    subscribers: ActivationSubscribers,
 }
 
 impl AppActivationObserver {
@@ -110,6 +116,9 @@ impl AppActivationObserver {
         let center = ws.notificationCenter();
         let name = unsafe { NSWorkspaceDidActivateApplicationNotification };
         let key_static = unsafe { NSWorkspaceApplicationKey };
+        let self_pid = std::process::id() as i32;
+        let subscribers: ActivationSubscribers = Arc::new(Mutex::new(Vec::new()));
+        let subs_for_block = subscribers.clone();
         let block = RcBlock::new(move |notif: NonNull<NSNotification>| {
             let notif = unsafe { notif.as_ref() };
             let Some(info) = notif.userInfo() else { return };
@@ -125,7 +134,11 @@ impl AppActivationObserver {
             // Filter our own activation (Settings / Onboarding panels coming
             // forward) BEFORE touching the tracker — otherwise the switcher's
             // own pid lands in the recency maps and inflates `app_rank` for a
-            // window the user can never see in the list.
+            // window the user can never see in the list. Pid is the reliable
+            // primary check; bundle id is defence in depth.
+            if snapshot.pid == self_pid {
+                return;
+            }
             if let (Some(self_bid), Some(bid)) =
                 (self_bundle_id.as_deref(), snapshot.bundle_id.as_deref())
             {
@@ -147,12 +160,36 @@ impl AppActivationObserver {
                     t.note_window(pid, id as u64);
                 }
             }
-            focused.store(Arc::new(Some(snapshot)));
+            focused.store(Arc::new(Some(snapshot.clone())));
+            // Fan out to subscribers (e.g. the panel-dismiss loop). Drop
+            // closed senders. `try_send` on bounded channels never blocks the
+            // main thread; a wedged consumer loses dismisses, not the run loop.
+            if let Ok(mut subs) = subs_for_block.lock() {
+                subs.retain(|s| !s.is_closed());
+                for s in subs.iter() {
+                    let _ = s.try_send(snapshot.clone());
+                }
+            }
         });
         let token = unsafe {
             center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
         };
-        Self { center, token }
+        Self {
+            center,
+            token,
+            subscribers,
+        }
+    }
+
+    /// Register a subscriber that receives every non-self app activation.
+    /// Returns the receiver half; the sender lives inside the observer for the
+    /// observer's lifetime.
+    pub fn subscribe(&self) -> async_channel::Receiver<FocusedApp> {
+        let (tx, rx) = async_channel::bounded(8);
+        if let Ok(mut subs) = self.subscribers.lock() {
+            subs.push(tx);
+        }
+        rx
     }
 }
 
@@ -355,6 +392,14 @@ impl RecencyService {
 
     pub fn focused_app(&self) -> FocusedAppCell {
         self.focused.clone()
+    }
+
+    /// Subscribe to non-self app activations. Used by the panel-dismiss loop
+    /// to react to another app becoming frontmost while the switcher is open
+    /// — the GPUI window-active flip is unreliable for `WindowKind::PopUp`,
+    /// but `NSWorkspaceDidActivateApplication` is.
+    pub fn subscribe_app_activations(&self) -> async_channel::Receiver<FocusedApp> {
+        self._app.subscribe()
     }
 
     /// Start a window-focus observer for every given pid + a launch/terminate
