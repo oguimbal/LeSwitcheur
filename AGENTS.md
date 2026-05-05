@@ -104,6 +104,45 @@ Replace SHA in `Cargo.toml` (two entries: `gpui` + `gpui_platform`). Run `cargo 
 - **Switcher confirm order**: activate target BEFORE close panel (`handle_view_event`). Close first strip activation → yield no-op. Yield API transfer keyboard focus atomically so late close safe.
 - Karabiner Elements / non-US keyboard layouts: `global-hotkey` map to physical W3C key codes. `Code::Equal` bind to US `=` physical position, sit under different keycaps on AZERTY/QWERTZ. Prefer keys unambiguous across layouts (letters, digits, Space, arrows) for default.
 
+## Regression scenarios — focus + listing
+
+Window listing + activation are flaky-prone. macOS APIs (AX, CG, SkyLight private, NSRunningApplication) interact in undocumented ways and behave differently across versions, app types, and Space states. **Before any commit/release that touch `activate.rs`, `windows.rs`, or `main.rs` Confirmed-event path, walk this list manually.** Don't trust "build" or "new case work" — past fix repeatedly broke adjacent case.
+
+If can't test a case: say so explicit, don't claim still work.
+
+### Activation cases
+
+1. **Alt-tab back order preservation** — pick window of app A from app B, immediately Cmd+Tab again must return to B. `.ActivateAllWindows` lift every window of A above B → break this.
+2. **Same-Space normal window focus** — no Space switch, target front, keyboard follow.
+3. **Cross-Space focus (non-fullscreen)** — OS switch Space. Test both cross-app + cross-Space.
+4. **Cross-Space focus (target on fullscreen Space)** — entering fullscreen.
+5. **Cross-Space focus (we're inside fullscreen Space)** — exiting fullscreen.
+6. **Un-minimize from Dock** — AX un-minimize, no concurrent SLPS (Chrome restore animation glitch).
+7. **AX-suspended cross-Space app** (e.g. Chess on another Space) — AX hierarchy return 0 windows even though CG see them. Must still focus + Space-switch. Path A (SLPS+AXRaise) silently no-op here; Path B fallback needed.
+
+### Listing cases
+
+8. **Eclipse RCP "PartRenderingEngine's limbo" windows** at `(-10000, -10000)` — filter via geometry-vs-display.
+9. **Keychain Access / System Settings / Mail "ghost" windows** post red-X — filter via SkyLight Spaces empty / "lives only on active Space when off-screen".
+10. **Hidden/scratch surfaces** (zero bounds, zero alpha, non-layer-0) — filter via CG layer/alpha/bounds.
+11. **Finder hidden desktop window** — reject via `ALLOWED_SUBROLES`.
+12. **Dock / SystemUIServer / WindowServer** — never in list. `activationPolicy() == Regular` filter on `list_apps`.
+13. **`show_all_spaces` toggle** — off → current Space only; on → all Spaces. Minimized always kept (current-Space conceptually).
+14. **Untitled CG-only entries** — at most 1/pid, only when no titled coverage from AX or CG.
+
+### Browser
+
+15. **Browser tab focus** (Safari/Chrome/Arc) — pick tab row → focus right window AND right tab.
+16. **Browser window vs tab** — typing window title hit `Window`, tab title hit `BrowserTab`.
+17. **Tab list refresh async** — UI spinner without blocking switcher.
+
+### Don't-do
+
+- AppleScript for window mgmt — banned.
+- `kAXMain` / `kAXFocused` write after SLPS — race, key focus stuck on previous app.
+- Cross-Space target with AX-empty: don't fall through to "first window" — that's a sibling on *current* Space, SLPS-targeting it silently no-op.
+- `.ActivateAllWindows` for the N-of-M same-Space case — break #1.
+
 ## User configuration
 
 - Path: `~/Library/Application Support/fr.gmbl.LeSwitcheur/config.toml` (via `directories::ProjectDirs("fr", "gmbl", "LeSwitcheur")`).

@@ -82,9 +82,9 @@ const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60 * 24);
 /// A fast Cmd+Tab+release within this window activates the MRU window
 /// silently, mirroring how macOS's native switcher behaves — the panel only
 /// materialises if the user holds Cmd long enough to signal they want the
-/// picker. 180 ms is short enough that holding the keys feels immediate but
+/// picker. 90 ms is short enough that holding the keys feels immediate but
 /// long enough to swallow typical quick taps (~60–100 ms).
-const CMD_TAB_GRACE_PERIOD: Duration = Duration::from_millis(180);
+const CMD_TAB_GRACE_PERIOD: Duration = Duration::from_millis(90);
 
 fn main() -> Result<()> {
     // `gpui::window` logs benign "window not found" ERRORs when macOS delivers
