@@ -127,6 +127,63 @@ impl BrowserTabRef {
     }
 }
 
+/// Playback state of an audio source, used to drive the row's status icon.
+/// `Unknown` is a deliberate variant — CoreAudio's `IsRunningOutput` only
+/// answers playing/not-producing; the source might still be a registered
+/// media session in pause, but we can only confirm that via MediaRemote
+/// which the macOS 15.4+ daemon refuses to most callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackState {
+    Playing,
+    Paused,
+    Unknown,
+}
+
+/// One audio source captured at switcher-open time. Surfaces in the
+/// "Currently Playing" rows above the results list. When the source is a
+/// browser tab we resolved (via MediaRemote + fuzzy match against
+/// [`BrowserTabRef`]), `browser_tab` is `Some` and activation switches to
+/// that exact tab; otherwise we fall back to focusing the app's frontmost
+/// window (browser-window-only when `browser` is set).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioRowRef {
+    /// Responsible app PID — for browsers this is the main app process,
+    /// not the audio-rendering helper.
+    pub pid: i32,
+    pub app_name: String,
+    pub bundle_id: Option<String>,
+    pub icon_path: Option<PathBuf>,
+    /// Set when we resolved the audible tab. Activating the row will switch
+    /// to this tab via the existing browser-tab activation path.
+    pub browser_tab: Option<BrowserTabRef>,
+    /// Browser identity, set when the audio source is a browser even if we
+    /// couldn't pin it to a tab. Drives the "focus browser frontmost
+    /// window" fallback path.
+    pub browser: Option<Browser>,
+    pub state: PlaybackState,
+    /// Optional now-playing metadata (track title, artist) — when set, the
+    /// row's primary line uses the track title and the secondary line shows
+    /// the artist. Populated via MediaRemote when accessible.
+    pub track_title: Option<String>,
+    pub track_artist: Option<String>,
+}
+
+impl AudioRowRef {
+    /// True when the row represents an app whose playback we know how to
+    /// toggle from outside (Spotify, Music, …). Drives the UI's optional
+    /// play/pause button: rows for browsers / unknown apps render no
+    /// button because we have no reliable cross-app control path.
+    ///
+    /// Kept here (rather than in the platform crate) so the UI can render
+    /// the button without depending on platform internals.
+    pub fn supports_toggle(&self) -> bool {
+        matches!(
+            self.bundle_id.as_deref(),
+            Some("com.spotify.client") | Some("com.apple.Music")
+        )
+    }
+}
+
 /// Minimal URL host extractor — avoids pulling in the `url` crate for a
 /// rendering-only convenience. Returns `None` for anything that isn't a
 /// standard `scheme://host/...` form.
@@ -304,6 +361,10 @@ pub enum Item {
     /// eval / dir matched the query. Activating focuses the owning window and
     /// switches to that tab.
     BrowserTab(Arc<BrowserTabRef>),
+    /// "Currently Playing" row shown above the result list when an app is
+    /// producing audio output and the query is empty. Lives outside the
+    /// fuzzy-matched list — see [`crate::state::SwitcherState::set_currently_playing`].
+    CurrentlyPlaying(Arc<AudioRowRef>),
 }
 
 impl Item {
@@ -327,6 +388,10 @@ impl Item {
             // Title + URL host so typing "github" matches a github.com tab
             // even when the page title doesn't include the word.
             Item::BrowserTab(t) => format!("{} {}", t.title, t.host()),
+            // The audio row never enters the fuzzy ranker — it's positioned
+            // by the state, not by query match. Empty haystack so a stray
+            // call to rank() can't surface it.
+            Item::CurrentlyPlaying(_) => String::new(),
         }
     }
 
@@ -344,6 +409,11 @@ impl Item {
             Item::OpenUrl(url) => url,
             Item::Dir(d) => d.basename(),
             Item::BrowserTab(t) => &t.title,
+            Item::CurrentlyPlaying(r) => r
+                .track_title
+                .as_deref()
+                .or_else(|| r.browser_tab.as_ref().map(|t| &*t.title))
+                .unwrap_or(&r.app_name),
         }
     }
 
@@ -367,6 +437,29 @@ impl Item {
                     Some(h)
                 }
             }
+            // For the audio row the secondary line prefers, in order: the
+            // MediaRemote artist (e.g. "Spotify · The Beatles"), the resolved
+            // tab's host (e.g. "youtube.com"), or the app name when neither
+            // is available. The renderer also folds in an i18n "Now Playing"
+            // string when nothing better is available.
+            Item::CurrentlyPlaying(r) => r
+                .track_artist
+                .as_deref()
+                .or_else(|| {
+                    r.browser_tab.as_ref().and_then(|t| {
+                        let h = t.host();
+                        if h.is_empty() {
+                            Some(&*t.url)
+                        } else {
+                            Some(h)
+                        }
+                    })
+                })
+                .or(if r.track_title.is_some() || r.browser_tab.is_some() {
+                    Some(&r.app_name)
+                } else {
+                    None
+                }),
             _ => None,
         }
     }
@@ -381,6 +474,7 @@ impl Item {
             Item::OpenUrl(_) => "open_url",
             Item::Dir(_) => "dir",
             Item::BrowserTab(t) => t.browser.bundle_id(),
+            Item::CurrentlyPlaying(r) => r.bundle_id.as_deref().unwrap_or(&r.app_name),
         }
     }
 
@@ -394,6 +488,7 @@ impl Item {
             Item::OpenUrl(_) => return '↗',
             Item::Dir(_) => return '📁',
             Item::BrowserTab(_) => return 'C',
+            Item::CurrentlyPlaying(r) => r.app_name.as_str(),
         };
         name.chars().next().unwrap_or('?').to_ascii_uppercase()
     }
@@ -407,6 +502,10 @@ impl Item {
             Item::AskLlm { .. } | Item::OpenUrl(_) => None,
             Item::Dir(d) => d.icon_path.as_deref(),
             Item::BrowserTab(t) => t.icon_path.as_deref(),
+            Item::CurrentlyPlaying(r) => match &r.browser_tab {
+                Some(t) => t.icon_path.as_deref(),
+                None => r.icon_path.as_deref(),
+            },
         }
     }
 
@@ -437,6 +536,12 @@ impl From<ProgramRef> for Item {
 impl From<BrowserTabRef> for Item {
     fn from(t: BrowserTabRef) -> Self {
         Item::BrowserTab(Arc::new(t))
+    }
+}
+
+impl From<AudioRowRef> for Item {
+    fn from(r: AudioRowRef) -> Self {
+        Item::CurrentlyPlaying(Arc::new(r))
     }
 }
 

@@ -20,7 +20,8 @@ pub use config::{Appearance, Config, DirSourceId, HotkeySpec};
 pub use exclusions::{ExclusionFilter, ExclusionRule};
 pub use matcher::{FuzzyMatcher, MatchResult};
 pub use model::{
-    AppRef, Browser, BrowserTabRef, DirRef, DirSource, Item, LlmProvider, ProgramRef, WindowRef,
+    AppRef, AudioRowRef, Browser, BrowserTabRef, DirRef, DirSource, Item, LlmProvider,
+    PlaybackState, ProgramRef, WindowRef,
 };
 pub use sort::{sort_items, RecencyTracker, SortOrder};
 pub use state::{Section, SwitcherState};

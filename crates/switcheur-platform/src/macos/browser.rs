@@ -349,7 +349,7 @@ fn browser_pid(browser: Browser) -> Option<i32> {
 
 /// Drive `osascript -e <script>` with a hard timeout. Returns stdout (trimmed
 /// of no extras) or an error describing what went wrong.
-fn run_osascript(script: &str, timeout: Duration) -> Result<String> {
+pub(crate) fn run_osascript(script: &str, timeout: Duration) -> Result<String> {
     let mut child = Command::new("/usr/bin/osascript")
         .arg("-e")
         .arg(script)
@@ -423,6 +423,197 @@ fn resolve_icon(bundle: &str) -> Option<PathBuf> {
     let url = ws.URLForApplicationWithBundleIdentifier(&bundle_id)?;
     let path = url.path()?.to_string();
     super::icons::icon_for_bundle(&path, bundle)
+}
+
+/// Hosts (suffix-matched) that virtually always mean "this tab plays
+/// audio". When MediaRemote can't pin the tab via title metadata, we use
+/// this list to single out the most likely candidate among open tabs.
+/// Order doesn't matter; matching is suffix-based on the tab's host.
+const MEDIA_HOSTS: &[&str] = &[
+    "youtube.com",
+    "music.youtube.com",
+    "spotify.com",
+    "open.spotify.com",
+    "soundcloud.com",
+    "twitch.tv",
+    "vimeo.com",
+    "music.apple.com",
+    "deezer.com",
+    "tidal.com",
+    "bandcamp.com",
+    "mixcloud.com",
+    "music.amazon.com",
+    "podcasts.apple.com",
+];
+
+/// Identify which tab of `browser` is producing audio. We scan all tabs
+/// once, then resolve in order:
+///
+/// 1. **Metadata match** — substring search of MediaRemote's title /
+///    artist / album against each tab's title (case-insensitive). The
+///    strongest signal: a YouTube tab titled "(2) Bohemian Rhapsody -
+///    Queen - YouTube" matches the title needle "Bohemian Rhapsody".
+/// 2. **Media-host fallback** — when no metadata cleared step 1 (silent
+///    MediaRemote, or daemon refused on macOS 15.4+, or page title doesn't
+///    contain the song name), pick a tab whose host suffix is in
+///    [`MEDIA_HOSTS`]. Only use this when it's unambiguous (exactly one
+///    such tab); otherwise we'd be guessing.
+///
+/// Returns `None` when neither tier resolves a tab. The caller treats
+/// `None` as "focus the browser app without picking a tab" — the audio
+/// row then displays "<Browser> · Now Playing" rather than misleadingly
+/// labelling the front-window's active tab.
+pub fn audible_tab_for(
+    browser: Browser,
+    np_title: Option<&str>,
+    np_artist: Option<&str>,
+    np_album: Option<&str>,
+) -> Option<BrowserTabRef> {
+    let tabs = list_tabs_for(browser).ok()?;
+    if tabs.is_empty() {
+        return None;
+    }
+    if let Some(hit) = match_tab_by_metadata(&tabs, np_title, np_artist, np_album) {
+        return Some(hit);
+    }
+    if let Some(hit) = match_tab_by_media_host(&tabs) {
+        return Some(hit);
+    }
+    // No active-tab fallback by default: when MediaRemote can't pin the
+    // tab and there's no unambiguous media-host candidate, the
+    // foreground tab is *probably wrong* (the user often opens a new
+    // tab while audio plays in another). Better to surface "<Browser> ·
+    // Now Playing" with no tab title than to claim a wrong one. Per-tab
+    // detection requires either MediaRemote (blocked on 15.4+ from
+    // non-Apple callers) or a bundled Apple-signed helper.
+    None
+}
+
+/// Resolve the (window_id, tab_index) pair of the browser's frontmost
+/// window's active tab, then look the row up in the already-fetched
+/// `tabs` list so the [`BrowserTabRef`] we return has the same identity
+/// as the rows used elsewhere in the switcher.
+fn active_tab_of_front_window(browser: Browser, tabs: &[BrowserTabRef]) -> Option<BrowserTabRef> {
+    let script = match browser {
+        Browser::Chrome => CHROME_ACTIVE_TAB_SCRIPT,
+        Browser::Safari => SAFARI_ACTIVE_TAB_SCRIPT,
+    };
+    let raw = run_osascript(script, SCAN_TIMEOUT).ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    const US: char = '\u{1F}';
+    let mut parts = raw.splitn(2, US);
+    let wid: i64 = parts.next()?.parse().ok()?;
+    let ti: i64 = parts.next()?.parse().ok()?;
+    tabs.iter()
+        .find(|t| t.window_id == wid && t.tab_index == ti)
+        .cloned()
+}
+
+/// AppleScript: "id<US>active-tab-index" of the front window. Empty
+/// string when the browser isn't running. Same separator convention as
+/// the list scripts so we can reuse the parse path.
+const CHROME_ACTIVE_TAB_SCRIPT: &str = r#"tell application "Google Chrome"
+    if not running then return ""
+    if (count of windows) = 0 then return ""
+    set sep to (ASCII character 31)
+    set w to front window
+    set wid to id of w
+    set ti to active tab index of w
+    return wid & sep & ti
+end tell"#;
+
+const SAFARI_ACTIVE_TAB_SCRIPT: &str = r#"tell application "Safari"
+    if not running then return ""
+    if (count of windows) = 0 then return ""
+    set sep to (ASCII character 31)
+    set w to front window
+    try
+        set wid to id of w
+    on error
+        set wid to 0
+    end try
+    set ti to (index of (current tab of w))
+    return wid & sep & ti
+end tell"#;
+
+/// Score each tab by how well it matches MediaRemote metadata, then pick
+/// the best. A title match weighs more than an artist match, which weighs
+/// more than an album match — the title is what's displayed on the page,
+/// so it's the strongest signal that this tab is producing the audio.
+///
+/// Substring (case-insensitive) for each non-blank needle ≥ 4 chars
+/// (shorter words match too many tabs). Returns `None` when no tab scores
+/// above 0.
+fn match_tab_by_metadata(
+    tabs: &[BrowserTabRef],
+    title: Option<&str>,
+    artist: Option<&str>,
+    album: Option<&str>,
+) -> Option<BrowserTabRef> {
+    let title = needle(title);
+    let artist = needle(artist);
+    let album = needle(album);
+    if title.is_none() && artist.is_none() && album.is_none() {
+        return None;
+    }
+    let mut best: Option<(u32, &BrowserTabRef)> = None;
+    for t in tabs {
+        let hay = t.title.to_lowercase();
+        let mut score = 0u32;
+        if let Some(n) = &title {
+            if hay.contains(n.as_str()) {
+                score += 4;
+            }
+        }
+        if let Some(n) = &artist {
+            if hay.contains(n.as_str()) {
+                score += 2;
+            }
+        }
+        if let Some(n) = &album {
+            if hay.contains(n.as_str()) {
+                score += 1;
+            }
+        }
+        if score > 0 && best.map_or(true, |(s, _)| score > s) {
+            best = Some((score, t));
+        }
+    }
+    best.map(|(_, t)| t.clone())
+}
+
+/// Pick exactly one tab whose host is a known media site. Returns `None`
+/// when zero or multiple such tabs exist — guessing among ambiguous
+/// candidates is what the user reported as wrong; better to surface "no
+/// tab" and let the row display the browser name only.
+fn match_tab_by_media_host(tabs: &[BrowserTabRef]) -> Option<BrowserTabRef> {
+    let mut hits = tabs.iter().filter(|t| is_media_host(t.host()));
+    let first = hits.next()?;
+    if hits.next().is_some() {
+        return None;
+    }
+    Some(first.clone())
+}
+
+fn is_media_host(host: &str) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+    let host = host.to_lowercase();
+    MEDIA_HOSTS
+        .iter()
+        .any(|m| host == *m || host.ends_with(&format!(".{m}")))
+}
+
+fn needle(s: Option<&str>) -> Option<String> {
+    let s = s?.trim();
+    if s.len() < 4 {
+        return None;
+    }
+    Some(s.to_lowercase())
 }
 
 #[cfg(test)]

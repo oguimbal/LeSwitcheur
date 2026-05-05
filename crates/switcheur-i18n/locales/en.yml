@@ -90,6 +90,10 @@ llm:
 launcher:
   open_url: "Open URL"
 
+audio:
+  now_playing: "Now Playing"
+  section_header: "Currently Playing"
+
 open_with:
   default: "default"
   header: "Open with…"

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use switcheur_core::{AppRef, BrowserTabRef, DirSourceId, HotkeySpec, LlmProvider, ProgramRef, WindowRef};
+use switcheur_core::{AppRef, AudioRowRef, BrowserTabRef, DirSourceId, HotkeySpec, LlmProvider, ProgramRef, WindowRef};
 
 /// Source of truth for what's currently runnable and how to focus it.
 pub trait WindowSource: Send + Sync {
@@ -62,6 +62,28 @@ pub trait LlmLauncher: Send + Sync {
 pub trait BrowserTabSource: Send + Sync {
     fn list_browser_tabs(&self) -> (Vec<BrowserTabRef>, bool);
     fn activate_browser_tab(&self, t: &BrowserTabRef) -> Result<()>;
+}
+
+/// Detect apps currently producing audio output (and, where available,
+/// paused/registered media sessions). Surfaces as the "Currently Playing"
+/// rows above the result list — order matches Control Center: producers
+/// first, paused/registered sessions after. Best-effort:
+///
+/// - Returns an empty vec when nothing is detected, the OS API is not
+///   available (macOS < 14.2), or the lookup fails. Never errors.
+/// - When a source is a browser, the implementation tries to resolve the
+///   audible *tab* (MediaRemote → active-tab fallback). Activation
+///   behaviour is encoded in each returned `AudioRowRef`: `browser_tab`
+///   set → activate that tab; `browser` set without `browser_tab` →
+///   focus the browser app's frontmost window; neither → focus the
+///   app's frontmost window by pid.
+pub trait CurrentlyPlayingSource: Send + Sync {
+    fn current_currently_playing(&self) -> Vec<AudioRowRef>;
+
+    /// Toggle play/pause on the named bundle. Used by the row's optional
+    /// play/pause button. Returns `Err` when no toggle path is wired for
+    /// this bundle id (e.g. browsers — we'd need a different mechanism).
+    fn toggle_audio_playback(&self, bundle_id: &str) -> Result<()>;
 }
 
 /// One result from a [`DirectorySource`] query — a path the UI turns into a

@@ -25,6 +25,11 @@ const MIN_QUERY_LEN_FOR_BROWSER_TABS: usize = 3;
 /// Which section of the switcher the keyboard cursor currently lives in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
+    /// "Currently Playing" row above the result list, populated only when
+    /// the query is empty and an audio source has been detected. Mutually
+    /// exclusive with [`Section::Programs`] (which requires a non-empty
+    /// query).
+    Audio,
     Programs,
     Windows,
     /// Right-side pane fed externally (zoxide today, possibly other sources
@@ -68,6 +73,18 @@ pub struct SwitcherState {
     /// selected dir row, but keyboard focus still belongs to the dir list so
     /// Enter opens the folder in the default app.
     open_with_index: Option<usize>,
+    /// "Currently Playing" rows, populated asynchronously after the panel
+    /// opens via [`SwitcherState::set_currently_playing`]. Empty means no
+    /// audio source was detected (or detection is unsupported on this OS).
+    /// Visibility is also gated on [`Self::query`] being empty — the rows
+    /// are hidden the moment the user starts typing. Order is the order
+    /// returned by the platform probe (typically: foreground producer first,
+    /// then paused/registered sessions).
+    currently_playing: Vec<Item>,
+    /// Cursor inside the audio rows when [`Section::Audio`] is active.
+    /// Clamped on each `set_currently_playing` so a shrinking list doesn't
+    /// leave the cursor past the end.
+    selected_audio: usize,
 }
 
 impl SwitcherState {
@@ -91,6 +108,8 @@ impl SwitcherState {
             llm_provider_order: LlmProvider::default_order(),
             ask_llm_enabled: true,
             open_with_index: None,
+            currently_playing: Vec::new(),
+            selected_audio: 0,
         }
     }
 
@@ -137,6 +156,99 @@ impl SwitcherState {
     pub fn set_browser_tabs(&mut self, tabs: Vec<Item>) {
         self.browser_tabs_cache = Some(tabs);
         self.rerank_inner(RerankReset::PreserveSelection);
+    }
+
+    /// Install the "Currently Playing" rows. Like browser tabs the caller
+    /// resolves this asynchronously after the panel opens — CoreAudio
+    /// enumeration + optional MediaRemote/AppleScript hop. Empty vec means
+    /// no source detected. Preserves the user's selection: late delivery
+    /// must not yank the cursor. The audio cursor is clamped to the new
+    /// list length so a shrinking list doesn't dangle.
+    pub fn set_currently_playing(&mut self, rows: Vec<Item>) {
+        debug_assert!(rows.iter().all(|it| matches!(it, Item::CurrentlyPlaying(_))));
+        self.currently_playing = rows;
+        if self.currently_playing.is_empty() {
+            self.selected_audio = 0;
+        } else if self.selected_audio >= self.currently_playing.len() {
+            self.selected_audio = self.currently_playing.len() - 1;
+        }
+        if self.active_section == Section::Audio && !self.currently_playing_visible() {
+            self.active_section = Section::Windows;
+        }
+    }
+
+    /// The "Currently Playing" rows. Visibility (rendering decision) uses
+    /// [`Self::currently_playing_visible`] so rows hide on typing.
+    pub fn currently_playing(&self) -> &[Item] {
+        &self.currently_playing
+    }
+
+    /// Cursor index inside the audio rows. Only meaningful when
+    /// [`Section::Audio`] is active.
+    pub fn selected_audio_idx(&self) -> usize {
+        self.selected_audio
+    }
+
+    /// True when the audio rows should render: query is empty AND at least
+    /// one source detected. Mirrors [`Self::programs_visible`] but inverted
+    /// on the empty-query check (the two sections are mutually exclusive).
+    pub fn currently_playing_visible(&self) -> bool {
+        self.query.trim().is_empty() && !self.currently_playing.is_empty()
+    }
+
+    /// Move keyboard focus into the audio rows (last row — closest to the
+    /// windows list, so Up flows naturally from Windows[0]). No-op when
+    /// hidden.
+    pub fn focus_audio(&mut self) {
+        if !self.currently_playing_visible() {
+            return;
+        }
+        self.active_section = Section::Audio;
+        self.selected_audio = self.currently_playing.len() - 1;
+    }
+
+    /// Click/hover handler for an audio row. Activates the section and
+    /// jumps the cursor to the clicked index.
+    pub fn set_selected_audio(&mut self, idx: usize) {
+        if !self.currently_playing_visible() {
+            return;
+        }
+        self.active_section = Section::Audio;
+        self.selected_audio = idx.min(self.currently_playing.len() - 1);
+    }
+
+    /// Flip the playback state of the audio row at `idx` between Playing
+    /// and Paused. Used by the UI's play/pause button to update the badge
+    /// without waiting for the next probe to land. No-op if `idx` is out
+    /// of range or the row's state is `Unknown` (we have no truth to
+    /// flip *to*).
+    pub fn toggle_audio_row_state(&mut self, idx: usize) {
+        let Some(item) = self.currently_playing.get(idx) else {
+            return;
+        };
+        let Item::CurrentlyPlaying(row) = item else {
+            return;
+        };
+        let new_state = match row.state {
+            crate::model::PlaybackState::Playing => crate::model::PlaybackState::Paused,
+            crate::model::PlaybackState::Paused => crate::model::PlaybackState::Playing,
+            crate::model::PlaybackState::Unknown => return,
+        };
+        // AudioRowRef sits inside an Arc — clone the underlying row and
+        // rebuild the Item so we don't mutate a shared reference.
+        let mut updated = (**row).clone();
+        updated.state = new_state;
+        self.currently_playing[idx] = Item::CurrentlyPlaying(Arc::new(updated));
+    }
+
+    /// Forget the audio rows. Called when the switcher closes so the next
+    /// open starts with a fresh detection pass.
+    pub fn clear_currently_playing(&mut self) {
+        self.currently_playing.clear();
+        self.selected_audio = 0;
+        if self.active_section == Section::Audio {
+            self.active_section = Section::Windows;
+        }
     }
 
     /// Forget any fetched browser tabs. Called when the switcher closes so
@@ -395,6 +507,7 @@ impl SwitcherState {
 
     pub fn selected(&self) -> Option<&Item> {
         match self.active_section {
+            Section::Audio => self.currently_playing.get(self.selected_audio),
             Section::Programs => self
                 .filtered_programs
                 .get(self.selected_program)
@@ -415,6 +528,16 @@ impl SwitcherState {
                 self.selected_dir - 1
             };
             self.open_with_index = None;
+            return;
+        }
+        // Audio rows sit at the top of the world. Up cycles within the
+        // group; the topmost row is a no-op (no wrap-back-to-bottom — that
+        // would conflict with the symmetric move_down which exits the
+        // group into Windows).
+        if self.active_section == Section::Audio {
+            if self.selected_audio > 0 {
+                self.selected_audio -= 1;
+            }
             return;
         }
         if self.programs_visible() {
@@ -441,8 +564,20 @@ impl SwitcherState {
                     };
                     return;
                 }
-                Section::Dirs => unreachable!("handled above"),
+                Section::Dirs | Section::Audio => unreachable!("handled above"),
             }
+        }
+        // No programs section: Up from Windows row 0 enters the audio
+        // group at its last (closest) row, when one is visible (mutually
+        // exclusive with programs — see the empty-query gate in
+        // `currently_playing_visible`).
+        if self.active_section == Section::Windows
+            && self.selected_idx == 0
+            && self.currently_playing_visible()
+        {
+            self.active_section = Section::Audio;
+            self.selected_audio = self.currently_playing.len() - 1;
+            return;
         }
         if self.filtered.is_empty() {
             return;
@@ -461,6 +596,17 @@ impl SwitcherState {
             }
             self.selected_dir = (self.selected_dir + 1) % self.dirs.len();
             self.open_with_index = None;
+            return;
+        }
+        // Down inside the audio group cycles forward; from the last row
+        // it drops into the windows list at row 0.
+        if self.active_section == Section::Audio {
+            if self.selected_audio + 1 < self.currently_playing.len() {
+                self.selected_audio += 1;
+                return;
+            }
+            self.active_section = Section::Windows;
+            self.selected_idx = 0;
             return;
         }
         if self.programs_visible() {
@@ -482,7 +628,7 @@ impl SwitcherState {
                     self.selected_idx = (self.selected_idx + 1) % self.filtered.len();
                     return;
                 }
-                Section::Dirs => unreachable!("handled above"),
+                Section::Dirs | Section::Audio => unreachable!("handled above"),
             }
         }
         if self.filtered.is_empty() {
@@ -1190,6 +1336,169 @@ mod tests {
         assert_eq!(s.selected_dir_idx(), 2);
         s.remove_dir(Path::new("/c"));
         assert_eq!(s.selected_dir_idx(), 1);
+    }
+
+    // --- Currently Playing audio row tests ---
+
+    fn audio(app: &str) -> Item {
+        Item::CurrentlyPlaying(Arc::new(crate::model::AudioRowRef {
+            pid: 0,
+            app_name: app.into(),
+            bundle_id: None,
+            icon_path: None,
+            browser_tab: None,
+            browser: None,
+            state: crate::model::PlaybackState::Playing,
+            track_title: None,
+            track_artist: None,
+        }))
+    }
+
+    #[test]
+    fn audio_row_visible_only_when_query_empty() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        assert!(!s.currently_playing_visible());
+        s.set_currently_playing(vec![audio("Spotify")]);
+        assert!(s.currently_playing_visible());
+        s.set_query("a");
+        assert!(!s.currently_playing_visible());
+    }
+
+    #[test]
+    fn up_from_windows_first_jumps_to_audio() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox"), win("VSCode", "x")]);
+        s.set_currently_playing(vec![audio("Spotify")]);
+        assert_eq!(s.active_section(), Section::Windows);
+        assert_eq!(s.selected_idx(), 0);
+        s.move_up();
+        assert_eq!(s.active_section(), Section::Audio);
+        match s.selected().unwrap() {
+            Item::CurrentlyPlaying(r) => assert_eq!(r.app_name, "Spotify"),
+            _ => panic!("expected audio row"),
+        }
+    }
+
+    #[test]
+    fn down_from_audio_returns_to_windows_first() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox"), win("VSCode", "x")]);
+        s.set_currently_playing(vec![audio("Spotify")]);
+        s.move_up();
+        assert_eq!(s.active_section(), Section::Audio);
+        s.move_down();
+        assert_eq!(s.active_section(), Section::Windows);
+        assert_eq!(s.selected_idx(), 0);
+    }
+
+    #[test]
+    fn move_up_in_audio_section_is_noop() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_currently_playing(vec![audio("Spotify")]);
+        s.move_up();
+        assert_eq!(s.active_section(), Section::Audio);
+        s.move_up();
+        // Stays on Audio — no wrap to bottom of windows.
+        assert_eq!(s.active_section(), Section::Audio);
+    }
+
+    #[test]
+    fn audio_row_arrival_preserves_user_selection() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("A", "a"), win("B", "b"), win("C", "c")]);
+        s.move_down();
+        s.move_down();
+        assert_eq!(s.selected_idx(), 2);
+        s.set_currently_playing(vec![audio("Spotify")]);
+        // Late delivery must not yank the cursor.
+        assert_eq!(s.active_section(), Section::Windows);
+        assert_eq!(s.selected_idx(), 2);
+    }
+
+    #[test]
+    fn typing_clears_audio_selection() {
+        // User up-arrows into the audio row, then starts typing. set_query
+        // resets active_section to Windows via rerank, so Enter activates
+        // the typed-query result, not the stale audio row.
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_currently_playing(vec![audio("Spotify")]);
+        s.move_up();
+        assert_eq!(s.active_section(), Section::Audio);
+        s.set_query("ma");
+        assert_eq!(s.active_section(), Section::Windows);
+    }
+
+    #[test]
+    fn audio_section_skipped_when_programs_visible() {
+        // Programs and Audio are mutually exclusive: programs need a
+        // non-empty query, audio needs an empty one. Sanity-check that the
+        // visibility predicates can never both be true at once.
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_programs(vec![prog("Safari")]);
+        s.set_currently_playing(vec![audio("Spotify")]);
+        s.set_query("saf");
+        assert!(s.programs_visible());
+        assert!(!s.currently_playing_visible());
+    }
+
+    #[test]
+    fn clear_currently_playing_resets_section() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_currently_playing(vec![audio("Spotify")]);
+        s.move_up();
+        assert_eq!(s.active_section(), Section::Audio);
+        s.clear_currently_playing();
+        assert_eq!(s.active_section(), Section::Windows);
+        assert!(!s.currently_playing_visible());
+    }
+
+    #[test]
+    fn set_currently_playing_to_empty_drops_focus() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_currently_playing(vec![audio("Spotify")]);
+        s.move_up();
+        s.set_currently_playing(Vec::new());
+        assert_eq!(s.active_section(), Section::Windows);
+    }
+
+    #[test]
+    fn audio_group_navigates_within_then_drops_into_windows() {
+        // Two audio rows: Spotify (paused) + Chrome (playing). Up from
+        // Windows[0] lands on the *last* audio row (closest to the windows
+        // list), Up again moves to the first, Up at the top is a no-op,
+        // Down cycles back through the group then exits into Windows[0].
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_currently_playing(vec![audio("Spotify"), audio("Chrome")]);
+        s.move_up();
+        assert_eq!(s.active_section(), Section::Audio);
+        assert_eq!(s.selected_audio_idx(), 1);
+        s.move_up();
+        assert_eq!(s.selected_audio_idx(), 0);
+        s.move_up();
+        assert_eq!(s.selected_audio_idx(), 0);
+        s.move_down();
+        assert_eq!(s.selected_audio_idx(), 1);
+        s.move_down();
+        assert_eq!(s.active_section(), Section::Windows);
+        assert_eq!(s.selected_idx(), 0);
+    }
+
+    #[test]
+    fn shrinking_audio_list_clamps_cursor() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox")]);
+        s.set_currently_playing(vec![audio("Spotify"), audio("Chrome")]);
+        s.move_up();
+        assert_eq!(s.selected_audio_idx(), 1);
+        s.set_currently_playing(vec![audio("Spotify")]);
+        assert_eq!(s.selected_audio_idx(), 0);
     }
 
     #[test]

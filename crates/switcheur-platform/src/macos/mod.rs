@@ -1,6 +1,9 @@
 pub mod activate;
 pub mod app_policy;
+pub mod audio;
 pub mod browser;
+pub mod media_apps;
+pub mod now_playing;
 pub mod file_manager;
 pub mod hotkey;
 pub mod hotkey_service;
@@ -33,9 +36,12 @@ pub use recency::{FocusedApp, FocusedAppCell, RecencyService};
 pub use system_switcher::{SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService};
 
 use anyhow::Result;
-use switcheur_core::{AppRef, BrowserTabRef, LlmProvider, ProgramRef, WindowRef};
+use std::time::Duration;
+use switcheur_core::{
+    AppRef, AudioRowRef, BrowserTabRef, LlmProvider, PlaybackState, ProgramRef, WindowRef,
+};
 
-use crate::{BrowserTabSource, LlmLauncher, ProgramSource, WindowSource};
+use crate::{BrowserTabSource, CurrentlyPlayingSource, LlmLauncher, ProgramSource, WindowSource};
 
 pub struct MacPlatform;
 
@@ -101,4 +107,146 @@ impl BrowserTabSource for MacPlatform {
     fn activate_browser_tab(&self, t: &BrowserTabRef) -> Result<()> {
         browser::activate_tab(t)
     }
+}
+
+impl CurrentlyPlayingSource for MacPlatform {
+    fn current_currently_playing(&self) -> Vec<AudioRowRef> {
+        let sources = audio::current_audio_sources();
+        // Probe MediaRemote once per call; pass the (possibly None) result to
+        // every browser source so we don't pay the dispatch_async wait
+        // multiple times. macOS 15.4+ rejects callers outside `com.apple.*`
+        // — we get None and degrade to active-tab heuristics inside
+        // `audible_tab_for`.
+        let np = now_playing::current_now_playing(Duration::from_millis(400));
+        let (np_title, np_artist, np_album, np_state) = np
+            .as_ref()
+            .map(|n| (n.title.as_deref(), n.artist.as_deref(), n.album.as_deref(), n.state))
+            .unwrap_or((None, None, None, PlaybackState::Unknown));
+
+        let mut rows: Vec<AudioRowRef> = sources
+            .into_iter()
+            .map(|s| match s {
+                audio::AudioSource::App {
+                    pid,
+                    name,
+                    bundle_id,
+                } => {
+                    let icon_path = bundle_id
+                        .as_deref()
+                        .and_then(|b| {
+                            bundle_path_for(pid).and_then(|p| icons::icon_for_bundle(&p, b))
+                        });
+                    // When MediaRemote metadata matches this app (e.g.
+                    // Spotify producing audio), enrich the row with the
+                    // current track. Match by bundle id when available.
+                    let mr_match = np
+                        .as_ref()
+                        .and_then(|n| n.bundle_id.as_deref())
+                        .zip(bundle_id.as_deref())
+                        .map(|(a, b)| a == b)
+                        .unwrap_or(false);
+                    AudioRowRef {
+                        pid,
+                        app_name: name,
+                        bundle_id,
+                        icon_path,
+                        browser_tab: None,
+                        browser: None,
+                        state: PlaybackState::Playing,
+                        track_title: if mr_match { np_title.map(str::to_string) } else { None },
+                        track_artist: if mr_match { np_artist.map(str::to_string) } else { None },
+                    }
+                }
+                audio::AudioSource::Browser {
+                    browser,
+                    app_pid,
+                    app_name,
+                    bundle_id,
+                    ..
+                } => {
+                    let tab = browser::audible_tab_for(browser, np_title, np_artist, np_album);
+                    let icon_path = tab.as_ref().and_then(|t| t.icon_path.clone()).or_else(|| {
+                        bundle_id.as_deref().and_then(|b| {
+                            bundle_path_for(app_pid).and_then(|p| icons::icon_for_bundle(&p, b))
+                        })
+                    });
+                    AudioRowRef {
+                        pid: app_pid,
+                        app_name,
+                        bundle_id,
+                        icon_path,
+                        browser_tab: tab,
+                        browser: Some(browser),
+                        state: PlaybackState::Playing,
+                        track_title: np_title
+                            .map(str::to_string)
+                            .filter(|_| np_state != PlaybackState::Unknown),
+                        track_artist: np_artist.map(str::to_string),
+                    }
+                }
+            })
+            .collect();
+
+        // Phase B: enrich with paused/registered media apps via per-app
+        // AppleScript (Spotify, Music, …). CoreAudio doesn't see paused
+        // sources — they're not producing output — so without this the
+        // switcher would never surface "Spotify on pause" the way Control
+        // Center does. We dedupe against existing CoreAudio rows by
+        // bundle id to avoid showing Spotify twice when it's also
+        // currently producing.
+        for m in media_apps::probe_all() {
+            if rows.iter().any(|r| {
+                r.bundle_id
+                    .as_deref()
+                    .map(|b| b == m.bundle_id)
+                    .unwrap_or(false)
+            }) {
+                continue;
+            }
+            // Resolve a PID for the app even though it's not in CoreAudio
+            // — needed for the row's "focus this app" Enter behaviour.
+            let pid = pid_for_bundle(&m.bundle_id).unwrap_or(0);
+            let icon_path = bundle_path_for(pid)
+                .and_then(|p| icons::icon_for_bundle(&p, &m.bundle_id));
+            rows.push(AudioRowRef {
+                pid,
+                app_name: m.app_name,
+                bundle_id: Some(m.bundle_id),
+                icon_path,
+                browser_tab: None,
+                browser: m.browser,
+                state: m.state,
+                track_title: m.track_title,
+                track_artist: m.track_artist,
+            });
+        }
+        rows
+    }
+
+    fn toggle_audio_playback(&self, bundle_id: &str) -> Result<()> {
+        media_apps::toggle_play_pause(bundle_id).map_err(|e| anyhow::anyhow!(e))
+    }
+}
+
+/// Resolve the running PID for a bundle id via NSRunningApplication. Used
+/// for media-app rows surfaced via AppleScript when CoreAudio isn't
+/// reporting them (paused sources). Returns the first match — apps with
+/// multiple instances are rare for the media apps we probe (Spotify /
+/// Music are single-instance by design).
+fn pid_for_bundle(bundle_id: &str) -> Option<i32> {
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+    let key = NSString::from_str(bundle_id);
+    let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&key);
+    apps.iter().next().map(|a| a.processIdentifier())
+}
+
+/// Look up the on-disk bundle path for a running app PID via
+/// NSRunningApplication. Used to feed `icons::icon_for_bundle` so the
+/// "Currently Playing" row uses the same cached icon as the rest of the
+/// switcher rows.
+fn bundle_path_for(pid: i32) -> Option<String> {
+    use objc2_app_kit::NSRunningApplication;
+    let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+    app.bundleURL()?.path().map(|s| s.to_string())
 }

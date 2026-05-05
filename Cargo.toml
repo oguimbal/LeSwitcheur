@@ -50,6 +50,12 @@ objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
 accessibility-sys = "0.1"
 auto-launch = "0.6"
+# CoreAudio raw FFI for per-process audio activity detection
+# (kAudioHardwarePropertyProcessObjectList, kAudioProcessPropertyPID,
+# kAudioProcessPropertyIsRunning — public on macOS 14.2+).
+coreaudio-sys = { version = "0.2", default-features = false, features = ["core_audio"] }
+# Walks helper-PID → responsible app PID via proc_pidinfo (PROC_PIDTBSDINFO).
+libproc = "0.14"
 
 # Config + serialization
 serde = { version = "1", features = ["derive"] }

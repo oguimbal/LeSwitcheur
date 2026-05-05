@@ -21,19 +21,19 @@ use gpui::{
     WindowOptions,
 };
 use switcheur_core::{
-    sort_items, AppMatchSet, Appearance, Config, DirSourceId, ExclusionFilter, Item,
-    RecencyTracker, SortOrder,
+    sort_items, AppMatchSet, AppRef, Appearance, AudioRowRef, Config, DirSourceId, ExclusionFilter,
+    Item, RecencyTracker, SortOrder,
 };
 use switcheur_platform::{
     build_dir_source, default_platform, detect_dir_sources, ensure_accessibility,
     has_input_monitoring_permission, has_screen_recording_permission, is_system_reserved,
     onscreen_app_window_ids_excluding_pid, prompt_input_monitoring, register_hotkey,
     request_accessibility_prompt, request_screen_recording_permission,
-    set_accessory_activation_policy, startup, BrowserTabSource, DirSourceEntry, DirectorySource,
-    ExclusionCell, FocusedAppCell, HotkeyEvent, HotkeyRecordSession, HotkeyService, LlmLauncher,
-    MacPlatform, ProgramSource, QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService,
-    RecordOutcome, ScrollDir, SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService,
-    WindowSource,
+    set_accessory_activation_policy, startup, BrowserTabSource, CurrentlyPlayingSource,
+    DirSourceEntry, DirectorySource, ExclusionCell, FocusedAppCell, HotkeyEvent,
+    HotkeyRecordSession, HotkeyService, LlmLauncher, MacPlatform, ProgramSource, QuickTypeError,
+    QuickTypeEvent, QuickTypeService, RecencyService, RecordOutcome, ScrollDir, SystemSwitcherError,
+    SystemSwitcherEvent, SystemSwitcherService, WindowSource,
 };
 use switcheur_ui::{
     onboarding_view::{OnboardingView, OnboardingViewEvent},
@@ -859,7 +859,8 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
             | Item::AskLlm { .. }
             | Item::OpenUrl(_)
             | Item::Dir(_)
-            | Item::BrowserTab(_) => {
+            | Item::BrowserTab(_)
+            | Item::CurrentlyPlaying(_) => {
                 /* Cmd+Tab cycles only ever carry Window/App items */
             }
         }
@@ -868,7 +869,11 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
         Item::Window(w) => state.platform.activate_window(w),
         Item::App(a) => state.platform.activate_app(a),
         Item::Program(p) => state.platform.launch_program(p),
-        Item::AskLlm { .. } | Item::OpenUrl(_) | Item::Dir(_) | Item::BrowserTab(_) => {
+        Item::AskLlm { .. }
+        | Item::OpenUrl(_)
+        | Item::Dir(_)
+        | Item::BrowserTab(_)
+        | Item::CurrentlyPlaying(_) => {
             tracing::warn!("unexpected non-window/app item in Cmd+Tab cycle");
             Ok(())
         }
@@ -1113,6 +1118,14 @@ fn open_switcher_with_items(
         _sub: sub,
     });
 
+    // Kick off the "Currently Playing" detection now that the host
+    // subscriber is wired — emitting from inside the `cx.new` builder (e.g.
+    // SwitcherView::set_items) is too early; the event would land before
+    // anyone is listening and never trigger the CoreAudio probe.
+    let _ = cx.update(|cx| {
+        entity.update(cx, |view, cx| view.request_currently_playing(cx));
+    });
+
     if initial_selected != 0 {
         let _ = cx.update(|cx| {
             entity.update(cx, |view, cx| view.set_selected_external(initial_selected, cx));
@@ -1214,6 +1227,68 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
         }
         SwitcherViewEvent::OpenWithActivated(idx) => {
             activate_open_with(*idx, state, cx);
+            return;
+        }
+        SwitcherViewEvent::TogglePlayPause(bundle_id) => {
+            // Spawn the AppleScript dispatch off the UI thread so a slow
+            // / refused osascript doesn't stall the panel; once it
+            // returns, kick off a fresh probe so the row's badge settles
+            // on the truth (the optimistic flip in
+            // `flip_audio_state_optimistic` may have raced the actual
+            // state change).
+            let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
+            let Some(entity) = entity_opt else {
+                return;
+            };
+            let platform = state.platform.clone();
+            let weak = entity.downgrade();
+            let bundle_id = bundle_id.clone();
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                let platform_inner = platform.clone();
+                let bundle_inner = bundle_id.clone();
+                let _ = cx
+                    .background_executor()
+                    .spawn(async move {
+                        if let Err(e) = platform_inner.toggle_audio_playback(&bundle_inner) {
+                            tracing::warn!("toggle_audio_playback({bundle_inner}): {e:#}");
+                        }
+                    })
+                    .await;
+                let rows = cx
+                    .background_executor()
+                    .spawn(async move { platform.current_currently_playing() })
+                    .await;
+                let items: Vec<Item> = rows.into_iter().map(Item::from).collect();
+                let _ = weak.update(cx, |view, cx| {
+                    view.set_currently_playing(items, cx);
+                });
+            })
+            .detach();
+            return;
+        }
+        SwitcherViewEvent::NeedsCurrentlyPlaying => {
+            // Fired once per switcher session when the panel opens. Detect
+            // the audio source off the UI thread (CoreAudio process probe
+            // + optional MediaRemote/AppleScript hop for browsers) and
+            // feed the resolved row back into the view. `None` clears any
+            // stale row from the previous session.
+            let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
+            let Some(entity) = entity_opt else {
+                return;
+            };
+            let platform = state.platform.clone();
+            let weak = entity.downgrade();
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                let rows = cx
+                    .background_executor()
+                    .spawn(async move { platform.current_currently_playing() })
+                    .await;
+                let items: Vec<Item> = rows.into_iter().map(Item::from).collect();
+                let _ = weak.update(cx, |view, cx| {
+                    view.set_currently_playing(items, cx);
+                });
+            })
+            .detach();
             return;
         }
         SwitcherViewEvent::NeedsBrowserTabs => {
@@ -1394,8 +1469,11 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                     | Item::AskLlm { .. }
                     | Item::OpenUrl(_)
                     | Item::Dir(_)
-                    | Item::BrowserTab(_) => {
-                        /* programs, LLM, URL, dir and browser-tab rows don't participate in recency */
+                    | Item::BrowserTab(_)
+                    | Item::CurrentlyPlaying(_) => {
+                        // The audio row's underlying app/window picks up
+                        // recency through the activation NSNotification —
+                        // bumping again here would double-count.
                     }
                 }
             }
@@ -1432,6 +1510,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                     }
                 }
                 Item::BrowserTab(t) => state.platform.activate_browser_tab(t),
+                Item::CurrentlyPlaying(row) => activate_currently_playing(row, state),
             };
             if let Err(e) = res {
                 tracing::warn!("activate: {e:#}");
@@ -1456,7 +1535,9 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
         | SwitcherViewEvent::UpdateDownloadRequested
         | SwitcherViewEvent::UpdateDismissed
         | SwitcherViewEvent::QueryChanged(_)
-        | SwitcherViewEvent::NeedsBrowserTabs => unreachable!("handled above"),
+        | SwitcherViewEvent::NeedsBrowserTabs
+        | SwitcherViewEvent::NeedsCurrentlyPlaying
+        | SwitcherViewEvent::TogglePlayPause(_) => unreachable!("handled above"),
     };
 
     if let Some(slot) = slot_to_close {
@@ -3229,6 +3310,43 @@ fn theme_for(appearance: Appearance) -> Theme {
         Appearance::Light => Theme::light(),
         _ => Theme::dark(),
     }
+}
+
+/// Activate the "Currently Playing" row. Three branches:
+///
+/// 1. Resolved browser tab → `activate_browser_tab` (existing path; switches
+///    the tab via AppleScript and focuses the owning window via SLPS+AXRaise).
+/// 2. Browser audio source but no tab resolved → focus the browser app's
+///    frontmost (non-minimised) window. Cheaper than the tab path because we
+///    skip AppleScript; just a window-list filter + `activate_window`.
+/// 3. Plain app → same frontmost-window pattern, picking the first
+///    non-minimised window owned by that pid.
+///
+/// Falls through to `activate_app` when no suitable window is found —
+/// guarantees the user at least lands in the right app.
+fn activate_currently_playing(row: &Arc<AudioRowRef>, state: &AppState) -> Result<()> {
+    if let Some(tab) = &row.browser_tab {
+        return state.platform.activate_browser_tab(tab);
+    }
+    let want_pid = row.pid;
+    let windows = state.platform.list_windows(true).unwrap_or_default();
+    let target = windows
+        .iter()
+        .filter(|w| w.pid == want_pid)
+        .find(|w| !w.minimized)
+        .or_else(|| windows.iter().find(|w| w.pid == want_pid))
+        .cloned();
+    if let Some(w) = target {
+        return state.platform.activate_window(&w);
+    }
+    // No window — focus the app at least. Browser-no-tab and plain-app
+    // collapse here.
+    state.platform.activate_app(&AppRef {
+        pid: row.pid,
+        name: row.app_name.clone(),
+        bundle_id: row.bundle_id.clone(),
+        icon_path: row.icon_path.clone(),
+    })
 }
 
 /// Resolve the configured file-manager `id` to an installed bundle id, or

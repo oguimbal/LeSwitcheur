@@ -12,7 +12,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use switcheur_core::{DirRef, Item, ProgramRef, Section, SwitcherState, WindowRef};
+use switcheur_core::{
+    DirRef, Item, PlaybackState, ProgramRef, Section, SwitcherState, WindowRef,
+};
 use switcheur_i18n::tr;
 
 use crate::actions::{
@@ -67,6 +69,12 @@ pub enum SwitcherViewEvent {
     /// [`SwitcherView::set_browser_tabs`]. One-shot per switcher session —
     /// emission is gated by a view-level flag reset in `set_items`.
     NeedsBrowserTabs,
+    /// The switcher just opened: detect the app currently producing audio
+    /// output and feed it back via [`SwitcherView::set_currently_playing`].
+    /// Fired once per session at open time, regardless of query state —
+    /// the row only renders when the query is empty (see
+    /// [`switcheur_core::SwitcherState::currently_playing_visible`]).
+    NeedsCurrentlyPlaying,
     /// Any state touching the "Open With" popover just changed: the dir
     /// selection moved, the popover gained/lost keyboard focus, or the
     /// popover index shifted. The host reads [`SwitcherView`] accessors to
@@ -78,6 +86,12 @@ pub enum SwitcherViewEvent {
     /// popover rows (default row excluded). The host resolves it to a
     /// bundle id and launches the selected folder with that app.
     OpenWithActivated(usize),
+    /// User clicked the play/pause button on a "Currently Playing" row.
+    /// Carries the bundle id of the source app. Host dispatches the
+    /// platform's `toggle_audio_playback` and re-runs the audio probe so
+    /// the row's badge flips between ▶ and ⏸ without needing the user to
+    /// reopen the switcher.
+    TogglePlayPause(String),
 }
 
 /// Top-of-panel banner shown when the startup update check reported a newer
@@ -138,6 +152,10 @@ pub struct SwitcherView {
     /// keystroke. `None` = no cooldown (either no failure yet, or cooldown
     /// elapsed).
     browser_tabs_retry_after: Option<Instant>,
+    /// Has a `NeedsCurrentlyPlaying` event already been fired for the
+    /// current switcher session? One-shot per open, mirroring the
+    /// `browser_tabs_requested` latch. Reset in `set_items`.
+    currently_playing_requested: bool,
     /// Number of *selectable* rows in the "Open With" popover for folder
     /// rows — alternative folder openers, default excluded. Host sets this
     /// whenever its detected-apps list changes. When zero (and the current
@@ -181,6 +199,7 @@ impl SwitcherView {
             dirs_loading: false,
             browser_tabs_requested: false,
             browser_tabs_retry_after: None,
+            currently_playing_requested: false,
             open_with_folder_count: 0,
             open_with_file_count: 0,
             dirs_panel_top_y: Rc::new(Cell::new(None)),
@@ -373,12 +392,32 @@ impl SwitcherView {
         self.state.clear_browser_tabs();
         self.browser_tabs_requested = false;
         self.browser_tabs_retry_after = None;
+        // Same one-shot reset for the audio row: drop the previous open's
+        // detection result so the new open kicks a fresh CoreAudio probe.
+        // The actual `NeedsCurrentlyPlaying` emit is deferred to
+        // [`Self::request_currently_playing`] — set_items runs inside the
+        // `cx.new` builder, before the host installs its event subscriber,
+        // so any emit from here is swallowed.
+        self.state.clear_currently_playing();
+        self.currently_playing_requested = false;
         if self.dirs_enabled {
             cx.emit(SwitcherViewEvent::QueryChanged(String::new()));
         }
         self.emit_height_delta_if_changed(cx);
         cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         cx.notify();
+    }
+
+    /// Fire a one-shot `NeedsCurrentlyPlaying` event. Called by the host
+    /// **after** `cx.subscribe` is installed — emitting from `set_items`
+    /// (which runs inside `cx.open_window`'s builder) drops the event on
+    /// the floor because the subscription doesn't exist yet.
+    pub fn request_currently_playing(&mut self, cx: &mut Context<Self>) {
+        if self.currently_playing_requested {
+            return;
+        }
+        self.currently_playing_requested = true;
+        cx.emit(SwitcherViewEvent::NeedsCurrentlyPlaying);
     }
 
     /// Refresh the candidate set in place without wiping the query or input.
@@ -446,6 +485,14 @@ impl SwitcherView {
     /// tier (or step aside for the LLM row if none match).
     pub fn set_browser_tabs(&mut self, tabs: Vec<Item>, cx: &mut Context<Self>) {
         self.state.set_browser_tabs(tabs);
+        cx.notify();
+    }
+
+    /// Deliver the off-thread audio-source detection. Empty vec = no
+    /// source detected; clears any stale rows from the previous session.
+    pub fn set_currently_playing(&mut self, rows: Vec<Item>, cx: &mut Context<Self>) {
+        self.state.set_currently_playing(rows);
+        self.emit_height_delta_if_changed(cx);
         cx.notify();
     }
 
@@ -718,6 +765,33 @@ impl SwitcherView {
             return;
         }
         self.state.set_selected_program(idx);
+        cx.notify();
+    }
+
+    /// Flip the local playback state of the audio row at `idx` to the
+    /// opposite of its current value. Called from the play/pause button so
+    /// the badge updates instantly; the host follows up with a fresh
+    /// probe a moment later to settle on the truth.
+    fn flip_audio_state_optimistic(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.state.toggle_audio_row_state(idx);
+        cx.notify();
+    }
+
+    fn on_audio_row_click(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.state.set_selected_audio(idx);
+        if let Some(item) = self.state.selected().cloned() {
+            self._activation_sub = None;
+            cx.emit(SwitcherViewEvent::Confirmed(item));
+        }
+    }
+
+    fn on_audio_row_hover(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.state.active_section() == Section::Audio
+            && self.state.selected_audio_idx() == idx
+        {
+            return;
+        }
+        self.state.set_selected_audio(idx);
         cx.notify();
     }
 
@@ -1175,6 +1249,11 @@ impl Render for SwitcherView {
             .text_size(px(14.0))
             .children(render_update_banner(self.update_banner.clone(), &theme, cx))
             .children(if nag_phase == NagPhase::Hidden {
+                currently_playing_section(&self.state, &theme, cx)
+            } else {
+                None
+            })
+            .children(if nag_phase == NagPhase::Hidden {
                 programs_section(&self.state, &theme, cx)
             } else {
                 None
@@ -1404,6 +1483,53 @@ fn render_close_button(
         .into_any_element()
 }
 
+/// Play/pause button for "Currently Playing" rows whose source app exposes
+/// a known toggle path (Spotify, Music, …). Clicking emits
+/// [`SwitcherViewEvent::TogglePlayPause`] with the bundle id; the host
+/// dispatches the AppleScript and re-runs the audio probe so the badge
+/// flips. `stop_propagation` on mouse-down prevents the click from bubbling
+/// up and triggering row activation (which would close the switcher).
+fn render_play_pause_button(
+    idx: usize,
+    bundle_id: String,
+    state: PlaybackState,
+    theme: &Theme,
+    cx: &mut Context<SwitcherView>,
+) -> AnyElement {
+    let muted = theme.muted;
+    let foreground = theme.foreground;
+    let hover_bg = theme.border;
+    let glyph = match state {
+        PlaybackState::Playing => "⏸",
+        PlaybackState::Paused | PlaybackState::Unknown => "▶",
+    };
+    div()
+        .id(("switcher-audio-toggle-btn", idx))
+        .w(px(22.0))
+        .h(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .text_size(px(11.0))
+        .text_color(muted)
+        .cursor_pointer()
+        .hover(move |d| d.bg(hover_bg).text_color(foreground))
+        .on_mouse_down(
+            MouseButton::Left,
+            |_: &MouseDownEvent, _w, cx| cx.stop_propagation(),
+        )
+        .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+            cx.emit(SwitcherViewEvent::TogglePlayPause(bundle_id.clone()));
+            // Optimistic flip: invert the row's local state so the glyph
+            // changes immediately without waiting for the host to re-run
+            // the probe (which can take ~400 ms via osascript).
+            this.flip_audio_state_optimistic(idx, cx);
+        }))
+        .child(glyph)
+        .into_any_element()
+}
+
 /// Mirror of [`render_close_button`] for the dirs pane: clicking it asks the
 /// host to run `zoxide remove` against the row's path. Distinct id tag so
 /// GPUI's interaction state doesn't collide with the window-row close button.
@@ -1480,6 +1606,87 @@ fn programs_section(
             .py_1()
             .border_b_1()
             .border_color(theme.border)
+            .children(rows)
+            .into_any_element(),
+    )
+}
+
+/// "Currently Playing" row, rendered above the result list. Hidden whenever
+/// the query is non-empty or no audio source was detected (see
+/// [`switcheur_core::SwitcherState::currently_playing_visible`]). Mirrors
+/// the [`programs_section`] structure but renders a single row.
+fn currently_playing_section(
+    state: &SwitcherState,
+    theme: &Theme,
+    cx: &mut Context<SwitcherView>,
+) -> Option<AnyElement> {
+    use switcheur_core::MatchResult;
+
+    if !state.currently_playing_visible() {
+        return None;
+    }
+    let items = state.currently_playing();
+    if items.is_empty() {
+        return None;
+    }
+    let section_active = state.active_section() == Section::Audio;
+    let selected = state.selected_audio_idx();
+
+    let header = div()
+        .px_3()
+        .pt_1()
+        .pb_0p5()
+        .text_size(px(11.0))
+        .text_color(theme.muted)
+        .child(tr("audio.section_header"));
+
+    let rows: Vec<AnyElement> = items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let mr = MatchResult {
+                item: item.clone(),
+                score: 0,
+                indices: Vec::new(),
+            };
+            let active = section_active && idx == selected;
+            // Pull out the toggle button data while we still have the
+            // item — render_row consumes the MatchResult.
+            let toggle_data: Option<(String, PlaybackState)> = if let Item::CurrentlyPlaying(r) = item {
+                if r.supports_toggle() {
+                    r.bundle_id.clone().map(|b| (b, r.state))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let mut row = render_row(&mr, active, theme);
+            if let Some((bundle_id, state)) = toggle_data {
+                row = row.child(render_play_pause_button(idx, bundle_id, state, theme, cx));
+            }
+            row.id(SharedString::from(format!("switcher-audio-row-{idx}")))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
+                    this.on_audio_row_click(idx, cx);
+                }))
+                .on_hover(cx.listener(move |this, hovering: &bool, _w, cx| {
+                    if *hovering {
+                        this.on_audio_row_hover(idx, cx);
+                    }
+                }))
+                .into_any_element()
+        })
+        .collect();
+
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .pb_1()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(header)
             .children(rows)
             .into_any_element(),
     )

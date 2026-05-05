@@ -83,6 +83,10 @@ llm:
 launcher:
   open_url: "Abrir URL"
 
+audio:
+  now_playing: "Reproduciendo"
+  section_header: "Reproduciendo"
+
 keys:
   space: "Espacio"
   tab: "Tab"

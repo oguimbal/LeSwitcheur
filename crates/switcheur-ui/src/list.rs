@@ -1,10 +1,16 @@
 //! Result list rendering.
 
 use gpui::{div, hsla, img, px, rgb, svg, AnyElement, Div, IntoElement, ParentElement, Styled};
-use switcheur_core::{Item, LlmProvider, MatchResult};
+use switcheur_core::{Item, LlmProvider, MatchResult, PlaybackState};
 use switcheur_i18n::tr;
 
 use crate::theme::Theme;
+
+/// Brand colour for the "Currently Playing" badge — same accent the Music
+/// app and macOS volume HUD lean on. Picked once here so the row pops
+/// against both light and dark themes without piping a theme accent
+/// through the badge code.
+const AUDIO_BADGE_COLOR: u32 = 0xFA2D48;
 
 const ICON_SIZE: f32 = 26.0;
 /// Size of the badge overlaid on an icon's bottom-right corner (minimized
@@ -25,7 +31,13 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
         Item::OpenUrl(_) => tr("launcher.open_url"),
         _ => item.primary().to_string(),
     };
-    let secondary = item.secondary().map(str::to_string);
+    // App-only audio row has no natural secondary text (no host, no window
+    // title); show a localised "Now Playing" hint so the row reads as
+    // deliberate rather than half-blank.
+    let secondary = match item {
+        Item::CurrentlyPlaying(r) if r.browser_tab.is_none() => Some(tr("audio.now_playing")),
+        _ => item.secondary().map(str::to_string),
+    };
     let minimized = item.is_minimized();
 
     let row_bg = if selected {
@@ -67,6 +79,48 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
                     .text_size(px(13.0))
                     .text_color(theme.foreground)
                     .child("▾"),
+            )
+            .into_any_element()
+    } else if let Item::CurrentlyPlaying(r) = item {
+        // "Currently Playing" rows get a play / pause glyph badge in the
+        // corner over the source app's icon. Same construction as the
+        // minimised badge (lines above) so the row pattern stays
+        // consistent. The badge state mirrors the row's playback state so
+        // the user can tell paused (e.g. Spotify) from playing
+        // (e.g. YouTube tab) at a glance.
+        let glyph = match r.state {
+            PlaybackState::Paused => "⏸",
+            // Both Playing and Unknown render as ▶ — when CoreAudio
+            // reported the source as IsRunningOutput we know it's
+            // producing audio, and on macOS 15.4+ where MediaRemote can't
+            // confirm the state we still want a clear "this is the
+            // audible source" cue.
+            PlaybackState::Playing | PlaybackState::Unknown => "▶",
+        };
+        let badge_bg = match r.state {
+            PlaybackState::Paused => 0x9AA0A6u32, // muted grey for pause
+            _ => AUDIO_BADGE_COLOR,
+        };
+        div()
+            .relative()
+            .w(px(ICON_SIZE))
+            .h(px(ICON_SIZE))
+            .child(base_icon)
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(-3.0))
+                    .right(px(-3.0))
+                    .w(px(OVERLAY_SIZE))
+                    .h(px(OVERLAY_SIZE))
+                    .rounded_full()
+                    .bg(rgb(badge_bg))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(9.0))
+                    .text_color(rgb(0xffffff))
+                    .child(glyph),
             )
             .into_any_element()
     } else if matches!(item, Item::BrowserTab(_)) {

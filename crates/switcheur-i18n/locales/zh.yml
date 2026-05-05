@@ -83,6 +83,10 @@ llm:
 launcher:
   open_url: "打开链接"
 
+audio:
+  now_playing: "正在播放"
+  section_header: "正在播放"
+
 keys:
   space: "空格"
   tab: "Tab"
