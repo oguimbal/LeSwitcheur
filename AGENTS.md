@@ -93,15 +93,20 @@ Replace SHA in `Cargo.toml` (two entries: `gpui` + `gpui_platform`). Run `cargo 
 - `NSRunningApplication::activateWithOptions` deprecated on macOS 14+ but still work. `activate()` (no options) not yet exposed by `objc2-app-kit 0.3`. Local `#[allow(deprecated)]` fine.
 - `kCGWindowListOptionOnScreenOnly` + friends live in `core_graphics::window` (not `::display`) since core-graphics 0.25.
 - Bundle `Info.plist`: **LSUIElement = true** (no Dock icon) + **NSAccessibilityUsageDescription** required, else system prompt never appear.
-- **Cross-Space / cross-fullscreen window activation** (`macos/activate.rs`): three layers, ALL required.
-  1. `NSRunningApplication.activateFromApplication:options:` — yield-based. Only path crossing Dock "universal owner" gate + macOS 14+ "caller must hold activation" rule. Source must be active.
-  2. SLPS: `_SLPSSetFrontProcessWithOptions` + two `SLPSPostEventRecordTo` with `[0x20..0x30]=0xff*16` (DO NOT omit) — pick specific `CGWindowID`.
-  3. `AXUIElementPerformAction(kAXRaiseAction)` — same-Space z-order. Skip if AX not surface window.
-  Don't write `kAXMain` / `kAXFocused` post-raise — race SLPS, break keyboard focus. Use `WindowRef.id` (captured at enum time); don't re-derive via AX (often hide cross-Space windows at activation time).
+- **Window activation** (`macos/activate.rs`): match AltTab `Window.focus()` and yabai. Two paths.
+  - **Path A (default)** — got AX element + `CGWindowID`. SLPS sequence then `AXRaise`.
+    1. SLPS: `_SLPSSetFrontProcessWithOptions(psn, wid, kCPSUserGenerated=0x200)` + two `SLPSPostEventRecordTo` with `bytes[0x20..0x30]=0xff*16` (DO NOT omit). Same byte layout as AltTab + yabai. Triggers Space switch when needed AND restores from Dock if minimized — `SLPS = Dock-icon-click semantics`.
+    2. `AXUIElementPerformAction(kAXRaiseAction)` — z-order nudge.
+  - **Path B (fallback)** — no AX element AND brute-force lookup also failed. Whole-app activate via `NSApp.deactivate()` then `running.activateWithOptions(.ActivateAllWindows)` (deprecated API still works on 15). Last-resort, lifts every window of app above other apps' so don't enter for normal pick — only when SLPS un-targetable.
+  - **Brute-force AX** — when `kAXWindowsAttribute` returns empty for owning app (cross-Space "AX hierarchy suspended", e.g. Chess on another Space), iterate private AXUIElementID 0..1000 via `_AXUIElementCreateWithRemoteToken(token)` (token = `pid` LE i32 + 4-byte zero + 0x636f636f magic + AXUIElementID LE u64). Match by `_AXUIElementGetWindow == target_wid`. Caller `CFRelease`s. Cap iteration at ~100 ms wall-clock. Once recovered, the AX element drops back into Path A.
+  - **Don't pre-fire `kAXMinimizedAttribute=false`** ahead of SLPS — that starts the genie animation on the window's origin Space (wrong Space when cross-Space) and the subsequent SLPS/AXRaise lands during the animation and gets dropped. Let SLPS do the un-minimize itself.
+  - **Don't use `activateFromApplication:options:`** — modern yield API. Returns `ok=true` for cross-Space-with-suspended-AX but produces no visible effect from an LSUIElement caller. SLPS without it works, AltTab + yabai don't use it.
+  - **Don't write `kAXMain` / `kAXFocused` post-SLPS** — races key-window transition, leaves keyboard focus on previous app. AltTab + yabai omit them.
+  - **Use `WindowRef.id` captured at enum time** — re-deriving via AX often fails for cross-Space windows.
 - **LSUIElement + `cx.activate(true)`**: accessory app not "active" from window focus alone. Need explicit `cx.activate(true)`:
   1. `WindowKind::Normal` / `Floating` (settings, onboarding) — else no foreground.
-  2. `WindowKind::PopUp` that trigger target-app activation on confirm (the switcher) — else yield-based activation above return `NO` silently, cross-Space switch break.
-- **Switcher confirm order**: activate target BEFORE close panel (`handle_view_event`). Close first strip activation → yield no-op. Yield API transfer keyboard focus atomically so late close safe.
+  2. `WindowKind::PopUp` (the switcher) — else keyboard input not delivered.
+- **Switcher confirm order**: panel still active during `activate_window`, close after. Path A SLPS works regardless of caller activation state. Closing before risks dropping the click before SLPS posts.
 - Karabiner Elements / non-US keyboard layouts: `global-hotkey` map to physical W3C key codes. `Code::Equal` bind to US `=` physical position, sit under different keycaps on AZERTY/QWERTZ. Prefer keys unambiguous across layouts (letters, digits, Space, arrows) for default.
 
 ## Regression scenarios — focus + listing

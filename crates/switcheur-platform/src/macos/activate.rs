@@ -34,8 +34,8 @@ use std::ffi::c_void;
 use switcheur_core::{AppRef, WindowRef};
 
 use accessibility_sys::{
-    kAXCloseButtonAttribute, kAXErrorSuccess, kAXFrontmostAttribute, kAXMinimizedAttribute,
-    kAXPressAction, kAXRaiseAction, kAXWindowsAttribute, AXError, AXUIElementCopyAttributeValue,
+    kAXCloseButtonAttribute, kAXErrorSuccess, kAXFrontmostAttribute, kAXPressAction,
+    kAXRaiseAction, kAXWindowsAttribute, AXError, AXUIElementCopyAttributeValue,
     AXUIElementCreateApplication, AXUIElementPerformAction, AXUIElementRef,
     AXUIElementSetAttributeValue,
 };
@@ -73,13 +73,6 @@ extern "C" {
         options: u32,
     ) -> i32;
     fn SLPSPostEventRecordTo(psn: *const ProcessSerialNumber, event_record: *const u8) -> i32;
-    fn SLSMainConnectionID() -> i32;
-    fn SLSGetActiveSpace(cid: i32) -> u64;
-    fn SLSCopySpacesForWindows(
-        cid: i32,
-        mask: u32,
-        windows: core_foundation::array::CFArrayRef,
-    ) -> core_foundation::array::CFArrayRef;
 }
 
 #[repr(C)]
@@ -161,53 +154,24 @@ pub fn activate_window(win: &WindowRef) -> Result<()> {
             "activate_window invoked"
         );
 
-        // Un-minimize BEFORE the SLPS/raise dance. Only works if we have the
-        // real AX window element — skip silently otherwise (the target isn't
-        // actually minimized from AX's perspective if AX can't see it).
-        let mut unminimized_now = false;
-        if win.minimized {
-            match target {
-                Some(t) => {
-                    let min_attr = CFString::from_static_string(kAXMinimizedAttribute);
-                    let f = CFBoolean::false_value();
-                    let err = AXUIElementSetAttributeValue(
-                        t,
-                        min_attr.as_concrete_TypeRef(),
-                        f.as_CFTypeRef(),
-                    );
-                    if err == kAXErrorSuccess {
-                        unminimized_now = true;
-                        tracing::debug!(pid = win.pid, wid = win.id, "AX un-minimize ok");
-                    } else {
-                        tracing::warn!(pid = win.pid, wid = win.id, err, "AX un-minimize failed");
-                    }
-                }
-                None => {
-                    tracing::warn!(
-                        pid = win.pid,
-                        wid = win.id,
-                        title = %win.title,
-                        "cannot un-minimize: AX window element not found in app's kAXWindows"
-                    );
-                }
-            }
-        }
-
         // SLPS — pick the specific CGWindowID and, when the target lives on
-        // another Space, kick off the Space switch. Prefer `win.id` captured
-        // at enumeration time over re-deriving via `_AXUIElementGetWindow`,
-        // because AX often hides cross-Space windows at activation time.
-        // `win.id > u32::MAX` means the enumerator resorted to a synthetic
-        // pid-encoded fallback and SLPS can't use it.
+        // another Space, kick off the Space switch. SLPS = Dock-icon-click
+        // semantics: it raises the window, switches Space, AND restores from
+        // the Dock if the window is minimized — all in one round-trip. We
+        // intentionally do NOT pre-fire `kAXMinimized=false` ourselves; an
+        // earlier version did, and AltTab/yabai don't, and the AX un-minimize
+        // started the genie animation on the wrong Space when the window's
+        // origin Space != current Space, and on top of that the AXRaise
+        // afterwards landed before the animation finished and didn't take.
+        //
+        // Prefer `win.id` captured at enumeration time over re-deriving via
+        // `_AXUIElementGetWindow`, because AX often hides cross-Space windows
+        // at activation time. `win.id > u32::MAX` means the enumerator
+        // resorted to a synthetic pid-encoded fallback and SLPS can't use it.
         //
         // Do NOT write kAXMain / kAXFocused afterwards: those race the SLPS-
         // driven key-window transition and produce "window forward but
         // keyboard focus still on previous app". AltTab and yabai omit them.
-        //
-        // Skip SLPS entirely when we just un-miniaturized: firing SLPS while
-        // Chrome's Dock-restore animation is in flight puts the window in a
-        // half-restored state. The AX un-minimize plus the app-level focus
-        // below is enough for the (always current-Space) un-minimize case.
         let wid: Option<u32> = if win.id > 0 && win.id <= u32::MAX as u64 {
             Some(win.id as u32)
         } else {
@@ -216,103 +180,37 @@ pub fn activate_window(win: &WindowRef) -> Result<()> {
 
         // When `kAXWindowsAttribute` came back empty for the owning app —
         // the cross-Space "AX hierarchy suspended" case (Chess sitting on
-        // another Space) — try AltTab's `windowsByBruteForce` workaround
-        // before falling back to whole-app activation. If we recover the
-        // matching AX element this way, Path A (SLPS + AXRaise) works
-        // exactly like for a normal pick: SLPS triggers the Space switch
-        // and AXRaise nudges the z-order. Without this, SLPS is silently
-        // no-op'd by the suspended-AX state and the click looks dead.
-        let brute_forced: Option<OwnedAxElem> = if !unminimized_now && target.is_none() {
+        // another Space) — try AltTab's `windowsByBruteForce` workaround.
+        // If we recover the matching AX element, the regular SLPS+AXRaise
+        // path works exactly like for a normal pick.
+        let brute_forced: Option<OwnedAxElem> = if target.is_none() {
             wid.and_then(|w| ax_window_via_remote_token(win.pid, w))
         } else {
             None
         };
-
-        // CG-supplement enumeration defaults `minimized=false` because CG
-        // can't reliably tell minimized-in-Dock apart from on-another-Space.
-        // The brute-forced AX element does know — query it. If the window
-        // is actually minimized AND on another Space, AXRaise alone fires
-        // the un-minimize animation on its origin Space (the user just sees
-        // a brief flash on the current Space) without a Space switch. The
-        // Dock-icon-click equivalent — `kAXMinimized=false` followed by
-        // `activateWithOptions(.ActivateAllWindows)` — restores AND switches
-        // Space in one go.
-        if let Some(b) = &brute_forced {
-            if ax_read_bool(b.0, kAXMinimizedAttribute) == Some(true) {
-                let min_attr = CFString::from_static_string(kAXMinimizedAttribute);
-                let f = CFBoolean::false_value();
-                let err = AXUIElementSetAttributeValue(
-                    b.0,
-                    min_attr.as_concrete_TypeRef(),
-                    f.as_CFTypeRef(),
-                );
-                tracing::debug!(
-                    pid = win.pid,
-                    wid = ?wid,
-                    err,
-                    "cross-Space minimized: AX un-minimize via brute-force element"
-                );
-                activate_app_all_windows(win.pid);
-                drop(brute_forced);
-                return Ok(());
-            }
-        }
-
         let effective_target = target.or_else(|| brute_forced.as_ref().map(|b| b.0));
 
-        match (unminimized_now, effective_target, wid) {
-            (false, Some(t), Some(wid)) => {
-                // Path A — AX target + CGWindowID. Pure SLPS + AXRaise,
-                // mirroring AltTab `Window.focus()`. SLPS picks the specific
-                // window and triggers the Space switch when needed. Works
-                // for both the normal kAXWindows path and the brute-force
-                // remote-token path above.
-                cross_space_focus(win.pid, wid);
+        match (effective_target, wid) {
+            (Some(t), Some(w)) => {
+                // Path A — SLPS + AXRaise. Same flow for normal, cross-Space,
+                // minimized-in-Dock, and brute-force-recovered elements.
+                cross_space_focus(win.pid, w);
                 let err = AXUIElementPerformAction(t, raise_action.as_concrete_TypeRef());
                 if err != kAXErrorSuccess {
                     tracing::debug!(err, "AXRaise failed (SLPS already posted)");
                 }
             }
-            (false, None, _) => {
-                // Path B — neither kAXWindows nor remote-token brute-force
-                // surfaced an AX element. Fall back to whole-app activation;
-                // we can't target a specific window any more.
+            _ => {
+                // Path B — no SLPS-targetable handle. Whole-app activation
+                // (Dock-icon click without specific window targeting). Last-
+                // resort path; should be rare.
                 tracing::debug!(
                     pid = win.pid,
                     wid = ?wid,
-                    "no AX element (kAXWindows + brute-force both empty) — using activateWithOptions(.ActivateAllWindows)"
+                    target_found = effective_target.is_some(),
+                    "no SLPS handle — using activateWithOptions(.ActivateAllWindows)"
                 );
                 activate_app_all_windows(win.pid);
-            }
-            (false, Some(t), None) => {
-                // AX target found but no CGWindowID — degenerate; SLPS can't
-                // be used. AXRaise on its own Space at minimum.
-                let _ = AXUIElementPerformAction(t, raise_action.as_concrete_TypeRef());
-                let _ = focus_pid(win.pid);
-            }
-            (true, _, _) => {
-                // Un-minimize path. The AX un-minimize above set the window
-                // back to non-minimized state, but it restores on its origin
-                // Space — if that's not the current Space, the user just
-                // sees a brief animation flash here while the window
-                // actually appears elsewhere. Detect cross-Space and use
-                // `activateWithOptions(.ActivateAllWindows)` (Dock-click
-                // semantics: restore + Space switch) rather than the cheaper
-                // `focus_pid` which only sets AXFrontmost.
-                let cross_space = wid.map(window_is_cross_space).unwrap_or(false);
-                if cross_space {
-                    tracing::debug!(
-                        pid = win.pid,
-                        wid = ?wid,
-                        "un-minimized cross-Space window — activating all windows for Space switch"
-                    );
-                    activate_app_all_windows(win.pid);
-                } else {
-                    let _ = focus_pid(win.pid);
-                }
-                if let Some(t) = effective_target {
-                    let _ = AXUIElementPerformAction(t, raise_action.as_concrete_TypeRef());
-                }
             }
         }
         // brute_forced drops → CFRelease.
@@ -400,8 +298,7 @@ fn activate_app_all_windows(pid: i32) {
     // through GPUI). `[NSApp deactivate]` releases that hold so the target's
     // activation actually takes effect.
     if let Some(mtm) = MainThreadMarker::new() {
-        let app = NSApplication::sharedApplication(mtm);
-        unsafe { app.deactivate() };
+        NSApplication::sharedApplication(mtm).deactivate();
     }
     #[allow(deprecated)]
     let ok = running.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
@@ -539,53 +436,6 @@ unsafe fn ax_window_via_remote_token(pid: i32, target_wid: u32) -> Option<OwnedA
     }
     tracing::debug!(pid, target_wid, "remote-token brute-force exhausted 1000 ids");
     None
-}
-
-/// Whether a CGWindowID lives on a Space other than the current one. Used
-/// to decide whether un-minimizing the window also requires a Space switch
-/// (Dock-click semantics) on top of the AX un-minimize. Minimized windows
-/// stay attached to their origin Space, so this works for both visible and
-/// minimized targets. Mask `0x7` asks for all Space kinds (user + fullscreen
-/// + tiled). Returns `false` if SkyLight has no Space record for the
-/// window — we conservatively assume same-Space in that case.
-fn window_is_cross_space(cg_id: u32) -> bool {
-    use core_foundation::array::CFArray;
-    use core_foundation::number::CFNumber;
-    unsafe {
-        let cid = SLSMainConnectionID();
-        let active = SLSGetActiveSpace(cid) as i64;
-        let num = CFNumber::from(cg_id as i64);
-        let arr: CFArray<CFNumber> = CFArray::from_CFTypes(&[num]);
-        let spaces_ref = SLSCopySpacesForWindows(cid, 0x7, arr.as_concrete_TypeRef());
-        if spaces_ref.is_null() {
-            return false;
-        }
-        let spaces: CFArray<CFNumber> = CFArray::wrap_under_create_rule(spaces_ref as _);
-        if spaces.len() == 0 {
-            return false;
-        }
-        for i in 0..spaces.len() {
-            if let Some(n) = spaces.get(i) {
-                if let Some(v) = n.to_i64() {
-                    if v == active {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
-    }
-}
-
-unsafe fn ax_read_bool(elem: AXUIElementRef, attr: &str) -> Option<bool> {
-    let attr_cf = CFString::new(attr);
-    let mut value: *const c_void = std::ptr::null();
-    let err = AXUIElementCopyAttributeValue(elem, attr_cf.as_concrete_TypeRef(), &mut value);
-    if err != kAXErrorSuccess || value.is_null() {
-        return None;
-    }
-    let b: CFBoolean = CFBoolean::wrap_under_create_rule(value as _);
-    Some(b.into())
 }
 
 unsafe fn ax_window_id(elem: AXUIElementRef) -> Option<u64> {
