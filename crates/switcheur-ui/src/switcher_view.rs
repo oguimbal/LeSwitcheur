@@ -269,9 +269,13 @@ impl SwitcherView {
 
     /// Should the popover window currently be visible? True when the dirs
     /// pane has focus, at least one dir row exists, and at least one
-    /// alternative opener was detected for the selected row's kind.
+    /// alternative opener was detected for the selected row's kind. The
+    /// `nag_phase` guard mirrors the dirs-panel render gate (see `render`)
+    /// so the host's `sync_open_with_popover` doesn't try to anchor a
+    /// popover against a panel that isn't on screen.
     pub fn open_with_visible(&self) -> bool {
-        self.state.active_section() == Section::Dirs
+        self.nag_phase == NagPhase::Hidden
+            && self.state.active_section() == Section::Dirs
             && self.state.dirs_visible()
             && self.current_open_with_count() > 0
     }
@@ -1036,6 +1040,20 @@ impl SwitcherView {
         };
         if ch.is_empty() || ch.chars().any(|c| c.is_control()) {
             return;
+        }
+        // Space on a selected Now-Playing row toggles play/pause instead of
+        // typing into the query. Audio rows only render with an empty query,
+        // so this can't shadow search input.
+        if ch == " " && self.state.active_section() == Section::Audio {
+            let idx = self.state.selected_audio_idx();
+            if let Some(Item::CurrentlyPlaying(r)) = self.state.currently_playing().get(idx) {
+                if r.supports_toggle() {
+                    let row = r.clone();
+                    cx.emit(SwitcherViewEvent::TogglePlayPause(row));
+                    self.flip_audio_state_optimistic(idx, cx);
+                    return;
+                }
+            }
         }
         self.input.insert_str(ch);
         self.sync_query(cx);

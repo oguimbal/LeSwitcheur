@@ -8,11 +8,19 @@
 //! secondary thread proved fragile. A direct fs walk is synchronous, reliable,
 //! and covers 99 % of real-world installs.
 //!
-//! The scan runs once on a background thread at startup and writes a snapshot
-//! to an in-memory cache. Subsequent `list_programs()` calls clone from it.
+//! The scan runs once on the main thread at startup and writes a snapshot to
+//! an in-memory cache. Subsequent `list_programs()` calls clone from it.
+//!
+//! To pick up newly-installed apps without a restart, `refresh_if_changed`
+//! re-stats the scanned directories and rescans only when the mtime of any of
+//! them changed since the last snapshot. Cost in the steady state is a handful
+//! of `stat(2)` calls (microseconds); a real rescan only fires after the user
+//! actually installs or removes an app. Caller dispatches it on the main
+//! thread (see `prefetch_sync` docs).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::SystemTime;
 
 use anyhow::{anyhow, Result};
 use objc2_app_kit::{NSWorkspace, NSWorkspaceOpenConfiguration};
@@ -41,6 +49,33 @@ fn cache() -> &'static Arc<RwLock<Vec<ProgramRef>>> {
     CACHE.get_or_init(|| Arc::new(RwLock::new(Vec::new())))
 }
 
+type DirFingerprint = Vec<(PathBuf, Option<SystemTime>)>;
+
+fn fingerprint_state() -> &'static Mutex<Option<DirFingerprint>> {
+    static STATE: OnceLock<Mutex<Option<DirFingerprint>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(None))
+}
+
+/// Snapshot the mtime of every scanned directory. Cheap (one `stat` per dir).
+/// A `None` mtime entry means the dir doesn't exist or stat failed — kept
+/// so a later appearance also counts as a change.
+fn capture_fingerprint() -> DirFingerprint {
+    let mut out: DirFingerprint = SYSTEM_DIRS
+        .iter()
+        .map(|d| {
+            let p = PathBuf::from(*d);
+            let m = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+            (p, m)
+        })
+        .collect();
+    if let Some(home) = dirs_home() {
+        let p = home.join("Applications");
+        let m = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+        out.push((p, m));
+    }
+    out
+}
+
 /// Populate the program catalogue synchronously. MUST be called on the main
 /// thread because the underlying NSBundle / NSWorkspace calls aren't safe
 /// from arbitrary Rust threads on modern macOS (silently crashing the thread).
@@ -49,20 +84,40 @@ fn cache() -> &'static Arc<RwLock<Vec<ProgramRef>>> {
 pub fn prefetch_sync() {
     static DONE: OnceLock<()> = OnceLock::new();
     let _ = DONE.get_or_init(|| {
-        let start = std::time::Instant::now();
-        let list = scan_all().unwrap_or_else(|e| {
-            tracing::warn!("program scan failed: {e:#}");
-            Vec::new()
-        });
-        tracing::info!(
-            programs = list.len(),
-            elapsed_ms = start.elapsed().as_millis() as u64,
-            "program scan complete"
-        );
-        if let Ok(mut w) = cache().write() {
-            *w = list;
-        }
+        run_scan();
     });
+}
+
+/// Re-scan only when the scanned directories' mtimes changed since the last
+/// snapshot. Intended to run on every panel open: stat probe is microseconds,
+/// the rescan only fires after the user installs or removes an `.app`. Same
+/// main-thread requirement as `prefetch_sync`.
+pub fn refresh_if_changed() {
+    let new_fp = capture_fingerprint();
+    {
+        let guard = fingerprint_state().lock().unwrap();
+        if guard.as_ref() == Some(&new_fp) {
+            return;
+        }
+    }
+    run_scan();
+}
+
+fn run_scan() {
+    let start = std::time::Instant::now();
+    let list = scan_all().unwrap_or_else(|e| {
+        tracing::warn!("program scan failed: {e:#}");
+        Vec::new()
+    });
+    tracing::info!(
+        programs = list.len(),
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "program scan complete"
+    );
+    if let Ok(mut w) = cache().write() {
+        *w = list;
+    }
+    *fingerprint_state().lock().unwrap() = Some(capture_fingerprint());
 }
 
 pub fn list_programs_cached() -> Vec<ProgramRef> {

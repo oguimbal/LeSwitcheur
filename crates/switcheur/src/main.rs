@@ -983,8 +983,15 @@ fn open_switcher_with_items(
     let search_apps = cfg.search_apps;
     drop(cfg);
 
-    // Computed on the main thread where `primary_display` is cheap.
-    let bounds = cx.update(|cx| initial_bounds(cx, WIDTH, HEIGHT));
+    // Computed on the main thread where `primary_display` is cheap. Also
+    // cheap-checks the installed-app catalogue: a handful of `stat`s on
+    // /Applications & friends, with a full rescan only when an mtime changed
+    // since the last snapshot — i.e. only after the user installed or
+    // removed an `.app`.
+    let bounds = cx.update(|cx| {
+        switcheur_platform::macos::programs::refresh_if_changed();
+        initial_bounds(cx, WIDTH, HEIGHT)
+    });
 
     let options = WindowOptions {
         titlebar: None,
@@ -1222,7 +1229,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             // "RefCell already borrowed" log GPUI emits when a subscriber
             // tries to touch the emitting entity synchronously.
             let state_def = state.clone();
-            cx.defer(move |cx| sync_open_with_popover(&state_def, cx));
+            cx.defer(move |cx| sync_open_with_popover(&state_def, cx, SYNC_POPOVER_MAX_RETRIES));
             return;
         }
         SwitcherViewEvent::OpenWithActivated(idx) => {
@@ -1557,11 +1564,20 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
 /// main window — the connection reads as intentional rather than detached.
 const POPOVER_GAP: f32 = -4.0;
 
+/// Frame budget for the retry-when-`panel_top_y`-is-`None` path below.
+/// `open_with_visible()` and the dirs-panel render gate aren't perfectly
+/// aligned (e.g. the eval-fallback path in `render_main` skips the dirs
+/// panel even when the view's open-with state says visible), and that
+/// mismatch used to spin the main thread at 100% by re-deferring this fn
+/// forever. After this many frames without a probe reading, give up and
+/// close the popover instead.
+const SYNC_POPOVER_MAX_RETRIES: u8 = 8;
+
 /// Reconcile popover window state with the current switcher view state. Called
 /// on every [`SwitcherViewEvent::OpenWithStateChanged`] — decides whether to
 /// open, close, or reposition the floating popover, and pushes the latest
 /// entry list + selection into its view.
-fn sync_open_with_popover(state: &AppState, cx: &mut App) {
+fn sync_open_with_popover(state: &AppState, cx: &mut App, retries_left: u8) {
     let Some(slot) = state.current.borrow().as_ref().cloned_entity() else {
         return;
     };
@@ -1601,8 +1617,16 @@ fn sync_open_with_popover(state: &AppState, cx: &mut App) {
     // races occur. If we haven't gotten a reading yet, retry on the next
     // frame via a second defer so the popover never flashes wrong.
     let Some(panel_top_y) = panel_top_y else {
+        if retries_left == 0 {
+            tracing::warn!(
+                "sync_open_with_popover: panel_top_y still None after {} frames; closing popover",
+                SYNC_POPOVER_MAX_RETRIES
+            );
+            close_open_with_popover(state, cx);
+            return;
+        }
         let state_retry = state.clone();
-        cx.defer(move |cx| sync_open_with_popover(&state_retry, cx));
+        cx.defer(move |cx| sync_open_with_popover(&state_retry, cx, retries_left - 1));
         return;
     };
     // Row centre from window top = panel_top + header + (idx + 0.5) * row.
