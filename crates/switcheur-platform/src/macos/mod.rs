@@ -26,6 +26,11 @@ pub use hotkey_service::HotkeyService;
 pub use hotkey_tap::{
     is_system_reserved, HotkeyRecordSession, HotkeyTapError, HotkeyTapService, RecordOutcome,
 };
+pub use machine_id::machine_id;
+pub use panel::{
+    adjust_key_window_frame, configure_open_with_popover, key_window_frame,
+    set_open_with_popover_frame, OPEN_WITH_POPOVER_WIDTH,
+};
 pub use permissions::{
     ensure_accessibility, has_input_monitoring_permission, has_screen_recording_permission,
     prompt_accessibility, prompt_input_monitoring, request_accessibility_prompt,
@@ -34,6 +39,7 @@ pub use permissions::{
 pub use quick_type::{ExclusionCell, QuickTypeError, QuickTypeEvent, QuickTypeService, ScrollDir};
 pub use recency::{FocusedApp, FocusedAppCell, RecencyService};
 pub use system_switcher::{SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService};
+pub use windows::onscreen_app_window_ids_excluding_pid;
 
 use anyhow::Result;
 use std::time::Duration;

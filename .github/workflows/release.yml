@@ -6,7 +6,7 @@ on:
       - "v*"
 
 jobs:
-  build:
+  build-macos:
     runs-on: macos-14
     permissions:
       contents: write
@@ -127,10 +127,49 @@ jobs:
           NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
         run: ./bundle/notarize.sh dist/LeSwitcheur.dmg
 
-      - name: Publish GitHub Release
+      - name: Publish GitHub Release (DMG)
         uses: softprops/action-gh-release@v2
         with:
           files: dist/LeSwitcheur.dmg
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+  build-windows:
+    # Windows POC build: produces a stripped release `.exe` zipped with no
+    # extra runtime DLLs (statically linked MSVCRT via `+crt-static`). No
+    # signing yet — early Windows builds ship as unsigned previews until we
+    # set up SignTool with an EV cert. The job appends its asset to the
+    # same GitHub Release the macOS job creates (softprops merges by tag).
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p switcheur
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $tag = "${{ github.ref_name }}"
+          $stage = "dist\LeSwitcheur-$tag-windows-x86_64"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item target\release\switcheur.exe "$stage\LeSwitcheur.exe"
+          Copy-Item LICENSE "$stage\LICENSE"
+          Copy-Item README.md "$stage\README.md"
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist\LeSwitcheur-$tag-windows-x86_64.zip" -Force
+
+      - name: Publish GitHub Release (Windows zip)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LeSwitcheur-${{ github.ref_name }}-windows-x86_64.zip
           generate_release_notes: true
           draft: false
           prerelease: false

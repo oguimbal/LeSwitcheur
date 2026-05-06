@@ -9,6 +9,18 @@
 //!
 //! Needs Accessibility permission like the main binary.
 
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    println!("probe_windows: macOS only");
+}
+
+#[cfg(target_os = "macos")]
+fn main() {
+    mac::run();
+}
+
+#[cfg(target_os = "macos")]
+mod mac {
 use std::collections::HashMap;
 use std::ffi::c_void;
 
@@ -72,7 +84,7 @@ struct CGSize {
     height: f64,
 }
 
-fn main() {
+pub fn run() {
     let filter = std::env::var("PROBE_APP").ok().map(|s| s.to_lowercase());
 
     let apps = list_regular_apps();
@@ -376,3 +388,5 @@ fn cg_get_bounds(dict: &CFDictionary) -> Option<Bounds> {
     let height = cg_get_f64(&b, "Height").unwrap_or(0.0);
     Some(Bounds { x, y, width, height })
 }
+
+}  // mod mac

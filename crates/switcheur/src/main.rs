@@ -31,7 +31,7 @@ use switcheur_platform::{
     request_accessibility_prompt, request_screen_recording_permission,
     set_accessory_activation_policy, startup, BrowserTabSource, CurrentlyPlayingSource,
     DirSourceEntry, DirectorySource, ExclusionCell, FocusedAppCell, HotkeyEvent,
-    HotkeyRecordSession, HotkeyService, LlmLauncher, MacPlatform, ProgramSource, QuickTypeError,
+    HotkeyRecordSession, HotkeyService, LlmLauncher, Platform, ProgramSource, QuickTypeError,
     QuickTypeEvent, QuickTypeService, RecencyService, RecordOutcome, ScrollDir, SystemSwitcherError,
     SystemSwitcherEvent, SystemSwitcherService, WindowSource,
 };
@@ -207,7 +207,7 @@ fn main() -> Result<()> {
         );
     }
 
-    let platform: Arc<MacPlatform> =
+    let platform: Arc<Platform> =
         Arc::new(default_platform().context("init macOS platform")?);
     let im_granted_at_boot = has_input_monitoring_permission();
     if is_system_reserved(&config.hotkey) && !im_granted_at_boot {
@@ -350,7 +350,7 @@ fn main() -> Result<()> {
 
 #[derive(Clone)]
 struct AppState {
-    platform: Arc<MacPlatform>,
+    platform: Arc<Platform>,
     hotkey: Arc<HotkeyService>,
     config: Rc<RefCell<Config>>,
     filter: Rc<RefCell<ExclusionFilter>>,
@@ -1398,9 +1398,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                 let items: Vec<Item> = hits
                     .into_iter()
                     .map(|h| {
-                        let icon = switcheur_platform::macos::icons::icon_for_path(
-                            &h.path, h.is_dir,
-                        );
+                        let icon = switcheur_platform::icon_for_path(&h.path, h.is_dir);
                         Item::Dir(Arc::new(switcheur_core::DirRef::with_kind(
                             h.path, label, h.is_dir, icon,
                         )))
@@ -3425,9 +3423,9 @@ fn build_open_with_file_entries(cfg: &Config) -> Vec<OpenWithEntry> {
     // Find an icon for the reveal target. Finder isn't in the Applications
     // scan — use its well-known system path like `build_open_with_entries`
     // does — others resolve through the program catalogue.
-    let programs = switcheur_platform::macos::programs::list_programs_cached();
+    let programs = switcheur_platform::cached_programs();
     let icon_path = if reveal_id == FINDER_ID {
-        switcheur_platform::macos::icons::icon_for_bundle(
+        switcheur_platform::icon_for_bundle(
             "/System/Library/CoreServices/Finder.app",
             FINDER_BUNDLE_ID,
         )
@@ -3436,7 +3434,7 @@ fn build_open_with_file_entries(cfg: &Config) -> Vec<OpenWithEntry> {
             .iter()
             .find(|p| p.bundle_id.as_deref() == Some(&reveal_bundle_id))
             .and_then(|p| {
-                switcheur_platform::macos::icons::icon_for_bundle(
+                switcheur_platform::icon_for_bundle(
                     p.bundle_path.to_string_lossy().as_ref(),
                     &reveal_bundle_id,
                 )
@@ -3476,7 +3474,7 @@ fn build_entries_from_ordered(
     use switcheur_core::file_manager::FINDER_ID;
     let _ = default_id;
 
-    let programs = switcheur_platform::macos::programs::list_programs_cached();
+    let programs = switcheur_platform::cached_programs();
     let mut out = Vec::with_capacity(ordered.len());
     for (i, a) in ordered.iter().enumerate() {
         let bundle_path = programs
@@ -3484,14 +3482,14 @@ fn build_entries_from_ordered(
             .find(|p| p.bundle_id.as_deref() == Some(&a.bundle_id))
             .map(|p| p.bundle_path.clone());
         let icon_path = match (&bundle_path, a.id) {
-            (Some(bp), _) => switcheur_platform::macos::icons::icon_for_bundle(
+            (Some(bp), _) => switcheur_platform::icon_for_bundle(
                 bp.to_string_lossy().as_ref(),
                 &a.bundle_id,
             ),
             (None, id) if id == FINDER_ID => {
                 // Finder isn't in the Applications scan — hit its well-known
                 // system path so the default row isn't left with a blank.
-                switcheur_platform::macos::icons::icon_for_bundle(
+                switcheur_platform::icon_for_bundle(
                     "/System/Library/CoreServices/Finder.app",
                     a.bundle_id.as_str(),
                 )
@@ -3533,7 +3531,7 @@ fn initial_bounds(cx: &mut App, width: f32, height: f32) -> Bounds<Pixels> {
 }
 
 fn collect_items(
-    platform: &MacPlatform,
+    platform: &Platform,
     config: &Config,
     filter: &ExclusionFilter,
     tracker: &RecencyTracker,

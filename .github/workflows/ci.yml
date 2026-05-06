@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test-core:
+    name: test (core / pure-rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (pure crates)
+        run: cargo test -p switcheur-core -p switcheur-i18n
+
+  build-macos:
+    name: build (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check (workspace)
+        run: cargo check --workspace --all-targets
+      - name: cargo build (binary, debug)
+        run: cargo build -p switcheur
+
+  build-windows:
+    name: build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check (workspace)
+        run: cargo check --workspace --all-targets
+      - name: cargo build (binary, debug)
+        run: cargo build -p switcheur

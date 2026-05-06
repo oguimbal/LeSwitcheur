@@ -182,44 +182,98 @@ pub enum HotkeyEvent {
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+#[cfg(target_os = "windows")]
+pub mod windows;
+
 pub mod zoxide;
 
 #[cfg(target_os = "macos")]
 pub use macos::{
-    ensure_accessibility, file_manager, has_input_monitoring_permission,
-    has_screen_recording_permission, is_system_reserved, prompt_accessibility,
+    adjust_key_window_frame, configure_open_with_popover, ensure_accessibility, file_manager,
+    has_input_monitoring_permission, has_screen_recording_permission, is_system_reserved,
+    key_window_frame, machine_id, onscreen_app_window_ids_excluding_pid, prompt_accessibility,
     prompt_input_monitoring, request_accessibility_prompt, request_screen_recording_permission,
-    startup, ExclusionCell, FocusedApp, FocusedAppCell, HotkeyRecordSession, HotkeyService,
-    HotkeyTapError, MacHotkeyService, MacPlatform, QuickTypeError, QuickTypeEvent,
-    QuickTypeService, RecencyService, RecordOutcome, ScrollDir, SystemSwitcherError,
-    SystemSwitcherEvent, SystemSwitcherService,
-};
-
-#[cfg(target_os = "macos")]
-pub use macos::windows::onscreen_app_window_ids_excluding_pid;
-
-#[cfg(target_os = "macos")]
-pub use macos::panel::{
-    adjust_key_window_frame, configure_open_with_popover, key_window_frame,
-    set_open_with_popover_frame, OPEN_WITH_POPOVER_WIDTH,
+    set_open_with_popover_frame, startup, ExclusionCell, FocusedApp, FocusedAppCell,
+    HotkeyRecordSession, HotkeyService, HotkeyTapError, MacHotkeyService, MacPlatform,
+    QuickTypeError, QuickTypeEvent, QuickTypeService, RecencyService, RecordOutcome, ScrollDir,
+    SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService, OPEN_WITH_POPOVER_WIDTH,
 };
 
 #[cfg(target_os = "macos")]
 pub use macos::app_policy::set_accessory as set_accessory_activation_policy;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub use windows::{
+    adjust_key_window_frame, configure_open_with_popover, ensure_accessibility, file_manager,
+    has_input_monitoring_permission, has_screen_recording_permission, is_system_reserved,
+    key_window_frame, machine_id, onscreen_app_window_ids_excluding_pid, prompt_accessibility,
+    prompt_input_monitoring, request_accessibility_prompt, request_screen_recording_permission,
+    set_open_with_popover_frame, startup, ExclusionCell, FocusedApp, FocusedAppCell,
+    HotkeyRecordSession, HotkeyService, HotkeyTapError, QuickTypeError, QuickTypeEvent,
+    QuickTypeService, RecencyService, RecordOutcome, ScrollDir, SystemSwitcherError,
+    SystemSwitcherEvent, SystemSwitcherService, WinPlatform, OPEN_WITH_POPOVER_WIDTH,
+};
+
+#[cfg(target_os = "windows")]
+pub use windows::app_policy::set_accessory as set_accessory_activation_policy;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn set_accessory_activation_policy() {}
 
-#[cfg(target_os = "macos")]
-pub use macos::machine_id::machine_id;
-
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn machine_id() -> Option<String> {
     None
 }
 
-// Future: Windows mirror (Alt+Tab) would live at crates/switcheur-platform/src/windows/
-// and expose the same SystemSwitcher* names behind #[cfg(target_os = "windows")].
+/// Cross-platform alias for the host's concrete platform implementation.
+/// `main.rs` owns an `Arc<Platform>` and dispatches through the `WindowSource`
+/// / `ProgramSource` / etc. traits.
+#[cfg(target_os = "macos")]
+pub type Platform = MacPlatform;
+
+#[cfg(target_os = "windows")]
+pub type Platform = WinPlatform;
+
+/// Snapshot of the catalog populated by the platform's program scanner.
+/// Empty on platforms that don't have one yet.
+#[cfg(target_os = "macos")]
+pub fn cached_programs() -> Vec<switcheur_core::ProgramRef> {
+    macos::programs::list_programs_cached()
+}
+
+#[cfg(target_os = "windows")]
+pub fn cached_programs() -> Vec<switcheur_core::ProgramRef> {
+    windows::programs::list_programs()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn cached_programs() -> Vec<switcheur_core::ProgramRef> {
+    Vec::new()
+}
+
+/// Resolve a cached PNG path for the given app bundle. `None` means the
+/// caller should render a placeholder icon.
+#[cfg(target_os = "macos")]
+pub fn icon_for_bundle(bundle_path: &str, bundle_id: &str) -> Option<std::path::PathBuf> {
+    macos::icons::icon_for_bundle(bundle_path, bundle_id)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn icon_for_bundle(_bundle_path: &str, _bundle_id: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Resolve a cached icon for a filesystem path (file or directory). Used
+/// for directory-source rows. `None` means the caller renders a placeholder.
+#[cfg(target_os = "macos")]
+pub fn icon_for_path(path: &std::path::Path, is_dir: bool) -> Option<std::path::PathBuf> {
+    macos::icons::icon_for_path(path, is_dir)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn icon_for_path(_path: &std::path::Path, _is_dir: bool) -> Option<std::path::PathBuf> {
+    None
+}
 
 /// Convenience factory returning the current platform's implementation.
 #[cfg(target_os = "macos")]
@@ -227,9 +281,14 @@ pub fn default_platform() -> Result<MacPlatform> {
     MacPlatform::new()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn default_platform() -> Result<WinPlatform> {
+    WinPlatform::new()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn default_platform() -> Result<()> {
-    anyhow::bail!("switcheur-platform currently only supports macOS")
+    anyhow::bail!("switcheur-platform currently supports macOS and Windows")
 }
 
 /// Build the unified hotkey service for `spec`. When the spec is
@@ -237,12 +296,12 @@ pub fn default_platform() -> Result<()> {
 /// has been granted, this installs an HID `CGEventTap` that intercepts the
 /// combo before macOS dispatches it to Spotlight/Mission Control. Otherwise
 /// it falls back to the Carbon `RegisterEventHotKey` path.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn register_hotkey(spec: &HotkeySpec, im_granted: bool) -> Result<HotkeyService> {
     HotkeyService::start(spec, im_granted)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn register_hotkey(_spec: &HotkeySpec, _im_granted: bool) -> Result<()> {
-    anyhow::bail!("hotkey registration only supported on macOS");
+    anyhow::bail!("hotkey registration not supported on this platform");
 }

@@ -57,6 +57,10 @@ coreaudio-sys = { version = "0.2", default-features = false, features = ["core_a
 # Walks helper-PID → responsible app PID via proc_pidinfo (PROC_PIDTBSDINFO).
 libproc = "0.14"
 
+# Windows API bindings (Win32 + selected WinRT). Enabled features pulled in
+# per-crate so the dep tree only carries what we actually call.
+windows = "0.61"
+
 # Config + serialization
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

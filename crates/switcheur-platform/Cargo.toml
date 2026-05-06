@@ -18,6 +18,24 @@ arc-swap = { workspace = true }
 percent-encoding = "2"
 open = { workspace = true }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+    "Win32_UI_Accessibility",
+    "Win32_System_Com",
+] }
+global-hotkey = { workspace = true }
+directories = { workspace = true }
+auto-launch = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = { workspace = true }
 core-graphics = { workspace = true }

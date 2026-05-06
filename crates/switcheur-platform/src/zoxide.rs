@@ -62,35 +62,57 @@ impl DirectorySource for ZoxideSource {
 ///
 /// Probes `$PATH` first (covers most user setups), then well-known absolute
 /// candidates (Homebrew on Apple Silicon and Intel, cargo install, Nix
-/// profile). Cache the result for the session — re-probing on every query
-/// is wasted syscalls.
+/// profile on Unix; `%USERPROFILE%\.cargo\bin` and Scoop on Windows). Cache
+/// the result for the session — re-probing on every query is wasted syscalls.
 pub fn detect() -> Option<PathBuf> {
+    #[cfg(windows)]
+    const BIN_NAME: &str = "zoxide.exe";
+    #[cfg(not(windows))]
+    const BIN_NAME: &str = "zoxide";
+
     if let Ok(path) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path) {
-            let candidate = dir.join("zoxide");
+            let candidate = dir.join(BIN_NAME);
             if is_executable(&candidate) {
                 return Some(candidate);
             }
         }
     }
 
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    #[cfg(not(windows))]
     let mut candidates = vec![
         PathBuf::from("/opt/homebrew/bin/zoxide"),
         PathBuf::from("/usr/local/bin/zoxide"),
     ];
+    #[cfg(windows)]
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+
     if let Some(h) = home {
-        candidates.push(h.join(".cargo/bin/zoxide"));
+        candidates.push(h.join(format!(".cargo/bin/{BIN_NAME}")));
+        #[cfg(not(windows))]
         candidates.push(h.join(".nix-profile/bin/zoxide"));
+        #[cfg(windows)]
+        candidates.push(h.join("scoop/shims/zoxide.exe"));
     }
     candidates.into_iter().find(|p| is_executable(p))
 }
 
+#[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata()
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable(p: &Path) -> bool {
+    p.metadata().map(|m| m.is_file()).unwrap_or(false)
 }
 
 /// Query zoxide for top frecency-ranked directories matching `terms`.
