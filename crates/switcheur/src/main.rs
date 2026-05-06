@@ -257,6 +257,15 @@ fn main() -> Result<()> {
         // foreground our Normal windows (settings/onboarding) on demand.
         set_accessory_activation_policy();
 
+        // GPUI's default quit mode is `LastWindowClosed` everywhere except
+        // macOS — so on Windows the process exits the moment the search
+        // panel is dismissed (it's the only window). LeSwitcheur is a
+        // background hotkey-driven app on every platform; the only legit
+        // path to exit is an explicit `cx.quit()` (onboarding X button,
+        // install-drift watcher, update apply). Force `Explicit` so dismiss-
+        // on-blur and Escape stop killing the process.
+        cx.set_quit_mode(gpui::QuitMode::Explicit);
+
         install_key_bindings(cx);
 
         // Recency tracker + observers. App-level observer is always on; the
