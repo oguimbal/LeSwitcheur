@@ -6,17 +6,17 @@
 use std::collections::HashMap;
 
 use gpui::{
-    deferred, div, img, prelude::*, px, AnyElement, App, Context, EventEmitter, FocusHandle,
-    Focusable, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, ParentElement,
-    Render, SharedString, Styled, Window,
+    deferred, div, img, prelude::*, px, AnyElement, App, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
+    ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
+use gpui_component::input::{Input, InputEvent, InputState};
 use switcheur_core::{
     file_manager::{AvailableFolderOpener, FINDER_ID},
     AppMatch, DirSourceId, ExclusionFilter, ExclusionRule, HotkeySpec, SortOrder,
 };
 use switcheur_i18n::{modifier_symbol, tr as _tr, tr_sub};
 
-use crate::input::QueryInput;
 use crate::theme::Theme;
 
 fn tr(key: &str) -> SharedString {
@@ -187,7 +187,10 @@ pub struct SettingsView {
     picker_open: bool,
     picker_target: PickerTarget,
     picker_apps: Vec<(String, Option<String>, Option<std::path::PathBuf>)>,
-    picker_query: String,
+    /// Lazy: created on `open_picker` (when we have a `Window` reference),
+    /// dropped on `close_picker`. `None` while no picker is showing.
+    picker_query: Option<Entity<InputState>>,
+    _picker_query_sub: Option<Subscription>,
 
     current_tab: SettingsTab,
 
@@ -196,11 +199,12 @@ pub struct SettingsView {
     license_key: Option<SharedString>,
     /// Whether the collapsible "Enter existing key" input is expanded.
     license_entry_open: bool,
-    /// Contents of the manual license-key text input. Uses [`QueryInput`] so
-    /// the field gets the same caret + selection behaviour as the search bar
-    /// — Settings has no GPUI action context, so we route keys through here
-    /// manually in [`Self::on_key_down`].
-    license_entry: QueryInput,
+    /// Manual license-key text input. Backed by `gpui_component::InputState`
+    /// — selection, IME, clipboard, undo/redo come for free.
+    license_entry: Entity<InputState>,
+    /// Subscription on `license_entry` so PressEnter triggers activation and
+    /// Change clears the inline error label.
+    _license_entry_sub: Option<Subscription>,
     /// When an activation returned an error, we show this i18n key inline
     /// under the input. Cleared on next user edit or successful activation.
     license_error_key: Option<SharedString>,
@@ -263,9 +267,24 @@ impl SettingsView {
         browser_tabs_integration: bool,
         file_manager: Option<String>,
         available_folder_openers: Vec<AvailableFolderOpener>,
+        license_entry: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
+        let license_entry_sub = cx.subscribe(
+            &license_entry,
+            |this: &mut Self, _state, ev: &InputEvent, cx| match ev {
+                InputEvent::PressEnter { .. } => {
+                    this.submit_license_key(cx);
+                }
+                InputEvent::Change => {
+                    if this.license_error_key.take().is_some() {
+                        cx.notify();
+                    }
+                }
+                _ => {}
+            },
+        );
         let mut view = Self {
             hotkey,
             launch_at_startup,
@@ -294,11 +313,13 @@ impl SettingsView {
             picker_open: false,
             picker_target: PickerTarget::default(),
             picker_apps: Vec::new(),
-            picker_query: String::new(),
+            picker_query: None,
+            _picker_query_sub: None,
             current_tab: SettingsTab::default(),
             license_key: license_key.map(SharedString::from),
             license_entry_open: false,
-            license_entry: QueryInput::new(),
+            license_entry,
+            _license_entry_sub: Some(license_entry_sub),
             license_error_key: None,
             license_activating: false,
             license_copied_at: None,
@@ -326,11 +347,18 @@ impl SettingsView {
 
     /// Reflect a change in licensed state live (e.g. after a successful
     /// activation started from inside the settings window).
-    pub fn set_license_key(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+    pub fn set_license_key(
+        &mut self,
+        key: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.license_key = key.map(SharedString::from);
         if self.license_key.is_some() {
             self.license_entry_open = false;
-            self.license_entry.clear();
+            self.license_entry.update(cx, |s, cx| {
+                s.set_value("", window, cx);
+            });
             self.license_activating = false;
         }
         cx.notify();
@@ -370,7 +398,10 @@ impl SettingsView {
     ) {
         self.picker_target = target;
         self.picker_apps = apps;
-        self.picker_query.clear();
+        // Drop any prior picker InputState; render lazily creates a fresh one
+        // (it's the only path with a guaranteed `&mut Window`).
+        self.picker_query = None;
+        self._picker_query_sub = None;
         self.picker_open = true;
         // Opening the modal visually supersedes any open popover; close them
         // so the state doesn't linger behind the modal.
@@ -404,7 +435,8 @@ impl SettingsView {
 
     fn close_picker(&mut self, cx: &mut Context<Self>) {
         self.picker_open = false;
-        self.picker_query.clear();
+        self.picker_query = None;
+        self._picker_query_sub = None;
         self.picker_target = PickerTarget::default();
         cx.notify();
     }
@@ -458,8 +490,15 @@ impl SettingsView {
         }
     }
 
-    fn filtered_picker_apps(&self) -> Vec<usize> {
-        let q = self.picker_query.trim().to_lowercase();
+    fn picker_query_text(&self, cx: &App) -> String {
+        self.picker_query
+            .as_ref()
+            .map(|s| s.read(cx).value().to_string())
+            .unwrap_or_default()
+    }
+
+    fn filtered_picker_apps(&self, cx: &App) -> Vec<usize> {
+        let q = self.picker_query_text(cx).trim().to_lowercase();
         self.picker_apps
             .iter()
             .enumerate()
@@ -819,7 +858,12 @@ impl SettingsView {
     }
 
     fn submit_license_key(&mut self, cx: &mut Context<Self>) {
-        let trimmed = self.license_entry.text().trim().to_ascii_uppercase();
+        let trimmed = self
+            .license_entry
+            .read(cx)
+            .value()
+            .trim()
+            .to_ascii_uppercase();
         if trimmed.is_empty() || self.license_activating {
             return;
         }
@@ -849,7 +893,7 @@ impl SettingsView {
         }
     }
 
-    fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
 
         // Cmd+W closes the settings window, matching standard macOS behavior.
@@ -860,31 +904,14 @@ impl SettingsView {
         }
 
         if self.picker_open {
+            // Esc closes; Enter picks the first match. Char insertion + caret
+            // editing is handled by the picker_query InputState's own
+            // keybindings — we only intercept these two semantics.
             if k.key == "escape" {
                 self.close_picker(cx);
                 return;
             }
-            if k.key == "return" || k.key == "enter" {
-                if let Some(first) = self.filtered_picker_apps().first().copied() {
-                    let name = self.picker_apps[first].0.clone();
-                    self.pick_app(name, cx);
-                }
-                return;
-            }
-            if k.key == "backspace" {
-                self.picker_query.pop();
-                cx.notify();
-                return;
-            }
-            if k.modifiers.control || k.modifiers.platform || k.modifiers.function {
-                return;
-            }
-            if let Some(ch) = k.key_char.as_deref() {
-                if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
-                    self.picker_query.push_str(ch);
-                    cx.notify();
-                }
-            }
+            let _ = window;
             return;
         }
 
@@ -907,121 +934,18 @@ impl SettingsView {
         }
 
         if self.license_entry_open && self.license_key.is_none() {
+            // The Input widget's keybindings handle char insertion, caret
+            // motion, selection, and clipboard. We only intercept Esc to
+            // collapse the entry (Enter is wired via the entry's
+            // `PressEnter` event in the constructor's subscription).
             if k.key == "escape" {
                 self.license_entry_open = false;
-                self.license_entry.clear();
+                self.license_entry.update(cx, |s, cx| {
+                    s.set_value("", window, cx);
+                });
                 self.license_error_key = None;
                 cx.notify();
                 return;
-            }
-            if k.key == "return" || k.key == "enter" {
-                self.submit_license_key(cx);
-                return;
-            }
-            if k.key == "backspace" {
-                self.license_entry.backspace();
-                self.license_error_key = None;
-                cx.notify();
-                return;
-            }
-            if k.key == "delete" {
-                self.license_entry.delete();
-                self.license_error_key = None;
-                cx.notify();
-                return;
-            }
-            // Cursor motion + selection. We treat both Cmd (macOS) and Ctrl
-            // (Windows) as the modifier-of-record so Ctrl-A on Windows hops to
-            // start, matching the platform's text-input convention.
-            let cmdish = k.modifiers.platform || k.modifiers.control;
-            let extend = k.modifiers.shift;
-            match k.key.as_str() {
-                "left" if cmdish => {
-                    self.license_entry.move_home(extend);
-                    cx.notify();
-                    return;
-                }
-                "right" if cmdish => {
-                    self.license_entry.move_end(extend);
-                    cx.notify();
-                    return;
-                }
-                "left" => {
-                    self.license_entry.move_left(extend);
-                    cx.notify();
-                    return;
-                }
-                "right" => {
-                    self.license_entry.move_right(extend);
-                    cx.notify();
-                    return;
-                }
-                "home" => {
-                    self.license_entry.move_home(extend);
-                    cx.notify();
-                    return;
-                }
-                "end" => {
-                    self.license_entry.move_end(extend);
-                    cx.notify();
-                    return;
-                }
-                _ => {}
-            }
-            // Clipboard / select-all. Cmd on macOS, Ctrl on Windows.
-            if cmdish {
-                match k.key.as_str() {
-                    "a" => {
-                        self.license_entry.select_all();
-                        cx.notify();
-                        return;
-                    }
-                    "c" => {
-                        if let Some(s) = self.license_entry.selected_text() {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(s.to_string()));
-                        }
-                        return;
-                    }
-                    "x" => {
-                        if let Some(s) = self.license_entry.selected_text().map(str::to_string) {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(s));
-                            self.license_entry.backspace();
-                            self.license_error_key = None;
-                            cx.notify();
-                        }
-                        return;
-                    }
-                    "v" => {
-                        if let Some(item) = cx.read_from_clipboard() {
-                            if let Some(text) = item.text() {
-                                let cleaned: String = text
-                                    .chars()
-                                    .filter(|c| !c.is_control())
-                                    .flat_map(|c| c.to_uppercase())
-                                    .collect();
-                                if !cleaned.is_empty() {
-                                    self.license_entry.insert_str(&cleaned);
-                                    self.license_error_key = None;
-                                    cx.notify();
-                                }
-                            }
-                        }
-                        return;
-                    }
-                    _ => return,
-                }
-            }
-            if k.modifiers.function {
-                return;
-            }
-            if let Some(ch) = k.key_char.as_deref() {
-                if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
-                    // Normalise in-place: license keys are uppercase + dash-grouped.
-                    let upper: String = ch.chars().flat_map(|c| c.to_uppercase()).collect();
-                    self.license_entry.insert_str(&upper);
-                    self.license_error_key = None;
-                    cx.notify();
-                }
             }
             return;
         }
@@ -1080,11 +1004,11 @@ impl Focusable for SettingsView {
 impl EventEmitter<SettingsViewEvent> for SettingsView {}
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
 
         let body: AnyElement = if self.picker_open {
-            self.render_picker(cx).into_any_element()
+            self.render_picker(window, cx).into_any_element()
         } else {
             self.render_main(cx).into_any_element()
         };
@@ -1625,10 +1549,15 @@ impl SettingsView {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                cx.listener(|this, _: &MouseDownEvent, window, cx| {
                     this.license_entry_open = !this.license_entry_open;
-                    if !this.license_entry_open {
-                        this.license_entry.clear();
+                    if this.license_entry_open {
+                        let h = this.license_entry.read(cx).focus_handle(cx);
+                        h.focus(window, cx);
+                    } else {
+                        this.license_entry.update(cx, |s, cx| {
+                            s.set_value("", window, cx);
+                        });
                         this.license_error_key = None;
                     }
                     cx.notify();
@@ -1667,80 +1596,17 @@ impl SettingsView {
 
     fn render_license_entry(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
-        let input_text: AnyElement = if self.license_entry.text().is_empty() {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .child(div().w(px(2.0)).h(px(20.0)).bg(theme.accent))
-                .child(
-                    div()
-                        .ml_1()
-                        .text_color(theme.muted)
-                        .child(tr("license.key_placeholder")),
-                )
-                .into_any_element()
-        } else {
-            let text = self.license_entry.text();
-            let mut row = div().flex().flex_row().items_center();
-            match self.license_entry.selection() {
-                Some(sel) => {
-                    let before = &text[..sel.start];
-                    let selected = &text[sel.clone()];
-                    let after = &text[sel.end..];
-                    if !before.is_empty() {
-                        row = row.child(
-                            div().text_color(theme.foreground).child(before.to_string()),
-                        );
-                    }
-                    row = row.child(
-                        div()
-                            .px_0p5()
-                            .bg(theme.accent)
-                            .text_color(gpui::rgb(0xffffff))
-                            .child(selected.to_string()),
-                    );
-                    if !after.is_empty() {
-                        row = row.child(
-                            div().text_color(theme.foreground).child(after.to_string()),
-                        );
-                    }
-                }
-                None => {
-                    let cursor = self.license_entry.cursor();
-                    let (before, after) = text.split_at(cursor);
-                    if !before.is_empty() {
-                        row = row.child(
-                            div().text_color(theme.foreground).child(before.to_string()),
-                        );
-                    }
-                    row = row.child(div().w(px(2.0)).h(px(20.0)).bg(theme.accent));
-                    if !after.is_empty() {
-                        row = row.child(
-                            div().text_color(theme.foreground).child(after.to_string()),
-                        );
-                    }
-                }
-            }
-            row.into_any_element()
-        };
-
         let input = div()
             .flex_1()
-            .px_2()
-            .py_1p5()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.accent)
-            .cursor_text()
-            .child(input_text);
+            .child(Input::new(&self.license_entry).bordered(true));
 
         let activate_label: SharedString = if self.license_activating {
             tr("license.activating_key")
         } else {
             tr("license.activate_key")
         };
-        let disabled = self.license_activating || self.license_entry.text().trim().is_empty();
+        let disabled = self.license_activating
+            || self.license_entry.read(cx).value().trim().is_empty();
         let activate_btn = {
             let mut b = div()
                 .px_3()
@@ -2738,9 +2604,36 @@ impl SettingsView {
         col.into_any_element()
     }
 
-    fn render_picker(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = self.theme;
-        let filtered = self.filtered_picker_apps();
+        // Lazy: create the InputState on first render of an open picker.
+        // This is the only path that gives us a guaranteed `&mut Window` —
+        // `set_picker_apps` is called from a host async path that doesn't.
+        if self.picker_query.is_none() {
+            let placeholder: SharedString = tr("picker.filter_placeholder");
+            let entity = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+            let sub = cx.subscribe(
+                &entity,
+                |this: &mut Self, _state, ev: &InputEvent, cx| {
+                    if let InputEvent::PressEnter { .. } = ev {
+                        if let Some(first) = this.filtered_picker_apps(cx).first().copied() {
+                            let name = this.picker_apps[first].0.clone();
+                            this.pick_app(name, cx);
+                        }
+                    } else {
+                        cx.notify();
+                    }
+                },
+            );
+            self.picker_query = Some(entity.clone());
+            self._picker_query_sub = Some(sub);
+            entity.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        let filtered = self.filtered_picker_apps(cx);
         let filtered_count = filtered.len();
 
         let header = div()
@@ -2770,25 +2663,12 @@ impl SettingsView {
                     .child(tr("picker.cancel")),
             );
 
-        let search_box: SharedString = if self.picker_query.is_empty() {
-            tr("picker.filter_placeholder")
-        } else {
-            self.picker_query.clone().into()
+        let search: AnyElement = match self.picker_query.as_ref() {
+            Some(state) => div()
+                .child(Input::new(state).bordered(true))
+                .into_any_element(),
+            None => div().into_any_element(),
         };
-        let search_color = if self.picker_query.is_empty() {
-            theme.muted
-        } else {
-            theme.foreground
-        };
-        let search = div()
-            .px_3()
-            .py_2()
-            .rounded_md()
-            .border_1()
-            .border_color(theme.accent)
-            .bg(theme.selection)
-            .text_color(search_color)
-            .child(search_box);
 
         let list: AnyElement = if filtered_count == 0 {
             div()

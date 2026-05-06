@@ -21,9 +21,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use gpui::{
-    point, px, size, AnyWindowHandle, App, AppContext, AsyncApp, Bounds, Entity, KeyBinding,
-    Pixels, Subscription, WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind,
-    WindowOptions,
+    point, px, size, AnyWindowHandle, App, AppContext, AsyncApp, Bounds, Entity, Focusable,
+    KeyBinding, Pixels, Subscription, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+    WindowKind, WindowOptions,
 };
 use switcheur_core::{
     sort_items, AppMatchSet, AppRef, Appearance, AudioRowRef, Config, DirSourceId, ExclusionFilter,
@@ -354,6 +354,13 @@ fn main() -> Result<()> {
 
         install_key_bindings(cx);
 
+        // Initialize gpui-component (theme registry, Input keybindings,
+        // popovers, ...). Must run before any view that uses bundled widgets
+        // is constructed. Then push our palette into the global theme so the
+        // Input widget renders with our colors.
+        gpui_component::init(cx);
+        switcheur_ui::theme_adapter::apply(&theme_for(config.appearance), cx);
+
         // Recency tracker + observers. App-level observer is always on; the
         // window-level observer is started lazily if the user picked
         // `SortOrder::RecentWindow`.
@@ -395,6 +402,7 @@ fn main() -> Result<()> {
             recency: Rc::new(RefCell::new(recency)),
             current: Rc::new(RefCell::new(None)),
             settings: Rc::new(RefCell::new(None)),
+            settings_entity: Rc::new(RefCell::new(None)),
             onboarding: Rc::new(RefCell::new(None)),
             thanks: Rc::new(RefCell::new(None)),
             licensed: Rc::new(Cell::new(licensed_now)),
@@ -493,6 +501,11 @@ struct AppState {
     recency: Rc<RefCell<RecencyService>>,
     current: Rc<RefCell<Option<SwitcherSlot>>>,
     settings: Rc<RefCell<Option<WindowSlot>>>,
+    /// Typed handle to the live SettingsView, when one is open. Stored
+    /// alongside `settings.handle` so license-flow callers can update the
+    /// view directly without downcasting through the window's root view
+    /// (which is wrapped in `gpui_component::Root`).
+    settings_entity: Rc<RefCell<Option<Entity<SettingsView>>>>,
     onboarding: Rc<RefCell<Option<WindowSlot>>>,
     /// Post-activation confirmation popup (thank-you card on success, error
     /// card on failure). At most one at a time.
@@ -603,51 +616,34 @@ struct SwitcherSlot {
 
 fn install_key_bindings(cx: &mut App) {
     use switcheur_ui::actions::{
-        Backspace, Confirm, Copy, Cut, Delete, Dismiss, ExtendEnd, ExtendHome, ExtendLeft,
-        ExtendRight, ExtendWordLeft, ExtendWordRight, FocusNextPane, FocusPrevPane, MoveEnd,
-        MoveHome, MoveLeft, MoveRight, MoveWordLeft, MoveWordRight, Paste, SelectAll, SelectNext,
-        SelectPrev,
+        AudioToggle, Confirm, Dismiss, FocusNextPane, FocusPrevPane, MoveLeft, MoveRight,
+        SelectNext, SelectPrev,
     };
+    // Text-edit bindings (backspace, delete, caret motion, selection,
+    // clipboard) are owned by `gpui_component::Input` once the search
+    // field has focus — registered in `gpui_component::init` under the
+    // "Input" context. We only bind keys whose semantics need view-level
+    // state (selection, popover, audio toggle, pane focus). MoveLeft and
+    // MoveRight call `cx.propagate()` when there is no view-level reason
+    // to consume them, so the Input's caret motion still wins for plain
+    // text editing.
     cx.bind_keys([
         // List navigation (up/down + ctrl-p/ctrl-n, ala Zed/Emacs).
         KeyBinding::new("up", SelectPrev, Some("Switcher")),
         KeyBinding::new("down", SelectNext, Some("Switcher")),
         KeyBinding::new("ctrl-p", SelectPrev, Some("Switcher")),
         KeyBinding::new("ctrl-n", SelectNext, Some("Switcher")),
-        // Confirm / dismiss.
+        // Confirm / dismiss. PressEnter is also wired through the Input's
+        // own subscription so the Enter key lands either way.
         KeyBinding::new("enter", Confirm, Some("Switcher")),
         KeyBinding::new("escape", Dismiss, Some("Switcher")),
-        // Text editing.
-        KeyBinding::new("backspace", Backspace, Some("Switcher")),
-        KeyBinding::new("delete", Delete, Some("Switcher")),
-        // Caret motion.
+        // Pane-aware caret motion. Falls through via cx.propagate() to
+        // Input's MoveLeft/MoveRight when the popover/dirs are not
+        // involved.
         KeyBinding::new("left", MoveLeft, Some("Switcher")),
         KeyBinding::new("right", MoveRight, Some("Switcher")),
-        KeyBinding::new("home", MoveHome, Some("Switcher")),
-        KeyBinding::new("end", MoveEnd, Some("Switcher")),
-        KeyBinding::new("cmd-left", MoveHome, Some("Switcher")),
-        KeyBinding::new("cmd-right", MoveEnd, Some("Switcher")),
-        KeyBinding::new("ctrl-a", MoveHome, Some("Switcher")),
-        KeyBinding::new("ctrl-e", MoveEnd, Some("Switcher")),
-        // Extending the selection.
-        KeyBinding::new("shift-left", ExtendLeft, Some("Switcher")),
-        KeyBinding::new("shift-right", ExtendRight, Some("Switcher")),
-        KeyBinding::new("shift-home", ExtendHome, Some("Switcher")),
-        KeyBinding::new("shift-end", ExtendEnd, Some("Switcher")),
-        KeyBinding::new("cmd-shift-left", ExtendHome, Some("Switcher")),
-        KeyBinding::new("cmd-shift-right", ExtendEnd, Some("Switcher")),
-        // Word motion (Option on macOS) + selection.
-        KeyBinding::new("alt-left", MoveWordLeft, Some("Switcher")),
-        KeyBinding::new("alt-right", MoveWordRight, Some("Switcher")),
-        KeyBinding::new("alt-shift-left", ExtendWordLeft, Some("Switcher")),
-        KeyBinding::new("alt-shift-right", ExtendWordRight, Some("Switcher")),
-        KeyBinding::new("ctrl-shift-left", ExtendWordLeft, Some("Switcher")),
-        KeyBinding::new("ctrl-shift-right", ExtendWordRight, Some("Switcher")),
-        KeyBinding::new("cmd-a", SelectAll, Some("Switcher")),
-        // Clipboard.
-        KeyBinding::new("cmd-c", Copy, Some("Switcher")),
-        KeyBinding::new("cmd-x", Cut, Some("Switcher")),
-        KeyBinding::new("cmd-v", Paste, Some("Switcher")),
+        // Space → toggle play/pause when an audio row is selected.
+        KeyBinding::new("space", AudioToggle, Some("Switcher")),
         // Cycle keyboard focus to/from the right-side dirs pane.
         KeyBinding::new("tab", FocusNextPane, Some("Switcher")),
         KeyBinding::new("shift-tab", FocusPrevPane, Some("Switcher")),
@@ -812,11 +808,21 @@ fn apply_quick_type_event(cx: &mut AsyncApp, state: &AppState, ev: QuickTypeEven
         None => return,
     };
 
+    let handle = match state.current.borrow().as_ref() {
+        Some(slot) => slot.handle,
+        None => return,
+    };
     let _ = cx.update(|cx| match ev {
         QuickTypeEvent::InsertText(s) => {
-            entity.update(cx, |view, cx| view.append_query(&s, cx))
+            let _ = cx.update_window(handle, |_any, window, cx| {
+                entity.update(cx, |view, cx| view.append_query(&s, window, cx));
+            });
         }
-        QuickTypeEvent::Backspace => entity.update(cx, |view, cx| view.backspace_query(cx)),
+        QuickTypeEvent::Backspace => {
+            let _ = cx.update_window(handle, |_any, window, cx| {
+                entity.update(cx, |view, cx| view.backspace_query(window, cx));
+            });
+        }
         QuickTypeEvent::Scroll(dir) => entity.update(cx, |view, cx| match dir {
             ScrollDir::Up => view.select_prev_external(cx),
             ScrollDir::Down => view.select_next_external(cx),
@@ -920,7 +926,7 @@ fn apply_system_switcher_event(cx: &mut AsyncApp, state: &AppState, ev: SystemSw
             let _ = cx.update(|cx: &mut App| {
                 let _ = cx.update_window(handle, |_any, window, app_cx| {
                     entity.update(app_cx, |view, view_cx| {
-                        view.append_query(&s, view_cx);
+                        view.append_query(&s, window, view_cx);
                         view.dismiss_on_blur(window, view_cx);
                     });
                 });
@@ -1186,9 +1192,13 @@ fn open_switcher_with_items(
     let open_with_file_count = open_with_file_entries.len().saturating_sub(1);
     *state.open_with_entries.borrow_mut() = open_with_entries;
     *state.open_with_file_entries.borrow_mut() = open_with_file_entries;
-    let handle: WindowHandle<SwitcherView> = cx.open_window(options, move |window, cx| {
+    let handle: WindowHandle<gpui_component::Root> = cx.open_window(options, move |window, cx| {
+        let input_state = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx)
+                .placeholder(switcheur_i18n::tr("switcher.search_placeholder"))
+        });
         let entity = cx.new(|cx| {
-            let mut view = SwitcherView::new(cx);
+            let mut view = SwitcherView::new(input_state.clone(), cx);
             view.set_theme(theme, cx);
             view.set_dirs_enabled(dirs_enabled, cx);
             view.set_dirs_removable(dirs_removable, cx);
@@ -1208,17 +1218,23 @@ fn open_switcher_with_items(
         });
         *slot_for_builder.borrow_mut() = Some(entity.clone());
 
-        // Grab keyboard focus + auto-dismiss on blur. Done outside `cx.new` so
-        // the Window reference is available.
-        let focus = entity.read(cx).focus_handle().clone();
-        focus.focus(window, cx);
+        // Focus the Input widget so its IME / keybindings fire. The
+        // SwitcherView's own focus handle still appears as a parent in
+        // the focus stack via `.track_focus(&self.focus)`, so the
+        // "Switcher" key context stays active for our list/popover
+        // actions.
+        let input_focus = input_state.read(cx).focus_handle(cx);
+        input_focus.focus(window, cx);
         if dismiss_on_blur {
             entity.update(cx, |view, cx| {
                 view.dismiss_on_blur(window, cx);
             });
         }
 
-        entity
+        // gpui-component's Input + popovers + context menu read the
+        // window's root view as `Root`, so wrap every window that hosts
+        // a bundled widget. Onboarding/thanks don't, so they stay raw.
+        cx.new(|cx| gpui_component::Root::new(entity.clone(), window, cx))
     })?;
 
     let _ = cx.update(|cx| {
@@ -2277,6 +2293,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
         }
         tracing::warn!("stale settings handle, recreating");
         *state.settings.borrow_mut() = None;
+        *state.settings_entity.borrow_mut() = None;
     }
 
     let cfg = state.config.borrow();
@@ -2348,7 +2365,12 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
 
     let entity_slot: Rc<RefCell<Option<Entity<SettingsView>>>> = Rc::new(RefCell::new(None));
     let slot_for_builder = entity_slot.clone();
-    let handle: WindowHandle<SettingsView> = cx.open_window(options, move |window, cx| {
+    let handle: WindowHandle<gpui_component::Root> = cx.open_window(options, move |window, cx| {
+        let license_entry = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx).placeholder(
+                switcheur_i18n::tr("license.key_placeholder"),
+            )
+        });
         let entity = cx.new(|cx| {
             let mut v = SettingsView::new(
                 hotkey,
@@ -2372,6 +2394,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
                 browser_tabs_integration,
                 file_manager,
                 available_folder_openers,
+                license_entry,
                 cx,
             );
             v.set_theme(theme, cx);
@@ -2380,7 +2403,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
         *slot_for_builder.borrow_mut() = Some(entity.clone());
         let focus = entity.read(cx).focus_handle().clone();
         focus.focus(window, cx);
-        entity
+        cx.new(|cx| gpui_component::Root::new(entity.clone(), window, cx))
     })?;
 
     tracing::info!("settings window created");
@@ -2437,6 +2460,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
         handle: handle.into(),
         _sub: sub,
     });
+    *state.settings_entity.borrow_mut() = Some(entity.clone());
 
     tracing::info!("settings window activated + subscribed");
     Ok(())
@@ -2898,6 +2922,7 @@ fn handle_settings_event(
         }
         SettingsViewEvent::Dismissed => {
             let slot = state.settings.borrow_mut().take();
+            *state.settings_entity.borrow_mut() = None;
             if let Some(slot) = slot {
                 let _ = cx.update_window(slot.handle, |_ent, window, _cx| {
                     window.remove_window();
@@ -2930,7 +2955,13 @@ fn handle_settings_event(
                     tracing::warn!("save config on logout: {e:#}");
                 }
             }
-            entity.update(cx, |v, cx| v.set_license_key(None, cx));
+            let settings_handle = state.settings.borrow().as_ref().map(|s| s.handle);
+            if let Some(h) = settings_handle {
+                let entity = entity.clone();
+                let _ = cx.update_window(h, |_, window, cx| {
+                    entity.update(cx, |v, cx| v.set_license_key(None, window, cx));
+                });
+            }
         }
         SettingsViewEvent::QuitRequested => {
             tracing::info!("quit requested from settings");
@@ -2941,6 +2972,7 @@ fn handle_settings_event(
                     window.remove_window();
                 });
             }
+            *state.settings_entity.borrow_mut() = None;
             if let Some(slot) = state.current.borrow_mut().take() {
                 let _ = cx.update_window(slot.handle, |_ent, window, _cx| {
                     window.remove_window();
@@ -3161,15 +3193,14 @@ fn store_verified_token(token: &str, key: &str, state: &AppState, cx: &mut App) 
         }
     }
     let settings_handle = state.settings.borrow().as_ref().map(|s| s.handle);
-    if let Some(h) = settings_handle {
+    let settings_entity = state.settings_entity.borrow().clone();
+    if let (Some(h), Some(view)) = (settings_handle, settings_entity) {
         let k = decoded.key.clone();
-        let _ = cx.update_window(h, |any_view, _window, cx| {
-            if let Ok(view) = any_view.downcast::<SettingsView>() {
-                view.update(cx, |v, cx| {
-                    v.set_license_key(Some(k.clone()), cx);
-                    v.set_license_error(None, cx);
-                });
-            }
+        let _ = cx.update_window(h, |_, window, cx| {
+            view.update(cx, |v, cx| {
+                v.set_license_key(Some(k.clone()), window, cx);
+                v.set_license_error(None, cx);
+            });
         });
     }
     true
@@ -3187,8 +3218,9 @@ fn update_settings_license_error(
         None => return,
     };
     let i18n_key = err.as_ref().map(|e| e.i18n_key());
-    let _ = cx.update_window(handle, |any_view, _window, cx| {
-        if let Ok(view) = any_view.downcast::<SettingsView>() {
+    let entity = state.settings_entity.borrow().clone();
+    let _ = cx.update_window(handle, |_, _window, cx| {
+        if let Some(view) = entity {
             view.update(cx, |v, cx| {
                 v.set_license_error(i18n_key.map(|k| k.to_string()), cx);
             });

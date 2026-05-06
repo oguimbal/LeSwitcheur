@@ -23,12 +23,18 @@ switcheur-i18n = { path = "crates/switcheur-i18n" }
 switcheur-platform = { path = "crates/switcheur-platform" }
 switcheur-ui = { path = "crates/switcheur-ui" }
 
-# GPUI — Zed's UI framework, pinned SHA for reproducibility.
-# To bump: `git ls-remote https://github.com/zed-industries/zed refs/heads/main`
-gpui = { git = "https://github.com/zed-industries/zed", rev = "adfcb45abeceb797dff3b868efc8147f53c0068f" }
+# GPUI — Zed's UI framework. We track main HEAD without a `rev` so the source
+# unifies with `gpui-component` (which also tracks HEAD). The exact SHA is
+# pinned by Cargo.lock for reproducibility — bump deliberately via
+# `cargo update -p gpui -p gpui_platform`.
+gpui = { git = "https://github.com/zed-industries/zed" }
 # `runtime_shaders` stitches Metal shaders at runtime instead of pre-compiling
 # them in the build script — avoids needing the full Metal Toolchain at build time.
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "adfcb45abeceb797dff3b868efc8147f53c0068f", features = ["runtime_shaders", "font-kit"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["runtime_shaders", "font-kit"] }
+
+# Pre-built UI components (Input, popovers, theme system) atop GPUI.
+# Pinned to a specific rev — avoid HEAD drift, bump deliberately.
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "d3d6e56c96659fb7516e2c743b80331af62e546d" }
 
 # Fuzzy matcher — same engine Zed uses
 nucleo-matcher = "0.3"

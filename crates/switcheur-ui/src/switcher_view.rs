@@ -2,10 +2,11 @@
 
 use gpui::{
     canvas, div, linear, percentage, prelude::*, px, svg, uniform_list, Animation, AnimationExt,
-    AnyElement, App, ClickEvent, Context, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, ScrollStrategy, SharedString,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, ScrollStrategy, SharedString,
     Styled, Subscription, Transformation, UniformListScrollHandle, Window,
 };
+use gpui_component::input::{Input, InputEvent, InputState};
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
@@ -18,11 +19,8 @@ use switcheur_core::{
 use switcheur_i18n::tr;
 
 use crate::actions::{
-    Backspace, Confirm, Copy, Cut, Delete, Dismiss, ExtendEnd, ExtendHome, ExtendLeft, ExtendRight,
-    ExtendWordLeft, ExtendWordRight, FocusNextPane, FocusPrevPane, MoveEnd, MoveHome, MoveLeft,
-    MoveRight, MoveWordLeft, MoveWordRight, Paste, SelectAll, SelectNext, SelectPrev,
+    Confirm, Dismiss, FocusNextPane, FocusPrevPane, MoveLeft, MoveRight, SelectNext, SelectPrev,
 };
-use crate::input::QueryInput;
 use crate::list::render_row;
 use crate::theme::Theme;
 
@@ -114,7 +112,11 @@ pub enum NagPhase {
 
 pub struct SwitcherView {
     state: SwitcherState,
-    input: QueryInput,
+    /// Text input widget. Owns its focus, IME, selection, undo/redo,
+    /// clipboard handlers via `gpui_component::Input`. Constructed by the
+    /// host at panel-open time (needs a `&mut Window`) and passed in.
+    input: Entity<InputState>,
+    _input_sub: Option<Subscription>,
     theme: Theme,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
@@ -180,11 +182,20 @@ pub struct SwitcherView {
 const BROWSER_TABS_RETRY_COOLDOWN: Duration = Duration::from_millis(1500);
 
 impl SwitcherView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(input: Entity<InputState>, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
+        let sub = cx.subscribe(
+            &input,
+            |this: &mut Self, _state, ev: &InputEvent, cx| match ev {
+                InputEvent::Change => this.sync_query(cx),
+                InputEvent::PressEnter { .. } => this.confirm_selection(cx),
+                _ => {}
+            },
+        );
         Self {
             state: SwitcherState::new(),
-            input: QueryInput::new(),
+            input,
+            _input_sub: Some(sub),
             theme: Theme::default(),
             focus,
             scroll: UniformListScrollHandle::default(),
@@ -386,7 +397,9 @@ impl SwitcherView {
     }
 
     pub fn set_items(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
-        self.input.clear();
+        // No clear() here — fresh `SwitcherView` always carries an empty
+        // `InputState`. set_items runs inside the cx.new builder, before
+        // the host installs its event subscriber and any external mutation.
         self.state.set_items(items);
         self.state.set_query("");
         // New switcher session — forget any tabs scanned for the previous
@@ -542,14 +555,26 @@ impl SwitcherView {
 
     /// Append text to the current query from an external source (Quick Type).
     /// Re-runs the fuzzy filter so the visible list updates immediately.
-    pub fn append_query(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.input.insert_str(text);
+    pub fn append_query(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = text.to_string();
+        self.input.update(cx, |s, cx| s.insert(text, window, cx));
         self.sync_query(cx);
     }
 
     /// Remove the last character from the query (Quick Type's Fn+Backspace).
-    pub fn backspace_query(&mut self, cx: &mut Context<Self>) {
-        self.input.backspace();
+    pub fn backspace_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.input.read(cx).value().to_string();
+        if value.is_empty() {
+            return;
+        }
+        // Trim one user-perceived char off the end. Byte-based truncation
+        // because the InputState's own setter is byte-indexed and we only
+        // care about removing the last grapheme — char_indices is the
+        // cheapest way to find that boundary.
+        let cut = value.char_indices().last().map(|(i, _)| i).unwrap_or(0);
+        let truncated: String = value[..cut].to_string();
+        self.input
+            .update(cx, |s, cx| s.set_value(truncated, window, cx));
         self.sync_query(cx);
     }
 
@@ -705,6 +730,10 @@ impl SwitcherView {
     }
 
     fn on_confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_selection(cx);
+    }
+
+    fn confirm_selection(&mut self, cx: &mut Context<Self>) {
         if self.nag_phase != NagPhase::Hidden {
             return;
         }
@@ -878,16 +907,6 @@ impl SwitcherView {
 
     // --- Text editing ---
 
-    fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.backspace();
-        self.sync_query(cx);
-    }
-
-    fn on_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.delete();
-        self.sync_query(cx);
-    }
-
     fn on_move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
         // Left while the popover is focused exits the popover and returns
         // focus to the dir row. Keeps the input caret untouched.
@@ -898,18 +917,19 @@ impl SwitcherView {
             return;
         }
         // When the dirs pane is focused, Left snaps focus back to the
-        // windows pane (the input doesn't have a visible caret while a
-        // dir row is selected, so consuming the keystroke here costs
-        // nothing). Otherwise behave as a normal text-caret motion.
+        // windows pane.
         if self.state.active_section() == Section::Dirs {
             self.state.focus_windows();
             cx.emit(SwitcherViewEvent::OpenWithStateChanged);
             cx.notify();
             return;
         }
-        self.input.move_left(false);
-        cx.notify();
+        // Otherwise the Input widget already handled the caret motion via
+        // its own keybinding — this action only ran because we're in a
+        // non-text-editing pane.
+        cx.propagate();
     }
+
     fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
         // In the Dirs pane, Right enters the "Open With" popover when one
         // is available. Activates keyboard focus on its first row.
@@ -923,128 +943,38 @@ impl SwitcherView {
             cx.notify();
             return;
         }
-        // From the windows/programs pane, Right at the end of the input
-        // jumps focus into the dirs pane (when one is visible). The
-        // caret-at-end check preserves normal text editing — typing a
-        // word and pressing Right moves through the characters first.
+        // Caret-at-end → focus dirs pane (when visible). Reading
+        // `read(cx).cursor()` against `value().len()` matches the Input
+        // widget's byte-offset cursor convention.
+        let cursor = self.input.read(cx).cursor();
+        let len = self.input.read(cx).value().len();
         if self.state.active_section() != Section::Dirs
             && self.state.dirs_visible()
-            && self.input.cursor() >= self.input.text().len()
+            && cursor >= len
         {
             self.state.focus_dirs();
             cx.emit(SwitcherViewEvent::OpenWithStateChanged);
             cx.notify();
             return;
         }
-        self.input.move_right(false);
-        cx.notify();
-    }
-    fn on_move_home(&mut self, _: &MoveHome, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.move_home(false);
-        cx.notify();
-    }
-    fn on_move_end(&mut self, _: &MoveEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.move_end(false);
-        cx.notify();
-    }
-    fn on_extend_left(&mut self, _: &ExtendLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.move_left(true);
-        cx.notify();
-    }
-    fn on_extend_right(&mut self, _: &ExtendRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.move_right(true);
-        cx.notify();
-    }
-    fn on_extend_home(&mut self, _: &ExtendHome, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.move_home(true);
-        cx.notify();
-    }
-    fn on_extend_end(&mut self, _: &ExtendEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.move_end(true);
-        cx.notify();
-    }
-    fn on_move_word_left(&mut self, _: &MoveWordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.move_word_left(false);
-        cx.notify();
-    }
-    fn on_move_word_right(&mut self, _: &MoveWordRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.move_word_right(false);
-        cx.notify();
-    }
-    fn on_extend_word_left(&mut self, _: &ExtendWordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.move_word_left(true);
-        cx.notify();
-    }
-    fn on_extend_word_right(&mut self, _: &ExtendWordRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.move_word_right(true);
-        cx.notify();
-    }
-    fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
-        self.input.select_all();
-        cx.notify();
+        cx.propagate();
     }
 
-    fn on_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        // With a live selection, copy that. Otherwise fall back to the eval
-        // result so Cmd+C on `2+2` puts `4` on the clipboard.
-        if let Some(s) = self.input.selected_text() {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(s.to_string()));
-        } else if let Some(res) = self.state.eval_result() {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(res.to_string()));
-        }
-    }
-
-    fn on_cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(s) = self.input.selected_text().map(str::to_string) else {
-            return;
-        };
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(s));
-        // `backspace` deletes the selection when there is one.
-        self.input.backspace();
-        self.sync_query(cx);
-    }
-
-    fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
-        let Some(text) = item.text() else {
-            return;
-        };
-        // Single-line input: drop control chars (newlines, tabs, …) so a
-        // multi-line paste collapses to a single search query.
-        let cleaned: String = text.chars().filter(|c| !c.is_control()).collect();
-        if cleaned.is_empty() {
-            return;
-        }
-        self.input.insert_str(&cleaned);
-        self.sync_query(cx);
-    }
-
-    fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let k = &ev.keystroke;
-        if k.modifiers.control || k.modifiers.platform || k.modifiers.function {
-            return;
-        }
-        // Swallow keystrokes while the nag card is up: the user must click
-        // Activate or Later explicitly. Escape still dismisses via
-        // `on_dismiss` (actions are wired separately).
-        if self.nag_phase != NagPhase::Hidden {
-            return;
-        }
-        // Only consume characters the OS produced for this keystroke. If
-        // `key_char` is None, it's a non-character key (arrows, function keys,
-        // etc.) — those are handled by the action system, not by this path.
-        let Some(ch) = k.key_char.as_deref() else {
-            return;
-        };
-        if ch.is_empty() || ch.chars().any(|c| c.is_control()) {
-            return;
-        }
+    fn on_audio_space(
+        &mut self,
+        _: &crate::actions::AudioToggle,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Space on a selected Now-Playing row toggles play/pause instead of
         // typing into the query. Audio rows only render with an empty query,
-        // so this can't shadow search input.
-        if ch == " " && self.state.active_section() == Section::Audio {
+        // so this can't shadow search input. When the section isn't audio,
+        // propagate so the Input widget inserts a literal space.
+        if self.nag_phase != NagPhase::Hidden {
+            cx.propagate();
+            return;
+        }
+        if self.state.active_section() == Section::Audio {
             let idx = self.state.selected_audio_idx();
             if let Some(Item::CurrentlyPlaying(r)) = self.state.currently_playing().get(idx) {
                 if r.supports_toggle() {
@@ -1055,8 +985,7 @@ impl SwitcherView {
                 }
             }
         }
-        self.input.insert_str(ch);
-        self.sync_query(cx);
+        cx.propagate();
     }
 
     fn on_nag_activate(&mut self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1093,7 +1022,7 @@ impl SwitcherView {
     }
 
     fn sync_query(&mut self, cx: &mut Context<Self>) {
-        self.state.set_query(self.input.text());
+        self.state.set_query(self.input.read(cx).value().to_string());
         self.scroll_selection_into_view();
         if self.dirs_enabled {
             cx.emit(SwitcherViewEvent::QueryChanged(
@@ -1131,9 +1060,8 @@ impl EventEmitter<SwitcherViewEvent> for SwitcherView {}
 impl Render for SwitcherView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
-        let placeholder: SharedString = SharedString::from(tr("switcher.search_placeholder"));
         let filtered_count = self.state.filtered().len();
-        let query_empty = self.input.text().is_empty();
+        let query_empty = self.input.read(cx).value().is_empty();
         let nag_phase = self.nag_phase;
         // When a math/JS evaluation result is displayed and no items matched,
         // suppress the "no results" panel entirely — the eval value alone is
@@ -1234,27 +1162,11 @@ impl Render for SwitcherView {
             .on_action(cx.listener(Self::on_select_next))
             .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::on_dismiss))
-            .on_action(cx.listener(Self::on_backspace))
-            .on_action(cx.listener(Self::on_delete))
             .on_action(cx.listener(Self::on_move_left))
             .on_action(cx.listener(Self::on_move_right))
-            .on_action(cx.listener(Self::on_move_home))
-            .on_action(cx.listener(Self::on_move_end))
-            .on_action(cx.listener(Self::on_extend_left))
-            .on_action(cx.listener(Self::on_extend_right))
-            .on_action(cx.listener(Self::on_extend_home))
-            .on_action(cx.listener(Self::on_extend_end))
-            .on_action(cx.listener(Self::on_move_word_left))
-            .on_action(cx.listener(Self::on_move_word_right))
-            .on_action(cx.listener(Self::on_extend_word_left))
-            .on_action(cx.listener(Self::on_extend_word_right))
-            .on_action(cx.listener(Self::on_select_all))
-            .on_action(cx.listener(Self::on_copy))
-            .on_action(cx.listener(Self::on_cut))
-            .on_action(cx.listener(Self::on_paste))
+            .on_action(cx.listener(Self::on_audio_space))
             .on_action(cx.listener(Self::on_focus_next_pane))
             .on_action(cx.listener(Self::on_focus_prev_pane))
-            .on_key_down(cx.listener(Self::on_key_down))
             .flex()
             .flex_col()
             .size_full()
@@ -1288,7 +1200,7 @@ impl Render for SwitcherView {
                     .child(
                         div()
                             .flex_1()
-                            .child(render_query(&self.input, &placeholder, &theme)),
+                            .child(Input::new(&self.input).appearance(false).bordered(false)),
                     )
                     .child(render_cog_or_spinner(self.dirs_loading, &theme, cx)),
             )
@@ -1385,86 +1297,6 @@ impl Render for SwitcherView {
 }
 
 /// Render the query text with a visible caret and selection highlight.
-fn render_query(input: &QueryInput, placeholder: &SharedString, theme: &Theme) -> AnyElement {
-    let text = input.text();
-    if text.is_empty() {
-        return div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .child(
-                div()
-                    .w(px(2.0))
-                    .h(px(20.0))
-                    .bg(theme.accent),
-            )
-            .child(
-                div()
-                    .ml_1()
-                    .text_color(theme.muted)
-                    .child(placeholder.clone()),
-            )
-            .into_any_element();
-    }
-
-    let mut row = div().flex().flex_row().items_center();
-
-    match input.selection() {
-        Some(sel) => {
-            let before = &text[..sel.start];
-            let selected = &text[sel.clone()];
-            let after = &text[sel.end..];
-            if !before.is_empty() {
-                row = row.child(
-                    div()
-                        .text_color(theme.foreground)
-                        .child(before.to_string()),
-                );
-            }
-            row = row.child(
-                div()
-                    .px_0p5()
-                    .bg(theme.accent)
-                    .text_color(gpui::rgb(0xffffff))
-                    .child(selected.to_string()),
-            );
-            if !after.is_empty() {
-                row = row.child(
-                    div()
-                        .text_color(theme.foreground)
-                        .child(after.to_string()),
-                );
-            }
-        }
-        None => {
-            let cursor = input.cursor();
-            let (before, after) = text.split_at(cursor);
-            if !before.is_empty() {
-                row = row.child(
-                    div()
-                        .text_color(theme.foreground)
-                        .child(before.to_string()),
-                );
-            }
-            row = row.child(
-                div()
-                    .w(px(2.0))
-                    .h(px(20.0))
-                    .bg(theme.accent),
-            );
-            if !after.is_empty() {
-                row = row.child(
-                    div()
-                        .text_color(theme.foreground)
-                        .child(after.to_string()),
-                );
-            }
-        }
-    }
-
-    row.into_any_element()
-}
-
 /// Small × button rendered at the right edge of a window row. Clicking it
 /// asks the host to close the target window without triggering the row's
 /// own click (selection + activate) — the `mouse_down` handler short-circuits

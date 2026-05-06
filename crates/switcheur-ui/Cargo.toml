@@ -9,5 +9,6 @@ license.workspace = true
 switcheur-core = { workspace = true }
 switcheur-i18n = { workspace = true }
 gpui = { workspace = true }
+gpui-component = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

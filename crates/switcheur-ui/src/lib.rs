@@ -2,7 +2,6 @@
 
 pub mod actions;
 pub mod assets;
-pub mod input;
 pub mod list;
 pub mod onboarding_view;
 pub mod open_with_popover;
@@ -10,6 +9,7 @@ pub mod settings_view;
 pub mod switcher_view;
 pub mod thanks_view;
 pub mod theme;
+pub mod theme_adapter;
 
 pub use assets::Assets;
 pub use onboarding_view::{OnboardingView, OnboardingViewEvent};

@@ -24,6 +24,7 @@ switcheur-platform = { workspace = true }
 switcheur-ui = { workspace = true }
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
+gpui-component = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-channel = { workspace = true }
