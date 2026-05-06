@@ -80,10 +80,12 @@ pub trait BrowserTabSource: Send + Sync {
 pub trait CurrentlyPlayingSource: Send + Sync {
     fn current_currently_playing(&self) -> Vec<AudioRowRef>;
 
-    /// Toggle play/pause on the named bundle. Used by the row's optional
-    /// play/pause button. Returns `Err` when no toggle path is wired for
-    /// this bundle id (e.g. browsers — we'd need a different mechanism).
-    fn toggle_audio_playback(&self, bundle_id: &str) -> Result<()>;
+    /// Toggle play/pause for the row's source. Standalone media apps go
+    /// through their scripting dictionary (Spotify, Music); browser tabs
+    /// go through JS injection on the captured `window_id` / `tab_index`.
+    /// Returns `Err` when no toggle path is wired for this row (e.g.
+    /// unknown bundle id without a browser_tab).
+    fn toggle_audio_playback(&self, row: &AudioRowRef) -> Result<()>;
 }
 
 /// One result from a [`DirectorySource`] query — a path the UI turns into a

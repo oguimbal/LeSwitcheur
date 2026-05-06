@@ -69,6 +69,9 @@ just check / just test / just run / just dev / just bundle
 | `objc2` / `objc2-app-kit` / `objc2-foundation` | 0.6 / 0.3 / 0.3 | NSRunningApplication, NSWorkspace |
 | `core-foundation` / `core-graphics` | 0.10 / 0.25 | CGWindowList |
 | `accessibility-sys` | 0.1 | AXUIElement raise + permissions |
+| `coreaudio-sys` | 0.2 | `kAudioHardwarePropertyProcessObjectList` for currently-producing PIDs |
+| `libproc` | 0.14 | `pbi_ppid` walk: browser-helper PID → main app PID |
+| MediaRemoteAdapter (vendored) | upstream `ungive/mediaremote-adapter` BSD-3 | Bypass for macOS 15.4+ now-playing daemon check; spawned via `/usr/bin/perl` |
 
 ### Bumping GPUI
 
@@ -151,9 +154,19 @@ If can't test a case: say so explicit, don't claim still work.
 23. **Open With popover exempt** — click inside owned non-activating popover must NOT dismiss panel.
 24. **Cmd+Tab grace period** — silent in-memory cycle (no panel yet, `state.current` is `None`) → loop is no-op, no panel flash.
 
+### Currently Playing
+
+25. **MediaRemote helper present** — bundled `.app` carries `Contents/Frameworks/MediaRemoteAdapter.framework` + `Contents/Resources/mediaremote/mediaremote-adapter.pl`. Both must be code-signed by the same identity as the app. Verify via `codesign --display --verbose=2 dist/LeSwitcheur.app/Contents/Frameworks/MediaRemoteAdapter.framework`.
+26. **Playing browser tab disambiguation** — Chrome with two YouTube tabs, only background one playing → row pins the audible tab via the helper's title metadata; Enter focuses that tab. Without the helper (un-bundled / 15.4+ direct dlopen path) the row falls through to "Chrome · Now Playing" with no tab — never the wrong tab.
+27. **Paused source via MediaRemote fallback** — Spotify paused, AppleScript automation prompt denied (TCC) → MediaRemote helper still surfaces the row with the current track + paused badge. Browsers excluded from this fallback (would double-list with the CoreAudio browser row).
+28. **Helper invocation cost** — perl + framework load ≈ 200–400 ms cold. The probe runs off the UI thread on switcher open; first-paint shows the rest of the panel immediately, audio rows appear shortly after.
+29. **Daemon refusal silent** — `current_now_playing` returns `None` on every error path (no helper, helper crashed, bad JSON, daemon refused even via perl). No log spam.
+30. **`LESWITCHEUR_BUNDLE` env override** — `cargo run --example probe_audio` resolves the helper via this var pointed at `dist/LeSwitcheur.app`, since `NSBundle::mainBundle()` from a cargo example points at the example binary's parent dir.
+
 ### Don't-do
 
 - AppleScript for window mgmt — banned.
+- Direct `dlopen` of MediaRemote.framework from our binary — silently rejected on macOS 15.4+ (daemon-side bundle-id check). Always go through the bundled perl helper.
 - `kAXMain` / `kAXFocused` write after SLPS — race, key focus stuck on previous app.
 - Cross-Space target with AX-empty: don't fall through to "first window" — that's a sibling on *current* Space, SLPS-targeting it silently no-op.
 - `.ActivateAllWindows` for the N-of-M same-Space case — break #1.
@@ -179,6 +192,9 @@ If can't test a case: say so explicit, don't claim still work.
 - `crates/switcheur-platform/src/macos/hotkey.rs` — `HotkeySpec` → global-hotkey `HotKey` + `HotkeyEvent` channel.
 - `crates/switcheur-ui/src/switcher_view.rs` — root GPUI view, actions, `on_key_down`.
 - `crates/switcheur/src/main.rs` — boot + async hotkey loop.
+- `crates/switcheur-platform/src/macos/now_playing.rs` — spawn `/usr/bin/perl` + bundled MediaRemoteAdapter.framework; parse JSON. Bypass for macOS 15.4+ daemon-side bundle-id check.
+- `crates/switcheur-platform/src/macos/audio.rs` + `media_apps.rs` — CoreAudio enumeration (currently producing) + AppleScript player-state probes (Spotify / Music). MediaRemote helper fills paused-source rows when these miss.
+- `bundle/mediaremote/` — vendored upstream sources (`ungive/mediaremote-adapter`, BSD-3) + `build.sh` (clang flat invocation, universal arm64+x86_64).
 - `bundle/bundle.sh` + `bundle/Info.plist` — `.app` assembly.
 
 ## Releasing

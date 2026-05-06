@@ -6,12 +6,6 @@ use switcheur_i18n::tr;
 
 use crate::theme::Theme;
 
-/// Brand colour for the "Currently Playing" badge — same accent the Music
-/// app and macOS volume HUD lean on. Picked once here so the row pops
-/// against both light and dark themes without piping a theme accent
-/// through the badge code.
-const AUDIO_BADGE_COLOR: u32 = 0xFA2D48;
-
 const ICON_SIZE: f32 = 26.0;
 /// Size of the badge overlaid on an icon's bottom-right corner (minimized
 /// windows and browser tabs). Sized relative to [`ICON_SIZE`] so the badge
@@ -83,11 +77,10 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
             .into_any_element()
     } else if let Item::CurrentlyPlaying(r) = item {
         // "Currently Playing" rows get a play / pause glyph badge in the
-        // corner over the source app's icon. Same construction as the
-        // minimised badge (lines above) so the row pattern stays
-        // consistent. The badge state mirrors the row's playback state so
-        // the user can tell paused (e.g. Spotify) from playing
-        // (e.g. YouTube tab) at a glance.
+        // corner over the source app's icon. Mirrors the minimised badge
+        // construction above (subtle theme-bg circle, foreground glyph)
+        // so the row pattern stays consistent and the badge doesn't fight
+        // the underlying app icon for attention.
         let glyph = match r.state {
             PlaybackState::Paused => "⏸",
             // Both Playing and Unknown render as ▶ — when CoreAudio
@@ -96,10 +89,6 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
             // confirm the state we still want a clear "this is the
             // audible source" cue.
             PlaybackState::Playing | PlaybackState::Unknown => "▶",
-        };
-        let badge_bg = match r.state {
-            PlaybackState::Paused => 0x9AA0A6u32, // muted grey for pause
-            _ => AUDIO_BADGE_COLOR,
         };
         div()
             .relative()
@@ -114,12 +103,12 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
                     .w(px(OVERLAY_SIZE))
                     .h(px(OVERLAY_SIZE))
                     .rounded_full()
-                    .bg(rgb(badge_bg))
+                    .bg(theme.background)
                     .flex()
                     .items_center()
                     .justify_center()
                     .text_size(px(9.0))
-                    .text_color(rgb(0xffffff))
+                    .text_color(theme.foreground)
                     .child(glyph),
             )
             .into_any_element()

@@ -87,11 +87,10 @@ pub enum SwitcherViewEvent {
     /// bundle id and launches the selected folder with that app.
     OpenWithActivated(usize),
     /// User clicked the play/pause button on a "Currently Playing" row.
-    /// Carries the bundle id of the source app. Host dispatches the
-    /// platform's `toggle_audio_playback` and re-runs the audio probe so
-    /// the row's badge flips between ▶ and ⏸ without needing the user to
-    /// reopen the switcher.
-    TogglePlayPause(String),
+    /// Carries the row's full descriptor so the host can pick the right
+    /// toggle path (browser tab JS injection vs. AppleScript scripting
+    /// dictionary) without re-deriving it from a bundle id.
+    TogglePlayPause(Arc<switcheur_core::AudioRowRef>),
 }
 
 /// Top-of-panel banner shown when the startup update check reported a newer
@@ -120,7 +119,7 @@ pub struct SwitcherView {
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
     _activation_sub: Option<Subscription>,
-    last_programs_extra: f32,
+    last_extras_above_input: f32,
     last_list_shrink: f32,
     nag_phase: NagPhase,
     update_banner: UpdateBannerState,
@@ -190,7 +189,7 @@ impl SwitcherView {
             focus,
             scroll: UniformListScrollHandle::default(),
             _activation_sub: None,
-            last_programs_extra: 0.0,
+            last_extras_above_input: 0.0,
             last_list_shrink: 0.0,
             nag_phase: NagPhase::Hidden,
             update_banner: UpdateBannerState::Hidden,
@@ -666,20 +665,20 @@ impl SwitcherView {
     }
 
     fn emit_height_delta_if_changed(&mut self, cx: &mut Context<Self>) {
-        let programs = programs_extra_height(&self.state);
+        let extras = extras_above_input_height(&self.state);
         let shrink = self.current_list_shrink();
-        let d_programs = programs - self.last_programs_extra;
+        let d_extras = extras - self.last_extras_above_input;
         let d_shrink = shrink - self.last_list_shrink;
-        if d_programs.abs() < f32::EPSILON && d_shrink.abs() < f32::EPSILON {
+        if d_extras.abs() < f32::EPSILON && d_shrink.abs() < f32::EPSILON {
             return;
         }
-        self.last_programs_extra = programs;
+        self.last_extras_above_input = extras;
         self.last_list_shrink = shrink;
-        // Programs section grows above the input (anchor bottom → delta_origin_y
-        // stays 0). Results-panel suppression shrinks below the input (anchor
-        // top → delta_origin_y matches the shrink so bottom rises by the same
-        // amount height drops).
-        let delta_height = d_programs - d_shrink;
+        // Sections above the input (programs, currently-playing) grow upward
+        // (anchor bottom → delta_origin_y stays 0). Results-panel suppression
+        // shrinks below the input (anchor top → delta_origin_y matches the
+        // shrink so bottom rises by the same amount height drops).
+        let delta_height = d_extras - d_shrink;
         let delta_origin_y = d_shrink;
         cx.emit(SwitcherViewEvent::FrameDeltaChanged {
             delta_origin_y,
@@ -1491,7 +1490,7 @@ fn render_close_button(
 /// up and triggering row activation (which would close the switcher).
 fn render_play_pause_button(
     idx: usize,
-    bundle_id: String,
+    row: Arc<switcheur_core::AudioRowRef>,
     state: PlaybackState,
     theme: &Theme,
     cx: &mut Context<SwitcherView>,
@@ -1520,7 +1519,7 @@ fn render_play_pause_button(
             |_: &MouseDownEvent, _w, cx| cx.stop_propagation(),
         )
         .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-            cx.emit(SwitcherViewEvent::TogglePlayPause(bundle_id.clone()));
+            cx.emit(SwitcherViewEvent::TogglePlayPause(row.clone()));
             // Optimistic flip: invert the row's local state so the glyph
             // changes immediately without waiting for the host to re-run
             // the probe (which can take ~400 ms via osascript).
@@ -1652,18 +1651,19 @@ fn currently_playing_section(
             let active = section_active && idx == selected;
             // Pull out the toggle button data while we still have the
             // item — render_row consumes the MatchResult.
-            let toggle_data: Option<(String, PlaybackState)> = if let Item::CurrentlyPlaying(r) = item {
-                if r.supports_toggle() {
-                    r.bundle_id.clone().map(|b| (b, r.state))
+            let toggle_data: Option<(Arc<switcheur_core::AudioRowRef>, PlaybackState)> =
+                if let Item::CurrentlyPlaying(r) = item {
+                    if r.supports_toggle() {
+                        Some((r.clone(), r.state))
+                    } else {
+                        None
+                    }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
             let mut row = render_row(&mr, active, theme);
-            if let Some((bundle_id, state)) = toggle_data {
-                row = row.child(render_play_pause_button(idx, bundle_id, state, theme, cx));
+            if let Some((row_ref, state)) = toggle_data {
+                row = row.child(render_play_pause_button(idx, row_ref, state, theme, cx));
             }
             row.id(SharedString::from(format!("switcher-audio-row-{idx}")))
                 .cursor_pointer()
@@ -2061,14 +2061,25 @@ fn render_update_banner(
 /// Rough budget: base HEIGHT minus input row + eval row + borders/padding.
 const LIST_AREA_HEIGHT: f32 = 300.0;
 
-/// Extra vertical pixels the programs section adds. Mirrors the padding +
-/// row heights used in [`programs_section`] so the host window can resize
-/// to fit. Returns 0 when the section is hidden.
-fn programs_extra_height(state: &SwitcherState) -> f32 {
-    if !state.programs_visible() {
-        return 0.0;
-    }
+/// Total extra vertical pixels added above the input row by all sections
+/// that grow upward (programs section + currently-playing section). The
+/// host uses this to resize the NSWindow upward, keeping the input row's
+/// screen position fixed when sections appear/disappear async.
+fn extras_above_input_height(state: &SwitcherState) -> f32 {
     const ROW: f32 = 44.0;
-    const SECTION_PADDING: f32 = 10.0; // py_1 top + py_1 bottom + border
-    state.filtered_programs().len() as f32 * ROW + SECTION_PADDING
+    let mut total = 0.0;
+    if state.programs_visible() {
+        const SECTION_PADDING: f32 = 10.0; // py_1 top + py_1 bottom + border
+        total += state.filtered_programs().len() as f32 * ROW + SECTION_PADDING;
+    }
+    if state.currently_playing_visible() {
+        let n = state.currently_playing().len();
+        if n > 0 {
+            // Header (~18px: pt_1 + 11px text + pb_0p5) + N rows + pb_1 + border
+            const HEADER: f32 = 18.0;
+            const SECTION_PADDING: f32 = 5.0; // pb_1 + border_b_1
+            total += HEADER + n as f32 * ROW + SECTION_PADDING;
+        }
+    }
+    total
 }

@@ -5750,6 +5750,8 @@ dependencies = [
  "objc2-foundation",
  "open",
  "percent-encoding",
+ "serde",
+ "serde_json",
  "switcheur-core",
  "thiserror 1.0.69",
  "tracing",

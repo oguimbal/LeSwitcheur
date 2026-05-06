@@ -12,6 +12,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 crossbeam-channel = { workspace = true }
 async-channel = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 arc-swap = { workspace = true }
 percent-encoding = "2"
 open = { workspace = true }

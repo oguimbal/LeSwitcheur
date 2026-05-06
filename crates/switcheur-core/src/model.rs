@@ -177,6 +177,16 @@ impl AudioRowRef {
     /// Kept here (rather than in the platform crate) so the UI can render
     /// the button without depending on platform internals.
     pub fn supports_toggle(&self) -> bool {
+        // Spotify / Music: AppleScript scripting dictionary `playpause`.
+        // Chrome / Safari tab: JS injection on first <video>/<audio>
+        // element via `execute javascript` / `do JavaScript`. Requires the
+        // user to enable "Allow JavaScript from Apple Events" in the
+        // browser — when disabled the toggle silently no-ops, which is
+        // why we still advertise support (alternative: hide the button
+        // for browsers, forcing the user to discover the setting later).
+        if self.browser_tab.is_some() {
+            return true;
+        }
         matches!(
             self.bundle_id.as_deref(),
             Some("com.spotify.client") | Some("com.apple.Music")

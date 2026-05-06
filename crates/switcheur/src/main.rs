@@ -1229,28 +1229,27 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             activate_open_with(*idx, state, cx);
             return;
         }
-        SwitcherViewEvent::TogglePlayPause(bundle_id) => {
-            // Spawn the AppleScript dispatch off the UI thread so a slow
-            // / refused osascript doesn't stall the panel; once it
-            // returns, kick off a fresh probe so the row's badge settles
-            // on the truth (the optimistic flip in
-            // `flip_audio_state_optimistic` may have raced the actual
-            // state change).
+        SwitcherViewEvent::TogglePlayPause(row) => {
+            // Spawn the toggle off the UI thread so a slow / refused
+            // osascript doesn't stall the panel; once it returns, kick off
+            // a fresh probe so the row's badge settles on the truth (the
+            // optimistic flip in `flip_audio_state_optimistic` may have
+            // raced the actual state change).
             let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
             let Some(entity) = entity_opt else {
                 return;
             };
             let platform = state.platform.clone();
             let weak = entity.downgrade();
-            let bundle_id = bundle_id.clone();
+            let row = row.clone();
             cx.spawn(async move |cx: &mut AsyncApp| {
                 let platform_inner = platform.clone();
-                let bundle_inner = bundle_id.clone();
+                let row_inner = row.clone();
                 let _ = cx
                     .background_executor()
                     .spawn(async move {
-                        if let Err(e) = platform_inner.toggle_audio_playback(&bundle_inner) {
-                            tracing::warn!("toggle_audio_playback({bundle_inner}): {e:#}");
+                        if let Err(e) = platform_inner.toggle_audio_playback(&row_inner) {
+                            tracing::warn!("toggle_audio_playback: {e:#}");
                         }
                     })
                     .await;

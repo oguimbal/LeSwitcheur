@@ -7,6 +7,13 @@
 //! Spotify / YouTube / Music / Safari, then run this to see which app/PID
 //! the detection lands on (and whether browser-helper PIDs were correctly
 //! resolved to the parent app).
+//!
+//! The `now_playing` probe needs the bundled MediaRemote helper, which only
+//! exists inside `dist/LeSwitcheur.app`. Point the example at the built
+//! bundle via the `LESWITCHEUR_BUNDLE` env var:
+//!
+//!   LESWITCHEUR_BUNDLE=$PWD/dist/LeSwitcheur.app \
+//!       cargo run -p switcheur-platform --example probe_audio
 
 #[cfg(target_os = "macos")]
 fn main() {

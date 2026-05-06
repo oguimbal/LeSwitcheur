@@ -308,6 +308,41 @@ pub fn activate_tab(t: &BrowserTabRef) -> Result<()> {
     }
 }
 
+/// Toggle play/pause of the first `<video>` or `<audio>` element on the
+/// given tab via JavaScript injection. Requires the user to have enabled
+/// "Allow JavaScript from Apple Events" in Chrome's View → Developer menu
+/// or Safari's Develop menu — without it the script throws and we silently
+/// no-op. Returning Ok(()) on every soft failure keeps the optimistic UI
+/// flip from getting stuck on an error toast.
+pub fn toggle_tab_play_pause(t: &BrowserTabRef) -> Result<(), String> {
+    let js = "var v=document.querySelector('video,audio');if(v){v.paused?v.play():v.pause();}";
+    let script = match t.browser {
+        Browser::Chrome => format!(
+            r#"tell application "Google Chrome"
+    try
+        tell tab {ti} of (first window whose id is {wid}) to execute javascript "{js}"
+    end try
+end tell"#,
+            wid = t.window_id,
+            ti = t.tab_index,
+            js = js,
+        ),
+        Browser::Safari => format!(
+            r#"tell application "Safari"
+    try
+        do JavaScript "{js}" in tab {ti} of (first window whose id is {wid})
+    end try
+end tell"#,
+            wid = t.window_id,
+            ti = t.tab_index,
+            js = js,
+        ),
+    };
+    run_osascript(&script, SCAN_TIMEOUT)
+        .map(|_| ())
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// Build the per-browser "switch to this tab" AppleScript. Chrome uses
 /// `active tab index`; Safari uses `current tab` set to a tab reference.
 fn activate_script(t: &BrowserTabRef) -> String {
@@ -488,56 +523,6 @@ pub fn audible_tab_for(
     // non-Apple callers) or a bundled Apple-signed helper.
     None
 }
-
-/// Resolve the (window_id, tab_index) pair of the browser's frontmost
-/// window's active tab, then look the row up in the already-fetched
-/// `tabs` list so the [`BrowserTabRef`] we return has the same identity
-/// as the rows used elsewhere in the switcher.
-fn active_tab_of_front_window(browser: Browser, tabs: &[BrowserTabRef]) -> Option<BrowserTabRef> {
-    let script = match browser {
-        Browser::Chrome => CHROME_ACTIVE_TAB_SCRIPT,
-        Browser::Safari => SAFARI_ACTIVE_TAB_SCRIPT,
-    };
-    let raw = run_osascript(script, SCAN_TIMEOUT).ok()?;
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    const US: char = '\u{1F}';
-    let mut parts = raw.splitn(2, US);
-    let wid: i64 = parts.next()?.parse().ok()?;
-    let ti: i64 = parts.next()?.parse().ok()?;
-    tabs.iter()
-        .find(|t| t.window_id == wid && t.tab_index == ti)
-        .cloned()
-}
-
-/// AppleScript: "id<US>active-tab-index" of the front window. Empty
-/// string when the browser isn't running. Same separator convention as
-/// the list scripts so we can reuse the parse path.
-const CHROME_ACTIVE_TAB_SCRIPT: &str = r#"tell application "Google Chrome"
-    if not running then return ""
-    if (count of windows) = 0 then return ""
-    set sep to (ASCII character 31)
-    set w to front window
-    set wid to id of w
-    set ti to active tab index of w
-    return wid & sep & ti
-end tell"#;
-
-const SAFARI_ACTIVE_TAB_SCRIPT: &str = r#"tell application "Safari"
-    if not running then return ""
-    if (count of windows) = 0 then return ""
-    set sep to (ASCII character 31)
-    set w to front window
-    try
-        set wid to id of w
-    on error
-        set wid to 0
-    end try
-    set ti to (index of (current tab of w))
-    return wid & sep & ti
-end tell"#;
 
 /// Score each tab by how well it matches MediaRemote metadata, then pick
 /// the best. A title match weighs more than an artist match, which weighs

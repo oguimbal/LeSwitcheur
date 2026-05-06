@@ -220,12 +220,96 @@ impl CurrentlyPlayingSource for MacPlatform {
                 track_artist: m.track_artist,
             });
         }
+
+        // MediaRemote fallback: when the helper sees a registered now-playing
+        // client (Spotify paused, etc.) but neither CoreAudio nor the
+        // AppleScript probe surfaced it (e.g. TCC denied automation for
+        // Spotify), inject a row from the helper data so the user still gets
+        // parity with Control Center. Skip for browsers — the metadata
+        // already enriches the matching CoreAudio browser row above, and a
+        // standalone row would double-list Chrome on its own.
+        if let Some(np) = np.as_ref() {
+            if let Some(mr_bundle) = np.bundle_id.as_deref() {
+                let already = rows.iter().any(|r| {
+                    r.bundle_id
+                        .as_deref()
+                        .map(|b| b == mr_bundle)
+                        .unwrap_or(false)
+                });
+                let is_browser = matches!(
+                    mr_bundle,
+                    "com.google.Chrome" | "com.apple.Safari"
+                );
+                if !already && !is_browser {
+                    let pid = pid_for_bundle(mr_bundle).unwrap_or(0);
+                    let app_name = np
+                        .bundle_id
+                        .as_deref()
+                        .and_then(running_app_name)
+                        .unwrap_or_else(|| {
+                            // Last-resort label: derive from bundle id
+                            // (e.g. com.spotify.client → "Spotify"). Not
+                            // pretty but better than blank.
+                            mr_bundle
+                                .rsplit('.')
+                                .next()
+                                .map(|s| {
+                                    let mut c = s.chars();
+                                    c.next()
+                                        .map(|f| f.to_ascii_uppercase().to_string()
+                                            + c.as_str())
+                                        .unwrap_or_else(|| s.to_string())
+                                })
+                                .unwrap_or_else(|| mr_bundle.to_string())
+                        });
+                    let icon_path = bundle_path_for(pid)
+                        .and_then(|p| icons::icon_for_bundle(&p, mr_bundle));
+                    rows.push(AudioRowRef {
+                        pid,
+                        app_name,
+                        bundle_id: Some(mr_bundle.to_string()),
+                        icon_path,
+                        browser_tab: None,
+                        browser: None,
+                        state: np.state,
+                        track_title: np.title.clone(),
+                        track_artist: np.artist.clone(),
+                    });
+                }
+            }
+        }
         rows
     }
 
-    fn toggle_audio_playback(&self, bundle_id: &str) -> Result<()> {
-        media_apps::toggle_play_pause(bundle_id).map_err(|e| anyhow::anyhow!(e))
+    fn toggle_audio_playback(&self, row: &AudioRowRef) -> Result<()> {
+        // Browser tab → JS injection on the captured tab. Standalone media
+        // apps → AppleScript scripting dictionary. Order matters: a row
+        // for a browser may also have a known bundle id (com.google.Chrome)
+        // which doesn't have a meaningful `playpause` script, so the tab
+        // path must win.
+        if let Some(tab) = row.browser_tab.as_ref() {
+            return browser::toggle_tab_play_pause(tab).map_err(|e| anyhow::anyhow!(e));
+        }
+        match row.bundle_id.as_deref() {
+            Some(b) => media_apps::toggle_play_pause(b).map_err(|e| anyhow::anyhow!(e)),
+            None => anyhow::bail!("no toggle path for row without bundle id or browser tab"),
+        }
     }
+}
+
+/// Localised display name for the first running instance of a bundle.
+/// Used by the MediaRemote fallback to label the row with the app's
+/// proper name (e.g. "Spotify") rather than the bundle id. Returns
+/// `None` when the app isn't running or has no localised name.
+fn running_app_name(bundle_id: &str) -> Option<String> {
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::NSString;
+    let key = NSString::from_str(bundle_id);
+    let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&key);
+    apps.iter()
+        .next()
+        .and_then(|a| a.localizedName())
+        .map(|s| s.to_string())
 }
 
 /// Resolve the running PID for a bundle id via NSRunningApplication. Used

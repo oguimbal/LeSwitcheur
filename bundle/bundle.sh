@@ -37,6 +37,16 @@ if [ -f "$ROOT/bundle/AppIcon.icns" ]; then
     cp "$ROOT/bundle/AppIcon.icns" "$RES/AppIcon.icns"
 fi
 
+# Build + embed the MediaRemote bridge framework. Required so we can read
+# now-playing metadata on macOS 15.4+, where Apple's daemon refuses XPC calls
+# from non-Apple-signed processes. The bridge is loaded by /usr/bin/perl
+# (Apple-signed) via DynaLoader; perl carries the entitlement implicitly so
+# the daemon accepts. See bundle/mediaremote/UPSTREAM for source pin.
+"$ROOT/bundle/mediaremote/build.sh" "$CONTENTS/Frameworks"
+mkdir -p "$RES/mediaremote"
+cp "$ROOT/bundle/mediaremote/bin/mediaremote-adapter.pl" "$RES/mediaremote/"
+cp "$ROOT/bundle/mediaremote/LICENSE" "$RES/mediaremote/LICENSE"
+
 # Sign the bundle. Identity comes from `$CODESIGN_IDENTITY`:
 #   - unset / empty → auto-detect: pick the first "Developer ID Application"
 #     identity from the keychain if present, else fall back to ad-hoc "-".
