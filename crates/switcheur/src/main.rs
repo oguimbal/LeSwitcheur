@@ -7,6 +7,11 @@
 //! NOTE: Building this binary requires a full Xcode install (not just CLT), as
 //! gpui_macos invokes the `metal` shader compiler in its build script.
 
+// On Windows, release builds run as a GUI subsystem app (no console window
+// pops up alongside the UI). Debug builds keep the console so `tracing` is
+// visible in `cargo run`. The same tag has no effect on macOS.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;

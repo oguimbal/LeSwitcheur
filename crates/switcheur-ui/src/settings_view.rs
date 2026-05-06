@@ -1661,30 +1661,46 @@ impl SettingsView {
             .child(self.render_input_monitoring_helper(cx))
             .child(self.render_hotkey_exception_row(cx));
 
-        let mut quick_type_block = div().flex().flex_col().gap_1p5().child(toggle_row(
-            tr("settings.quick_type"),
-            Some(tr("settings.quick_type_hint")),
-            self.quick_type,
-            &theme,
-            cx.listener(Self::toggle_quick_type),
-        ));
-        if self.quick_type {
-            quick_type_block = quick_type_block.child(self.render_quick_type_exception_row(cx));
-        }
+        // Quick Type (hold Fn + type) and Cmd+Tab replacement are both
+        // driven by macOS-only HID-tap mechanisms. Hide them on Windows
+        // until the equivalents (low-level keyboard hooks) are wired up,
+        // so the toggles don't surface a feature that won't work.
+        let mac_only_blocks: AnyElement = if cfg!(target_os = "macos") {
+            let mut quick_type_block =
+                div().flex().flex_col().gap_1p5().child(toggle_row(
+                    tr("settings.quick_type"),
+                    Some(tr("settings.quick_type_hint")),
+                    self.quick_type,
+                    &theme,
+                    cx.listener(Self::toggle_quick_type),
+                ));
+            if self.quick_type {
+                quick_type_block =
+                    quick_type_block.child(self.render_quick_type_exception_row(cx));
+            }
+            div()
+                .flex()
+                .flex_col()
+                .gap_5()
+                .child(quick_type_block)
+                .child(toggle_row(
+                    tr("settings.replace_cmd_tab"),
+                    Some(tr("settings.replace_cmd_tab_hint")),
+                    self.replace_system_switcher,
+                    &theme,
+                    cx.listener(Self::toggle_replace_system_switcher),
+                ))
+                .into_any_element()
+        } else {
+            div().into_any_element()
+        };
 
         div()
             .flex()
             .flex_col()
             .gap_5()
             .child(hotkey_block)
-            .child(quick_type_block)
-            .child(toggle_row(
-                tr("settings.replace_cmd_tab"),
-                Some(tr("settings.replace_cmd_tab_hint")),
-                self.replace_system_switcher,
-                &theme,
-                cx.listener(Self::toggle_replace_system_switcher),
-            ))
+            .child(mac_only_blocks)
             .into_any_element()
     }
 
@@ -1704,6 +1720,14 @@ impl SettingsView {
     }
 
     fn render_input_monitoring_helper(&self, cx: &mut Context<Self>) -> AnyElement {
+        // Input Monitoring permission only exists on macOS; on Windows the
+        // hotkey path is `RegisterHotKey` straight up, no permission gate
+        // anywhere. Render nothing so the row doesn't show an irrelevant
+        // green check or warning.
+        if cfg!(not(target_os = "macos")) {
+            let _ = cx;
+            return div().into_any_element();
+        }
         let theme = self.theme;
         // Reserved-and-not-granted is a real failure: the bound shortcut
         // won't fire. Promote the helper to a destructive-coloured warning.

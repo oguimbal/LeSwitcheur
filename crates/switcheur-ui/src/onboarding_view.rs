@@ -90,11 +90,21 @@ impl OnboardingView {
         input_monitoring_granted: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The Accessibility and Cmd+Tab replacement steps are macOS-only:
+        // Windows has no Accessibility-permission prompt, and Win32 doesn't
+        // have an equivalent to the HID-tap-driven Alt-Tab takeover. On
+        // Windows we jump straight to the Hotkey step and pretend the
+        // gates were already cleared.
+        let initial_step = if cfg!(target_os = "macos") {
+            OnboardingStep::Accessibility
+        } else {
+            OnboardingStep::Hotkey
+        };
         Self {
-            step: OnboardingStep::Accessibility,
+            step: initial_step,
             recording: false,
             recorded: None,
-            accessibility_granted: false,
+            accessibility_granted: !cfg!(target_os = "macos"),
             input_monitoring_granted,
             launch_at_startup,
             theme: Theme::default(),
@@ -173,10 +183,19 @@ impl OnboardingView {
     }
 
     fn go_back(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // On Windows the wizard starts at Hotkey (Accessibility +
+        // SystemSwitcher are macOS-only) so Back from Hotkey is the first
+        // step and we treat it as "no further back".
         let prev = match self.step {
             OnboardingStep::Accessibility => return,
             OnboardingStep::SystemSwitcher => OnboardingStep::Accessibility,
-            OnboardingStep::Hotkey => OnboardingStep::SystemSwitcher,
+            OnboardingStep::Hotkey => {
+                if cfg!(target_os = "macos") {
+                    OnboardingStep::SystemSwitcher
+                } else {
+                    return;
+                }
+            }
             OnboardingStep::Done => OnboardingStep::Hotkey,
         };
         self.step = prev;
@@ -308,7 +327,11 @@ impl Render for OnboardingView {
             OnboardingStep::Done => self.render_done_step(cx).into_any_element(),
         };
 
-        let show_back = !matches!(self.step, OnboardingStep::Accessibility);
+        // On Windows the wizard starts at Hotkey, so it's the first step
+        // and the Back chevron must be hidden too — same logic as for the
+        // Accessibility step on macOS.
+        let show_back = !matches!(self.step, OnboardingStep::Accessibility)
+            && !(cfg!(not(target_os = "macos")) && matches!(self.step, OnboardingStep::Hotkey));
         let header = div()
             .relative()
             .w_full()
@@ -356,14 +379,26 @@ impl OnboardingView {
     fn render_progress_dots(&self, cx: &mut Context<Self>) -> AnyElement {
         let _ = cx;
         let theme = self.theme;
-        let idx = match self.step {
-            OnboardingStep::Accessibility => 0,
-            OnboardingStep::SystemSwitcher => 1,
-            OnboardingStep::Hotkey => 2,
-            OnboardingStep::Done => 3,
+        // The wizard skips the macOS-only steps on Windows (Accessibility,
+        // SystemSwitcher), so the dot count tracks only the reachable ones.
+        let total = if cfg!(target_os = "macos") { 4 } else { 2 };
+        let idx = if cfg!(target_os = "macos") {
+            match self.step {
+                OnboardingStep::Accessibility => 0,
+                OnboardingStep::SystemSwitcher => 1,
+                OnboardingStep::Hotkey => 2,
+                OnboardingStep::Done => 3,
+            }
+        } else {
+            match self.step {
+                OnboardingStep::Hotkey => 0,
+                OnboardingStep::Done => 1,
+                // Unreachable on Windows: wizard never enters these steps.
+                OnboardingStep::Accessibility | OnboardingStep::SystemSwitcher => 0,
+            }
         };
         let mut row = div().flex().flex_row().gap_2().justify_center();
-        for i in 0..4 {
+        for i in 0..total {
             let active = i == idx;
             row = row.child(
                 div()
