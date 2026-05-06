@@ -11,13 +11,17 @@ pub mod activate;
 pub mod app_policy;
 pub mod file_manager;
 pub mod hotkey;
+pub mod icons;
 pub mod list;
 pub mod machine_id;
 pub mod panel;
 pub mod permissions;
 pub mod programs;
+pub mod search_walker;
 pub mod services;
+pub mod single_instance;
 pub mod startup;
+pub mod url_scheme;
 
 pub use hotkey::HotkeyService;
 pub use list::onscreen_app_window_ids_excluding_pid;
@@ -46,6 +50,11 @@ pub struct WinPlatform;
 
 impl WinPlatform {
     pub fn new() -> Result<Self> {
+        // Walk the Start Menu in the background so the catalogue is ready
+        // by the time the user first opens the switcher. Mirrors the macOS
+        // `programs::prefetch_sync` pattern but on a worker thread because
+        // the `IShellLinkW` calls need their own STA apartment.
+        programs::prefetch_async();
         Ok(Self)
     }
 

@@ -71,11 +71,28 @@ just bundle
 
 ### Test a production build from scratch
 
+macOS:
+
 ```sh
 ./scripts/test-bundle.sh      # or: just test-bundle
 ```
 
 Wipes saved settings + any stale bundle, rebuilds signed with the local self-signed identity (override via `$CODESIGN_IDENTITY`), prints the resulting signature, then launches the app.
+
+Windows:
+
+```powershell
+.\scripts\test-build.ps1              # build + launch (config preserved)
+.\scripts\test-build.ps1 -Reset       # wipe config + cache + logs first
+.\scripts\test-build.ps1 -Attach      # launch + tail log file
+.\scripts\test-build.ps1 -Help        # full help
+```
+
+`-Attach` tails `%LOCALAPPDATA%\fr.gmbl.LeSwitcheur\logs\switcheur.log` because the release exe runs with `windows_subsystem = "windows"` (no console). For Win+R one-liners:
+
+```
+powershell -NoExit -File "C:\Users\Home\repos-my\LeSwitcheur\scripts\test-build.ps1" -Attach
+```
 
 ## Structure
 

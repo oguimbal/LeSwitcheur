@@ -43,12 +43,18 @@ pub struct ProgramRef {
     pub icon_path: Option<PathBuf>,
 }
 
-/// Where a [`DirRef`] came from. Currently zoxide or Spotlight; a future fasd
-/// / autojump source can plug in next to them without re-shaping [`Item`].
+/// Where a [`DirRef`] came from. Currently zoxide, Spotlight, or the Windows
+/// folder/file walker; a future fasd / autojump source can plug in next to
+/// them without re-shaping [`Item`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirSource {
     Zoxide,
     Spotlight,
+    /// Background-walked snapshot of standard Windows user folders, restricted
+    /// to directories.
+    WindowsFolders,
+    /// Same walker as [`DirSource::WindowsFolders`] but also surfaces files.
+    WindowsFiles,
 }
 
 /// Which browser a [`BrowserTabRef`] was scraped from. The enum shape lets

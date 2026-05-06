@@ -9,6 +9,14 @@ license.workspace = true
 name = "switcheur"
 path = "src/main.rs"
 
+[target.'cfg(target_os = "windows")'.build-dependencies]
+# Multi-size .ico generated from brand/logo-256.png and embedded as
+# resource ID 1 — GPUI's Windows backend picks that up as the window
+# class icon (title bar + taskbar + Alt+Tab).
+image = { version = "0.25", default-features = false, features = ["png"] }
+ico = "0.4"
+embed-resource = "3"
+
 [dependencies]
 switcheur-core = { workspace = true }
 switcheur-i18n = { workspace = true }
@@ -26,3 +34,6 @@ open = { workspace = true }
 serde_json = { workspace = true }
 semver = { workspace = true }
 directories = { workspace = true }
+tray-icon = { workspace = true }
+image = { workspace = true }
+crossbeam-channel = { workspace = true }

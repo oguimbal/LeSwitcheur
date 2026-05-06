@@ -6,6 +6,7 @@
 //! keyed by the HWND value (cast to u64) — stable for the window's lifetime.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use switcheur_core::{AppRef, WindowRef};
 use windows::core::BOOL;
@@ -13,12 +14,15 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, MAX_PATH};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, WS_EX_TOOLWINDOW,
 };
+
+use crate::windows::icons;
 
 pub fn list_windows() -> Vec<WindowRef> {
     let mut buf: Vec<WindowRef> = Vec::with_capacity(64);
@@ -43,14 +47,23 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     if pid == 0 {
         return BOOL(1);
     }
-    let app_name = process_name(pid).unwrap_or_else(|| String::from("Unknown"));
+    let exe_path = process_image_path(pid);
+    let app_name = exe_path
+        .as_ref()
+        .and_then(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
+        .or_else(|| process_name(pid))
+        .unwrap_or_else(|| String::from("Unknown"));
+    let icon_path = exe_path
+        .as_deref()
+        .and_then(|p| p.to_str())
+        .and_then(icons::icon_for_exe);
     buf.push(WindowRef {
         id: hwnd.0 as u64,
         pid: pid as i32,
         title,
         app_name,
         bundle_id: None,
-        icon_path: None,
+        icon_path,
         minimized: unsafe { IsIconic(hwnd).as_bool() },
     });
     BOOL(1)
@@ -125,6 +138,25 @@ fn process_name(pid: u32) -> Option<String> {
     }
 }
 
+/// Full filesystem path of the executable backing `pid`, or `None` if the
+/// process exited / we lack rights. Uses `QueryFullProcessImageNameW` because
+/// it works for processes started in different sessions and elevated
+/// processes — `GetModuleBaseNameW` only returns the file name.
+fn process_image_path(pid: u32) -> Option<PathBuf> {
+    unsafe {
+        let handle: HANDLE =
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; MAX_PATH as usize];
+        let mut size: u32 = buf.len() as u32;
+        let result = QueryFullProcessImageNameW(handle, PROCESS_NAME_FORMAT(0), windows::core::PWSTR(buf.as_mut_ptr()), &mut size);
+        let _ = CloseHandle(handle);
+        if result.is_err() || size == 0 {
+            return None;
+        }
+        Some(PathBuf::from(String::from_utf16_lossy(&buf[..size as usize])))
+    }
+}
+
 pub fn list_apps() -> Vec<AppRef> {
     // One AppRef per pid. Without a richer source (e.g. Start menu shortcuts)
     // the running-app list is just the dedup of windows by pid.
@@ -134,7 +166,7 @@ pub fn list_apps() -> Vec<AppRef> {
             pid: w.pid,
             name: w.app_name.clone(),
             bundle_id: None,
-            icon_path: None,
+            icon_path: w.icon_path.clone(),
         });
     }
     map.into_values().collect()

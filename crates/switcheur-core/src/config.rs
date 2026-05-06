@@ -127,6 +127,11 @@ pub struct Config {
     /// position here.
     #[serde(default)]
     pub folder_opener_order: Vec<String>,
+    /// Whether the system-tray / menu-bar icon is shown. On Windows it's the
+    /// only visible UI affordance once onboarding is done — leaving it on by
+    /// default keeps the app discoverable.
+    #[serde(default = "default_true")]
+    pub display_in_tray: bool,
 }
 
 fn default_true() -> bool {
@@ -190,11 +195,15 @@ pub enum Appearance {
 
 /// Which backend populates the right-side directory pane.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum DirSourceId {
     Disabled,
     Zoxide,
     Spotlight,
+    /// Walk standard Windows user folders, surface only directories.
+    WindowsFolders,
+    /// Same walker, surface directories + files.
+    WindowsFiles,
 }
 
 impl Default for DirSourceId {
@@ -235,6 +244,7 @@ impl Default for Config {
             browser_tabs_integration: true,
             file_manager: None,
             folder_opener_order: Vec::new(),
+            display_in_tray: true,
         }
     }
 }

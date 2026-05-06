@@ -91,6 +91,14 @@ open = "5"
 # Semver comparison for the update checker (remote manifest vs current binary).
 semver = "1"
 
+# Tray icon (Windows + macOS NSStatusItem + Linux). Pulls a hidden window
+# on Windows that piggybacks on the main thread's message pump.
+tray-icon = "0.23"
+
+# Used at runtime to decode the brand PNG into RGBA for the tray icon.
+# (We already use it as a build-dep for the .exe icon.)
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

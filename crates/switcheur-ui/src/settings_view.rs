@@ -6,9 +6,9 @@
 use std::collections::HashMap;
 
 use gpui::{
-    deferred, div, prelude::*, px, AnyElement, App, Context, EventEmitter, FocusHandle, Focusable,
-    IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, ParentElement, Render,
-    SharedString, Styled, Window,
+    deferred, div, img, prelude::*, px, AnyElement, App, Context, EventEmitter, FocusHandle,
+    Focusable, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, ParentElement,
+    Render, SharedString, Styled, Window,
 };
 use switcheur_core::{
     file_manager::{AvailableFolderOpener, FINDER_ID},
@@ -16,6 +16,7 @@ use switcheur_core::{
 };
 use switcheur_i18n::{modifier_symbol, tr as _tr, tr_sub};
 
+use crate::input::QueryInput;
 use crate::theme::Theme;
 
 fn tr(key: &str) -> SharedString {
@@ -27,6 +28,8 @@ fn dir_source_label(id: DirSourceId) -> SharedString {
         DirSourceId::Disabled => tr("settings.dir_source.disabled"),
         DirSourceId::Zoxide => tr("settings.dir_source.zoxide"),
         DirSourceId::Spotlight => tr("settings.dir_source.spotlight"),
+        DirSourceId::WindowsFolders => tr("settings.dir_source.windows_folders"),
+        DirSourceId::WindowsFiles => tr("settings.dir_source.windows_files"),
     }
 }
 
@@ -77,6 +80,7 @@ pub enum SettingsViewEvent {
     HotkeyChanged(HotkeySpec),
     LaunchAtStartupChanged(bool),
     SearchAppsChanged(bool),
+    DisplayInTrayChanged(bool),
     AskLlmEnabledChanged(bool),
     IncludeMinimizedChanged(bool),
     ShowAllSpacesChanged(bool),
@@ -144,6 +148,7 @@ pub struct SettingsView {
     hotkey: HotkeySpec,
     launch_at_startup: bool,
     search_apps: bool,
+    display_in_tray: bool,
     ask_llm_enabled: bool,
     include_minimized: bool,
     show_all_spaces: bool,
@@ -181,7 +186,7 @@ pub struct SettingsView {
 
     picker_open: bool,
     picker_target: PickerTarget,
-    picker_apps: Vec<(String, Option<String>)>,
+    picker_apps: Vec<(String, Option<String>, Option<std::path::PathBuf>)>,
     picker_query: String,
 
     current_tab: SettingsTab,
@@ -191,8 +196,11 @@ pub struct SettingsView {
     license_key: Option<SharedString>,
     /// Whether the collapsible "Enter existing key" input is expanded.
     license_entry_open: bool,
-    /// Contents of the manual license-key text input.
-    license_entry_value: String,
+    /// Contents of the manual license-key text input. Uses [`QueryInput`] so
+    /// the field gets the same caret + selection behaviour as the search bar
+    /// — Settings has no GPUI action context, so we route keys through here
+    /// manually in [`Self::on_key_down`].
+    license_entry: QueryInput,
     /// When an activation returned an error, we show this i18n key inline
     /// under the input. Cleared on next user edit or successful activation.
     license_error_key: Option<SharedString>,
@@ -237,6 +245,7 @@ impl SettingsView {
         hotkey: HotkeySpec,
         launch_at_startup: bool,
         search_apps: bool,
+        display_in_tray: bool,
         ask_llm_enabled: bool,
         include_minimized: bool,
         show_all_spaces: bool,
@@ -261,6 +270,7 @@ impl SettingsView {
             hotkey,
             launch_at_startup,
             search_apps,
+            display_in_tray,
             ask_llm_enabled,
             include_minimized,
             show_all_spaces,
@@ -288,7 +298,7 @@ impl SettingsView {
             current_tab: SettingsTab::default(),
             license_key: license_key.map(SharedString::from),
             license_entry_open: false,
-            license_entry_value: String::new(),
+            license_entry: QueryInput::new(),
             license_error_key: None,
             license_activating: false,
             license_copied_at: None,
@@ -320,7 +330,7 @@ impl SettingsView {
         self.license_key = key.map(SharedString::from);
         if self.license_key.is_some() {
             self.license_entry_open = false;
-            self.license_entry_value.clear();
+            self.license_entry.clear();
             self.license_activating = false;
         }
         cx.notify();
@@ -355,7 +365,7 @@ impl SettingsView {
     pub fn set_picker_apps(
         &mut self,
         target: PickerTarget,
-        apps: Vec<(String, Option<String>)>,
+        apps: Vec<(String, Option<String>, Option<std::path::PathBuf>)>,
         cx: &mut Context<Self>,
     ) {
         self.picker_target = target;
@@ -453,7 +463,7 @@ impl SettingsView {
         self.picker_apps
             .iter()
             .enumerate()
-            .filter(|(_, (name, _))| q.is_empty() || name.to_lowercase().contains(&q))
+            .filter(|(_, (name, _, _))| q.is_empty() || name.to_lowercase().contains(&q))
             .map(|(i, _)| i)
             .collect()
     }
@@ -493,6 +503,17 @@ impl SettingsView {
     ) {
         self.search_apps = !self.search_apps;
         cx.emit(SettingsViewEvent::SearchAppsChanged(self.search_apps));
+        cx.notify();
+    }
+
+    fn toggle_display_in_tray(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.display_in_tray = !self.display_in_tray;
+        cx.emit(SettingsViewEvent::DisplayInTrayChanged(self.display_in_tray));
         cx.notify();
     }
 
@@ -798,7 +819,7 @@ impl SettingsView {
     }
 
     fn submit_license_key(&mut self, cx: &mut Context<Self>) {
-        let trimmed = self.license_entry_value.trim().to_ascii_uppercase();
+        let trimmed = self.license_entry.text().trim().to_ascii_uppercase();
         if trimmed.is_empty() || self.license_activating {
             return;
         }
@@ -888,7 +909,7 @@ impl SettingsView {
         if self.license_entry_open && self.license_key.is_none() {
             if k.key == "escape" {
                 self.license_entry_open = false;
-                self.license_entry_value.clear();
+                self.license_entry.clear();
                 self.license_error_key = None;
                 cx.notify();
                 return;
@@ -898,41 +919,106 @@ impl SettingsView {
                 return;
             }
             if k.key == "backspace" {
-                self.license_entry_value.pop();
+                self.license_entry.backspace();
                 self.license_error_key = None;
                 cx.notify();
                 return;
             }
-            // Cmd+V: paste from clipboard. Normalised like typed input —
-            // control chars stripped, rest uppercased.
-            if k.modifiers.platform && k.key == "v" {
-                if let Some(item) = cx.read_from_clipboard() {
-                    if let Some(text) = item.text() {
-                        let mut changed = false;
-                        for c in text.chars() {
-                            if c.is_control() {
-                                continue;
-                            }
-                            self.license_entry_value.push(c.to_ascii_uppercase());
-                            changed = true;
+            if k.key == "delete" {
+                self.license_entry.delete();
+                self.license_error_key = None;
+                cx.notify();
+                return;
+            }
+            // Cursor motion + selection. We treat both Cmd (macOS) and Ctrl
+            // (Windows) as the modifier-of-record so Ctrl-A on Windows hops to
+            // start, matching the platform's text-input convention.
+            let cmdish = k.modifiers.platform || k.modifiers.control;
+            let extend = k.modifiers.shift;
+            match k.key.as_str() {
+                "left" if cmdish => {
+                    self.license_entry.move_home(extend);
+                    cx.notify();
+                    return;
+                }
+                "right" if cmdish => {
+                    self.license_entry.move_end(extend);
+                    cx.notify();
+                    return;
+                }
+                "left" => {
+                    self.license_entry.move_left(extend);
+                    cx.notify();
+                    return;
+                }
+                "right" => {
+                    self.license_entry.move_right(extend);
+                    cx.notify();
+                    return;
+                }
+                "home" => {
+                    self.license_entry.move_home(extend);
+                    cx.notify();
+                    return;
+                }
+                "end" => {
+                    self.license_entry.move_end(extend);
+                    cx.notify();
+                    return;
+                }
+                _ => {}
+            }
+            // Clipboard / select-all. Cmd on macOS, Ctrl on Windows.
+            if cmdish {
+                match k.key.as_str() {
+                    "a" => {
+                        self.license_entry.select_all();
+                        cx.notify();
+                        return;
+                    }
+                    "c" => {
+                        if let Some(s) = self.license_entry.selected_text() {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(s.to_string()));
                         }
-                        if changed {
+                        return;
+                    }
+                    "x" => {
+                        if let Some(s) = self.license_entry.selected_text().map(str::to_string) {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(s));
+                            self.license_entry.backspace();
                             self.license_error_key = None;
                             cx.notify();
                         }
+                        return;
                     }
+                    "v" => {
+                        if let Some(item) = cx.read_from_clipboard() {
+                            if let Some(text) = item.text() {
+                                let cleaned: String = text
+                                    .chars()
+                                    .filter(|c| !c.is_control())
+                                    .flat_map(|c| c.to_uppercase())
+                                    .collect();
+                                if !cleaned.is_empty() {
+                                    self.license_entry.insert_str(&cleaned);
+                                    self.license_error_key = None;
+                                    cx.notify();
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    _ => return,
                 }
-                return;
             }
-            if k.modifiers.control || k.modifiers.platform || k.modifiers.function {
+            if k.modifiers.function {
                 return;
             }
             if let Some(ch) = k.key_char.as_deref() {
                 if !ch.is_empty() && !ch.chars().any(|c| c.is_control()) {
-                    // Normalise in-place: keys are uppercase + dash-grouped.
-                    for c in ch.chars() {
-                        self.license_entry_value.push(c.to_ascii_uppercase());
-                    }
+                    // Normalise in-place: license keys are uppercase + dash-grouped.
+                    let upper: String = ch.chars().flat_map(|c| c.to_uppercase()).collect();
+                    self.license_entry.insert_str(&upper);
                     self.license_error_key = None;
                     cx.notify();
                 }
@@ -1128,6 +1214,13 @@ impl SettingsView {
                 cx.listener(Self::toggle_launch),
             ))
             .child(toggle_row(
+                tr("settings.display_in_tray"),
+                Some(tr("settings.display_in_tray_hint")),
+                self.display_in_tray,
+                &theme,
+                cx.listener(Self::toggle_display_in_tray),
+            ))
+            .child(toggle_row(
                 tr("settings.search_apps"),
                 Some(tr("settings.search_apps_hint")),
                 self.search_apps,
@@ -1148,7 +1241,12 @@ impl SettingsView {
                 &theme,
                 cx.listener(Self::toggle_include_minimized),
             ))
-            .child(self.render_show_all_spaces_block(cx))
+            .when(cfg!(target_os = "macos"), |this| {
+                // macOS Spaces have no direct Windows analogue. EnumWindows
+                // already returns top-level windows regardless of virtual
+                // desktop, so the toggle is a no-op there — hide it.
+                this.child(self.render_show_all_spaces_block(cx))
+            })
             .child(self.render_dir_source_block(cx))
             .child(self.render_browser_tabs_block(cx))
             .child(self.render_file_manager_row(cx))
@@ -1530,7 +1628,7 @@ impl SettingsView {
                 cx.listener(|this, _: &MouseDownEvent, _, cx| {
                     this.license_entry_open = !this.license_entry_open;
                     if !this.license_entry_open {
-                        this.license_entry_value.clear();
+                        this.license_entry.clear();
                         this.license_error_key = None;
                     }
                     cx.notify();
@@ -1569,16 +1667,62 @@ impl SettingsView {
 
     fn render_license_entry(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
-        let input_text: AnyElement = if self.license_entry_value.is_empty() {
+        let input_text: AnyElement = if self.license_entry.text().is_empty() {
             div()
-                .text_color(theme.muted)
-                .child(tr("license.key_placeholder"))
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(div().w(px(2.0)).h(px(20.0)).bg(theme.accent))
+                .child(
+                    div()
+                        .ml_1()
+                        .text_color(theme.muted)
+                        .child(tr("license.key_placeholder")),
+                )
                 .into_any_element()
         } else {
-            div()
-                .text_color(theme.foreground)
-                .child(self.license_entry_value.clone())
-                .into_any_element()
+            let text = self.license_entry.text();
+            let mut row = div().flex().flex_row().items_center();
+            match self.license_entry.selection() {
+                Some(sel) => {
+                    let before = &text[..sel.start];
+                    let selected = &text[sel.clone()];
+                    let after = &text[sel.end..];
+                    if !before.is_empty() {
+                        row = row.child(
+                            div().text_color(theme.foreground).child(before.to_string()),
+                        );
+                    }
+                    row = row.child(
+                        div()
+                            .px_0p5()
+                            .bg(theme.accent)
+                            .text_color(gpui::rgb(0xffffff))
+                            .child(selected.to_string()),
+                    );
+                    if !after.is_empty() {
+                        row = row.child(
+                            div().text_color(theme.foreground).child(after.to_string()),
+                        );
+                    }
+                }
+                None => {
+                    let cursor = self.license_entry.cursor();
+                    let (before, after) = text.split_at(cursor);
+                    if !before.is_empty() {
+                        row = row.child(
+                            div().text_color(theme.foreground).child(before.to_string()),
+                        );
+                    }
+                    row = row.child(div().w(px(2.0)).h(px(20.0)).bg(theme.accent));
+                    if !after.is_empty() {
+                        row = row.child(
+                            div().text_color(theme.foreground).child(after.to_string()),
+                        );
+                    }
+                }
+            }
+            row.into_any_element()
         };
 
         let input = div()
@@ -1596,7 +1740,7 @@ impl SettingsView {
         } else {
             tr("license.activate_key")
         };
-        let disabled = self.license_activating || self.license_entry_value.trim().is_empty();
+        let disabled = self.license_activating || self.license_entry.text().trim().is_empty();
         let activate_btn = {
             let mut b = div()
                 .px_3()
@@ -2662,9 +2806,16 @@ impl SettingsView {
                 .overflow_y_scroll()
                 .gap_0p5();
             for app_idx in filtered {
-                let (name, bundle) = &self.picker_apps[app_idx];
+                let (name, bundle, icon) = &self.picker_apps[app_idx];
                 let name_str = name.clone();
                 let subtitle = bundle.clone().unwrap_or_default();
+                let icon_el: AnyElement = match icon.as_ref() {
+                    Some(p) => img(p.clone())
+                        .w(px(20.0))
+                        .h(px(20.0))
+                        .into_any_element(),
+                    None => div().w(px(20.0)).h(px(20.0)).into_any_element(),
+                };
                 col = col.child(
                     div()
                         .flex()
@@ -2682,6 +2833,7 @@ impl SettingsView {
                                 this.pick_app(name_str.clone(), cx);
                             }),
                         )
+                        .child(icon_el)
                         .child(
                             div()
                                 .flex_1()

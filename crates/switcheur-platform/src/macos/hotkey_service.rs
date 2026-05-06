@@ -53,6 +53,14 @@ impl HotkeyService {
         self.rx_out.clone()
     }
 
+    /// Sender into the same `HotkeyEvent` channel as `trigger`. Mirror of
+    /// the Windows method so cross-platform callers (e.g. the tray drain
+    /// thread) can trigger the switcher without holding the whole
+    /// `HotkeyService`.
+    pub fn sender(&self) -> Sender<HotkeyEvent> {
+        self.tx_out.clone()
+    }
+
     /// Synthesize a hotkey press. Used by `--open` on startup, `on_reopen`,
     /// and the manual cold-launch branch in main.
     pub fn trigger(&self) {

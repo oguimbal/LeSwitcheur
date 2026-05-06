@@ -50,6 +50,8 @@ use switcheur_ui::{
 };
 use tracing_subscriber::EnvFilter;
 
+mod tray;
+
 const WIDTH: f32 = 640.0;
 const HEIGHT: f32 = 400.0;
 const SETTINGS_WIDTH: f32 = 640.0;
@@ -100,15 +102,79 @@ fn main() -> Result<()> {
     // be resolved from user code, so downgrade that target to `warn` unless
     // the user explicitly overrides via RUST_LOG.
     let default_filter = EnvFilter::new("info,gpui::window=warn");
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or(default_filter))
-        .init();
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or(default_filter);
+    // On Windows release builds we run with `windows_subsystem = "windows"`
+    // — stdout/stderr are detached, so the default fmt subscriber's output
+    // would vanish. Mirror it to a file under `%LOCALAPPDATA%` so the user
+    // can inspect what happened on URL forwards / activations.
+    #[cfg(all(target_os = "windows", not(debug_assertions)))]
+    {
+        let log_path = log_file_path();
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(file) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(env_filter)
+                    .with_ansi(false)
+                    .with_writer(std::sync::Mutex::new(file))
+                    .init();
+                tracing::info!(path = %log_path.display(), "log file opened");
+            }
+            Err(_) => {
+                // No writable log dir — keep tracing silent rather than panic.
+                tracing_subscriber::fmt()
+                    .with_env_filter(env_filter)
+                    .with_writer(std::io::sink)
+                    .init();
+            }
+        }
+    }
+    #[cfg(not(all(target_os = "windows", not(debug_assertions))))]
+    {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .init();
+    }
 
     switcheur_i18n::init();
 
     let args: Vec<String> = std::env::args().collect();
     let forced_open = args.iter().any(|a| a == "--open");
     let launched_at_login = args.iter().any(|a| a == startup::LAUNCHED_AT_LOGIN_ARG);
+
+    // Single-instance gate (Windows only). Must run BEFORE hotkey registration
+    // / GPU device init / font enumeration: those steps fail on a secondary
+    // because the primary holds the global hotkey, and we'd crash before the
+    // URL got forwarded. Match against the URL scheme up front so the secondary
+    // also forwards it; on the primary path, stash the URL in `cmdline_url` for
+    // injection into `url_tx` once the channel is created below.
+    #[cfg(target_os = "windows")]
+    let cmdline_url: Option<String> = {
+        let url_arg = args
+            .iter()
+            .skip(1)
+            .find(|a| {
+                a.to_ascii_lowercase()
+                    .starts_with(&format!("{LICENSE_URL_SCHEME}://"))
+            })
+            .cloned();
+        match switcheur_platform::single_instance::check_or_forward(url_arg.clone()) {
+            Ok(switcheur_platform::single_instance::SingleInstanceOutcome::ForwardedExit) => {
+                return Ok(());
+            }
+            Ok(switcheur_platform::single_instance::SingleInstanceOutcome::Primary) => {
+                tracing::info!("primary instance acquired single-instance mutex");
+                url_arg
+            }
+            Err(e) => {
+                tracing::warn!("single-instance check: {e:#}");
+                None
+            }
+        }
+    };
     // Developer-only: fake the post-activation popup without a backend
     // round-trip. `--thanks-debug` → success card; `--thanks-debug-error` →
     // error card with the token-rejected message.
@@ -243,12 +309,32 @@ fn main() -> Result<()> {
     // cold launch). Buffer URLs onto an async channel drained by a task
     // spawned inside `app.run` so GPUI state is available when we act.
     let (url_tx, url_rx) = async_channel::unbounded::<String>();
-    app.on_open_urls(move |urls| {
-        for u in urls {
-            tracing::info!(url = %u, "open_urls");
-            let _ = url_tx.send_blocking(u);
+    {
+        let url_tx = url_tx.clone();
+        app.on_open_urls(move |urls| {
+            for u in urls {
+                tracing::info!(url = %u, "open_urls");
+                let _ = url_tx.send_blocking(u);
+            }
+        });
+    }
+
+    // Windows has no `on_open_urls` equivalent: every `leswitcheur://...`
+    // shell dispatch spawns a fresh `LeSwitcheur.exe`. The mutex/pipe split
+    // happened earlier (`check_or_forward` before hotkey init); here we wire
+    // the primary's pipe server to push forwarded URLs into our channel and
+    // inject any URL the primary itself was launched with.
+    #[cfg(target_os = "windows")]
+    {
+        switcheur_platform::single_instance::start_pipe_server(url_tx.clone());
+        if let Some(url) = cmdline_url {
+            tracing::info!(%url, "primary received URL on argv");
+            let _ = url_tx.send_blocking(url);
         }
-    });
+        if let Err(e) = switcheur_platform::url_scheme::ensure_registered(LICENSE_URL_SCHEME) {
+            tracing::warn!("URL scheme registration: {e:#}");
+        }
+    }
     app.run(move |cx| {
         // GPUI forces `NSApplicationActivationPolicyRegular` inside its
         // `applicationDidFinishLaunching`, which adds a Dock tile and lists us
@@ -330,7 +416,30 @@ fn main() -> Result<()> {
             open_with_file_entries: Rc::new(RefCell::new(Vec::new())),
             dir_query_gen: Rc::new(Cell::new(0)),
             hotkey_record_session: Rc::new(RefCell::new(None)),
+            tray: Rc::new(RefCell::new(None)),
         };
+
+        // Install the tray icon. Click on the icon triggers the hotkey
+        // directly (no GPUI cx needed); menu items (Settings, Quit) come
+        // back over `tray_cmd_rx` and are dispatched from a GPUI task
+        // below. We always build the icon — toggling `display_in_tray`
+        // off just calls `set_visible(false)` so the menu/drain wiring
+        // stays intact for any flip-on later in the same session.
+        let (tray_cmd_tx, tray_cmd_rx) = async_channel::unbounded::<tray::TrayCommand>();
+        match tray::install(state.hotkey.sender(), tray_cmd_tx.clone()) {
+            Ok(t) => {
+                let visible = state.config.borrow().display_in_tray;
+                if !visible {
+                    if let Err(e) = t.set_visible(false) {
+                        tracing::warn!("tray initial set_visible(false): {e:#}");
+                    }
+                }
+                *state.tray.borrow_mut() = Some(t);
+            }
+            Err(e) => tracing::warn!("install tray icon: {e:#}"),
+        }
+        spawn_tray_command_loop(cx, state.clone(), tray_cmd_rx);
+
         if open_on_start {
             tracing::info!("cold launch: triggering switcher on startup");
             state.hotkey.trigger();
@@ -441,6 +550,11 @@ struct AppState {
     /// Input Monitoring is granted; dropped on Cancel/capture so the run
     /// loop unwinds and the tap is uninstalled.
     hotkey_record_session: Rc<RefCell<Option<HotkeyRecordSession>>>,
+    /// Cross-platform tray icon. `None` when the user has turned
+    /// `display_in_tray` off and we never installed it / dropped it.
+    /// `Some` keeps the icon alive and lets the toggle hide/show without
+    /// rebuilding the menu.
+    tray: Rc<RefCell<Option<tray::Tray>>>,
 }
 
 /// Live popover window + its state. Mirrors [`WindowSlot`] but carries the
@@ -1003,7 +1117,7 @@ fn open_switcher_with_items(
     // since the last snapshot — i.e. only after the user installed or
     // removed an `.app`.
     let bounds = cx.update(|cx| {
-        switcheur_platform::macos::programs::refresh_if_changed();
+        switcheur_platform::refresh_programs_if_changed();
         initial_bounds(cx, WIDTH, HEIGHT)
     });
 
@@ -1401,6 +1515,8 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                     .await;
                 let label = match source.id() {
                     DirSourceId::Spotlight => switcheur_core::DirSource::Spotlight,
+                    DirSourceId::WindowsFolders => switcheur_core::DirSource::WindowsFolders,
+                    DirSourceId::WindowsFiles => switcheur_core::DirSource::WindowsFiles,
                     _ => switcheur_core::DirSource::Zoxide,
                 };
                 // Resolve icons on the worker so the synchronous AppKit
@@ -2167,6 +2283,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
     let hotkey = cfg.hotkey.clone();
     let launch = cfg.launch_at_startup;
     let search_apps = cfg.search_apps;
+    let display_in_tray = cfg.display_in_tray;
     let ask_llm_enabled = cfg.ask_llm_enabled;
     let include_min = cfg.include_minimized;
     let show_all_spaces = cfg.show_all_spaces;
@@ -2237,6 +2354,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
                 hotkey,
                 launch,
                 search_apps,
+                display_in_tray,
                 ask_llm_enabled,
                 include_min,
                 show_all_spaces,
@@ -2504,6 +2622,22 @@ fn handle_settings_event(
                 tracing::warn!("save config: {e:#}");
             }
         }
+        SettingsViewEvent::DisplayInTrayChanged(on) => {
+            {
+                let mut c = state.config.borrow_mut();
+                c.display_in_tray = *on;
+                if let Err(e) = c.save() {
+                    tracing::warn!("save config: {e:#}");
+                }
+            }
+            // The icon is always installed at startup; toggling the
+            // setting just hides/shows it so the menu wiring survives.
+            if let Some(t) = state.tray.borrow().as_ref() {
+                if let Err(e) = t.set_visible(*on) {
+                    tracing::warn!("tray set_visible: {e:#}");
+                }
+            }
+        }
         SettingsViewEvent::AskLlmEnabledChanged(on) => {
             let mut c = state.config.borrow_mut();
             c.ask_llm_enabled = *on;
@@ -2731,7 +2865,7 @@ fn handle_settings_event(
                     apps.sort_by_key(|a| a.name.to_lowercase());
                     apps.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
                     apps.into_iter()
-                        .map(|a| (a.name, a.bundle_id))
+                        .map(|a| (a.name, a.bundle_id, a.icon_path))
                         .collect::<Vec<_>>()
                 }
                 Err(e) => {
@@ -2896,13 +3030,43 @@ fn start_activate_with_key(key: String, state: AppState, cx: &mut App, show_than
 
 /// Drain the URL-scheme channel. Each `leswitcheur://activate?key=...` URL
 /// triggers an activation round-trip with the embedded key.
+/// Drains the tray's command channel on the GPUI main thread and dispatches
+/// each event (Settings → open settings window, Quit → app quit). Click-on-
+/// icon doesn't go through here — the tray module handles that inline by
+/// calling `HotkeyService::trigger` directly from its drain thread.
+fn spawn_tray_command_loop(
+    cx: &mut App,
+    state: AppState,
+    rx: async_channel::Receiver<tray::TrayCommand>,
+) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        while let Ok(cmd) = rx.recv().await {
+            match cmd {
+                tray::TrayCommand::OpenSettings => {
+                    let _ = cx.update(|cx| {
+                        if let Err(e) = open_settings_window(&state, cx) {
+                            tracing::warn!("tray: open settings: {e:#}");
+                        }
+                    });
+                }
+                tray::TrayCommand::Quit => {
+                    let _ = cx.update(|cx| cx.quit());
+                }
+            }
+        }
+    })
+    .detach();
+}
+
 fn spawn_url_scheme_loop(
     cx: &mut App,
     state: AppState,
     rx: async_channel::Receiver<String>,
 ) {
     cx.spawn(async move |cx: &mut AsyncApp| {
+        tracing::info!("url_scheme loop ready");
         while let Ok(url) = rx.recv().await {
+            tracing::info!(%url, "url_scheme drained URL from channel");
             let Some(key) = parse_activate_url(&url) else {
                 tracing::warn!(%url, "unrecognised URL scheme event");
                 continue;
@@ -2917,10 +3081,20 @@ fn spawn_url_scheme_loop(
 }
 
 /// Extract `key` from `leswitcheur://activate?key=LSWT-...`. Returns `None` for
-/// anything else.
+/// anything else. Tolerates a case-mismatched scheme (Windows shell sometimes
+/// passes the registered scheme name verbatim from the registry, e.g.
+/// `LeSwitcheur://...`) and a trailing slash on the host (Chrome normalises
+/// `scheme://activate?…` to `scheme://activate/?…` for some redirects).
 fn parse_activate_url(raw: &str) -> Option<String> {
-    let stripped = raw.strip_prefix(&format!("{LICENSE_URL_SCHEME}://"))?;
+    let scheme_prefix = format!("{LICENSE_URL_SCHEME}://");
+    let lower = raw.to_ascii_lowercase();
+    let stripped = if lower.starts_with(&scheme_prefix) {
+        &raw[scheme_prefix.len()..]
+    } else {
+        return None;
+    };
     let (host, rest) = stripped.split_once('?').unwrap_or((stripped, ""));
+    let host = host.trim_end_matches('/');
     if !host.eq_ignore_ascii_case("activate") {
         return None;
     }
@@ -2939,6 +3113,20 @@ fn parse_activate_url(raw: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Path of the rolling log file written by the Windows release build's
+/// `tracing` subscriber. Stdout/stderr are detached under `windows_subsystem
+/// = "windows"`, so this file is the only way to see what happened during
+/// URL forwards or activation flows.
+#[cfg(all(target_os = "windows", not(debug_assertions)))]
+fn log_file_path() -> std::path::PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("fr.gmbl.LeSwitcheur").join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("switcheur.log")
 }
 
 /// Verify the token, persist it + the originating key, flip `licensed`, and

@@ -137,7 +137,7 @@ pub struct DirSourceEntry {
 /// this machine. `Disabled` is always present and always available.
 pub fn detect_dir_sources() -> Vec<DirSourceEntry> {
     let zoxide_available = zoxide::detect().is_some();
-    vec![
+    let entries = vec![
         DirSourceEntry {
             id: DirSourceId::Disabled,
             available: true,
@@ -148,12 +148,31 @@ pub fn detect_dir_sources() -> Vec<DirSourceEntry> {
             available: zoxide_available,
             install_url: Some("https://github.com/ajeetdsouza/zoxide#installation"),
         },
+        // Spotlight only ships on macOS; omit the entry entirely elsewhere so
+        // the settings picker doesn't surface an option that can never become
+        // available.
+        #[cfg(target_os = "macos")]
         DirSourceEntry {
             id: DirSourceId::Spotlight,
-            available: cfg!(target_os = "macos"),
+            available: true,
             install_url: None,
         },
-    ]
+        // Background-walker over the Windows user folders. Surfaces directories
+        // only or directories + files depending on the variant.
+        #[cfg(target_os = "windows")]
+        DirSourceEntry {
+            id: DirSourceId::WindowsFolders,
+            available: true,
+            install_url: None,
+        },
+        #[cfg(target_os = "windows")]
+        DirSourceEntry {
+            id: DirSourceId::WindowsFiles,
+            available: true,
+            install_url: None,
+        },
+    ];
+    entries
 }
 
 /// Instantiate a concrete [`DirectorySource`] for the given id, or `None`
@@ -170,6 +189,18 @@ pub fn build_dir_source(id: DirSourceId) -> Option<Arc<dyn DirectorySource>> {
         }
         #[cfg(not(target_os = "macos"))]
         DirSourceId::Spotlight => None,
+        #[cfg(target_os = "windows")]
+        DirSourceId::WindowsFolders => Some(Arc::new(windows::search_walker::WalkerSource::new(
+            windows::search_walker::WalkerKind::Folders,
+        )) as Arc<dyn DirectorySource>),
+        #[cfg(target_os = "windows")]
+        DirSourceId::WindowsFiles => Some(Arc::new(windows::search_walker::WalkerSource::new(
+            windows::search_walker::WalkerKind::Files,
+        )) as Arc<dyn DirectorySource>),
+        #[cfg(not(target_os = "windows"))]
+        DirSourceId::WindowsFolders => None,
+        #[cfg(not(target_os = "windows"))]
+        DirSourceId::WindowsFiles => None,
     }
 }
 
@@ -208,10 +239,11 @@ pub use windows::{
     has_input_monitoring_permission, has_screen_recording_permission, is_system_reserved,
     key_window_frame, machine_id, onscreen_app_window_ids_excluding_pid, prompt_accessibility,
     prompt_input_monitoring, request_accessibility_prompt, request_screen_recording_permission,
-    set_open_with_popover_frame, startup, ExclusionCell, FocusedApp, FocusedAppCell,
-    HotkeyRecordSession, HotkeyService, HotkeyTapError, QuickTypeError, QuickTypeEvent,
-    QuickTypeService, RecencyService, RecordOutcome, ScrollDir, SystemSwitcherError,
-    SystemSwitcherEvent, SystemSwitcherService, WinPlatform, OPEN_WITH_POPOVER_WIDTH,
+    set_open_with_popover_frame, single_instance, startup, url_scheme, ExclusionCell, FocusedApp,
+    FocusedAppCell, HotkeyRecordSession, HotkeyService, HotkeyTapError, QuickTypeError,
+    QuickTypeEvent, QuickTypeService, RecencyService, RecordOutcome, ScrollDir,
+    SystemSwitcherError, SystemSwitcherEvent, SystemSwitcherService, WinPlatform,
+    OPEN_WITH_POPOVER_WIDTH,
 };
 
 #[cfg(target_os = "windows")]
@@ -246,9 +278,32 @@ pub fn cached_programs() -> Vec<switcheur_core::ProgramRef> {
     windows::programs::list_programs()
 }
 
+#[cfg(target_os = "windows")]
+pub fn prefetch_programs() {
+    windows::programs::prefetch_async();
+}
+
+#[cfg(target_os = "macos")]
+pub fn prefetch_programs() {
+    macos::programs::prefetch_sync();
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn prefetch_programs() {}
+
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn cached_programs() -> Vec<switcheur_core::ProgramRef> {
     Vec::new()
+}
+
+/// Re-scan the program catalogue if the source on disk has changed since the
+/// last snapshot. macOS shells out to a quick `stat` of `/Applications` and
+/// friends; Windows is a no-op for now (the Start Menu walker refreshes on
+/// its own background tick — refreshing on hotkey press would block the
+/// caller behind COM init).
+pub fn refresh_programs_if_changed() {
+    #[cfg(target_os = "macos")]
+    macos::programs::refresh_if_changed();
 }
 
 /// Resolve a cached PNG path for the given app bundle. `None` means the
@@ -258,7 +313,12 @@ pub fn icon_for_bundle(bundle_path: &str, bundle_id: &str) -> Option<std::path::
     macos::icons::icon_for_bundle(bundle_path, bundle_id)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn icon_for_bundle(bundle_path: &str, bundle_id: &str) -> Option<std::path::PathBuf> {
+    windows::icons::icon_for_bundle(bundle_path, bundle_id)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn icon_for_bundle(_bundle_path: &str, _bundle_id: &str) -> Option<std::path::PathBuf> {
     None
 }
@@ -270,7 +330,12 @@ pub fn icon_for_path(path: &std::path::Path, is_dir: bool) -> Option<std::path::
     macos::icons::icon_for_path(path, is_dir)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn icon_for_path(path: &std::path::Path, is_dir: bool) -> Option<std::path::PathBuf> {
+    windows::icons::icon_for_path(path, is_dir)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn icon_for_path(_path: &std::path::Path, _is_dir: bool) -> Option<std::path::PathBuf> {
     None
 }

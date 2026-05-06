@@ -87,6 +87,15 @@ impl HotkeyService {
         self.rx.clone()
     }
 
+    /// Sender into the same `HotkeyEvent` channel as `trigger`. Lets
+    /// callers (e.g. the tray-icon drain thread) trigger the switcher
+    /// without holding the whole `HotkeyService` — which embeds a
+    /// `GlobalHotKeyManager` whose internal HWND makes it `!Send` on
+    /// Windows.
+    pub fn sender(&self) -> Sender<HotkeyEvent> {
+        self.tx.clone()
+    }
+
     pub fn trigger(&self) {
         let _ = self.tx.send_blocking(HotkeyEvent::Pressed);
     }
