@@ -214,10 +214,12 @@ fn run_match_tap(
             }
             CGEventType::KeyUp => {
                 let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-                if keycode == target_keycode {
-                    fired_cb.store(false, Ordering::Relaxed);
-                    // Drop the matching KeyUp too, otherwise Spotlight may
-                    // see an orphan KeyUp depending on its own state machine.
+                // Only drop the KeyUp that pairs with a KeyDown we previously
+                // dropped. Without the `fired` gate we'd swallow every plain
+                // KeyUp for the bound keycode (e.g. unmodified Space when
+                // hotkey is Ctrl+Space), leaving downstream apps thinking the
+                // key is still held — breaks YouTube play/pause and similar.
+                if keycode == target_keycode && fired_cb.swap(false, Ordering::Relaxed) {
                     return CallbackResult::Drop;
                 }
                 CallbackResult::Keep
