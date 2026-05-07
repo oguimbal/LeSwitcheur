@@ -44,7 +44,10 @@ PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
 OutputDir=..\..\dist
-OutputBaseFilename=LeSwitcheur-v{#AppVersion}-windows-x86_64-setup
+; Stable filename (no version, no arch suffix) so the canonical download URL
+;   https://github.com/<owner>/LeSwitcheur/releases/latest/download/LeSwitcheur-setup.exe
+; works across releases. Mirrors the macOS .dmg artefact's naming.
+OutputBaseFilename=LeSwitcheur-setup
 SetupIconFile=AppIcon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 UninstallDisplayName={#AppName}

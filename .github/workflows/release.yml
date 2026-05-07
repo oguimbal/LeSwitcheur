@@ -181,7 +181,9 @@ jobs:
           }
           & $iscc /DAppVersion=$ver bundle\windows\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "iscc failed: $LASTEXITCODE" }
-          $out = "dist\LeSwitcheur-$tag-windows-x86_64-setup.exe"
+          # Stable filename (no version) so /releases/latest/download/<name>
+          # resolves across versions — matches the macOS LeSwitcheur.dmg.
+          $out = "dist\LeSwitcheur-setup.exe"
           if (-not (Test-Path $out)) { throw "expected $out" }
           Get-Item $out | Format-List Name,Length,LastWriteTime
 
@@ -190,7 +192,7 @@ jobs:
         with:
           files: |
             dist/LeSwitcheur-${{ github.ref_name }}-windows-x86_64-portable.zip
-            dist/LeSwitcheur-${{ github.ref_name }}-windows-x86_64-setup.exe
+            dist/LeSwitcheur-setup.exe
           generate_release_notes: true
           draft: false
           prerelease: false
