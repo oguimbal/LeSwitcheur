@@ -82,6 +82,7 @@ const LICENSE_URL_SCHEME: &str = "leswitcheur";
 /// `CFBundleShortVersionString` to our own build. If the installed copy is
 /// newer, the user has dropped in an updated `.app` while we were running —
 /// we quit so their next launch starts a fresh instance of the new binary.
+#[cfg(target_os = "macos")]
 const UPDATE_DRIFT_POLL: Duration = Duration::from_secs(60);
 /// Re-run the remote update check this often. Paired with the one-shot check
 /// at startup so long-lived LSUIElement processes still notice new releases.
@@ -473,7 +474,10 @@ fn main() -> Result<()> {
         spawn_panel_watch_loop(cx, state.clone());
         spawn_update_checker(cx, state.clone());
         spawn_url_scheme_loop(cx, state.clone(), url_rx);
+        #[cfg(target_os = "macos")]
         spawn_install_drift_watcher(cx, state);
+        #[cfg(not(target_os = "macos"))]
+        let _ = state;
     });
 
     Ok(())
@@ -3391,16 +3395,38 @@ fn blocking_update_check() -> Option<UpdateInfo> {
 
 fn parse_update_info(v: &serde_json::Value) -> Option<UpdateInfo> {
     let version = semver::Version::parse(v.get("version")?.as_str()?).ok()?;
-    let url = v.get("url")?.as_str()?.to_owned();
+    // Newer manifests carry per-platform URLs under `urls.<platform>`.
+    // Older shape (single `url` pointing at the macOS DMG) is still accepted
+    // for clients that haven't seen the field yet.
+    let platform_key = if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "macos"
+    };
+    let url = v
+        .get("urls")
+        .and_then(|u| u.get(platform_key))
+        .and_then(|s| s.as_str())
+        .map(str::to_owned)
+        .or_else(|| v.get("url").and_then(|s| s.as_str()).map(str::to_owned))?;
     if url.is_empty() {
         return None;
     }
     Some(UpdateInfo { version, url })
 }
 
-/// Kick off the DMG download on a worker thread. Banner transitions to
-/// `Downloading` immediately (the view already did this optimistically on
-/// click); on completion we open Finder on the DMG and flip to `Ready`.
+/// Kick off the installer download on a worker thread. Banner transitions
+/// to `Downloading` immediately (the view already did this optimistically on
+/// click); on completion the platform-specific apply step runs and the app
+/// quits so the new version can take over.
+///
+/// macOS: opens Finder on the DMG (user mounts + drags), flips to `Ready`,
+/// quits 2 s later.
+///
+/// Windows: spawns the Inno Setup `.exe` with `/SILENT`. `CloseApplications=force`
+/// in the `.iss` kills us via Restart Manager; `RestartApplications=yes`
+/// re-spawns the new build. We `cx.quit()` ourselves immediately to avoid
+/// racing the named-mutex held by `single_instance.rs`.
 fn start_update_download(entity: Entity<SwitcherView>, state: AppState, cx: &mut App) {
     let info = match state.pending_update.borrow().clone() {
         Some(info) => info,
@@ -3416,18 +3442,24 @@ fn start_update_download(entity: Entity<SwitcherView>, state: AppState, cx: &mut
         let url = info.url.clone();
         let version = info.version.clone();
         std::thread::spawn(move || {
-            let _ = tx.send_blocking(blocking_download_dmg(&url, &version));
+            let _ = tx.send_blocking(blocking_download_asset(&url, &version));
         });
         let path = rx.recv().await.ok().flatten();
-        let opened = cx.update(|cx| match path {
+        let applied = cx.update(|cx| match path {
             Some(p) => {
-                if let Err(e) = open::that(&p) {
-                    tracing::warn!("open DMG: {e}");
+                let ok = apply_downloaded_update(&p);
+                if ok {
+                    *state.update_stage.borrow_mut() = UpdateBannerState::Ready;
+                    let _ = entity.update(cx, |v, cx| {
+                        v.set_update_banner(UpdateBannerState::Ready, cx)
+                    });
+                } else {
+                    *state.update_stage.borrow_mut() = UpdateBannerState::Available;
+                    let _ = entity.update(cx, |v, cx| {
+                        v.set_update_banner(UpdateBannerState::Available, cx)
+                    });
                 }
-                *state.update_stage.borrow_mut() = UpdateBannerState::Ready;
-                let _ = entity
-                    .update(cx, |v, cx| v.set_update_banner(UpdateBannerState::Ready, cx));
-                true
+                ok
             }
             None => {
                 // Revert to Available so the user can retry.
@@ -3438,7 +3470,7 @@ fn start_update_download(entity: Entity<SwitcherView>, state: AppState, cx: &mut
                 false
             }
         });
-        if opened {
+        if applied {
             executor.timer(Duration::from_secs(2)).await;
             cx.update(|cx| cx.quit());
         }
@@ -3446,13 +3478,60 @@ fn start_update_download(entity: Entity<SwitcherView>, state: AppState, cx: &mut
     .detach();
 }
 
-fn blocking_download_dmg(url: &str, version: &semver::Version) -> Option<std::path::PathBuf> {
+/// Run the platform-specific "apply update" step on a freshly downloaded
+/// installer. Returns true on success (caller flips the banner to `Ready`
+/// and schedules `cx.quit`).
+fn apply_downloaded_update(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(e) = open::that(path) {
+            tracing::warn!("open DMG: {e}");
+            return false;
+        }
+        true
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // /SILENT shows a small progress dialog but no wizard; combined with
+        // CloseApplications=force + RestartApplications=yes in installer.iss
+        // this kills us, swaps the .exe, and relaunches.
+        match std::process::Command::new(path)
+            .args(["/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"])
+            .spawn()
+        {
+            Ok(_child) => true,
+            Err(e) => {
+                tracing::warn!("spawn installer {}: {e}", path.display());
+                false
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Download the release asset to `~/Downloads/LeSwitcheur-{version}.{ext}`.
+/// Extension is taken from the URL itself so the same code path serves the
+/// macOS DMG and the Windows Inno Setup `.exe` without a platform branch.
+fn blocking_download_asset(url: &str, version: &semver::Version) -> Option<std::path::PathBuf> {
     let dest_dir = update_download_dir()?;
     if let Err(e) = std::fs::create_dir_all(&dest_dir) {
         tracing::warn!("create update download dir: {e}");
         return None;
     }
-    let filename = format!("LeSwitcheur-{version}.dmg");
+    let ext = url
+        .rsplit('.')
+        .next()
+        .filter(|e| !e.is_empty() && e.len() <= 5)
+        .unwrap_or(if cfg!(target_os = "windows") {
+            "exe"
+        } else {
+            "dmg"
+        });
+    let filename = format!("LeSwitcheur-{version}.{ext}");
     let dest = dest_dir.join(&filename);
 
     let agent = ureq::AgentBuilder::new()
@@ -3467,7 +3546,7 @@ fn blocking_download_dmg(url: &str, version: &semver::Version) -> Option<std::pa
         }
     };
     let mut reader = resp.into_reader();
-    let tmp = dest.with_extension("dmg.part");
+    let tmp = dest.with_extension(format!("{ext}.part"));
     let mut file = match std::fs::File::create(&tmp) {
         Ok(f) => f,
         Err(e) => {
@@ -3476,12 +3555,12 @@ fn blocking_download_dmg(url: &str, version: &semver::Version) -> Option<std::pa
         }
     };
     if let Err(e) = std::io::copy(&mut reader, &mut file) {
-        tracing::warn!("write DMG: {e}");
+        tracing::warn!("write installer: {e}");
         return None;
     }
     drop(file);
     if let Err(e) = std::fs::rename(&tmp, &dest) {
-        tracing::warn!("rename DMG: {e}");
+        tracing::warn!("rename installer: {e}");
         return None;
     }
     tracing::info!(path = %dest.display(), "update downloaded");
@@ -3502,6 +3581,12 @@ fn update_download_dir() -> Option<std::path::PathBuf> {
 /// running, and we need to stop so their next launch spawns a fresh process
 /// of the new binary (LaunchServices would otherwise just reactivate us,
 /// same bundle id).
+///
+/// macOS-only. The Windows installer relies on Restart Manager
+/// (`CloseApplications=force` + `RestartApplications=yes` in `installer.iss`)
+/// so the running process is closed and re-spawned by the installer itself —
+/// no drift watcher needed.
+#[cfg(target_os = "macos")]
 fn spawn_install_drift_watcher(cx: &mut App, state: AppState) {
     let local = match semver::Version::parse(env!("CARGO_PKG_VERSION")) {
         Ok(v) => v,
@@ -3524,6 +3609,7 @@ fn spawn_install_drift_watcher(cx: &mut App, state: AppState) {
     let _ = state;
 }
 
+#[cfg(target_os = "macos")]
 fn installed_version_is_newer(local: &semver::Version) -> bool {
     let path = std::path::Path::new("/Applications/LeSwitcheur.app/Contents/Info.plist");
     let content = match std::fs::read_to_string(path) {

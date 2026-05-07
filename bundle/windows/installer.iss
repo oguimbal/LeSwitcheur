@@ -60,7 +60,11 @@ LicenseFile=..\..\LICENSE
 ; crates/switcheur-platform/src/windows/single_instance.rs would refuse the
 ; overwrite and the installer would error out on upgrade.
 CloseApplications=force
-RestartApplications=no
+; Re-launch us after a /SILENT auto-update install. Restart Manager closes
+; the running process via CloseApplications=force above, replaces the .exe,
+; then re-spawns it. Without this the user is left with no running app
+; after clicking the in-panel "Update" button.
+RestartApplications=yes
 MinVersion=10.0
 
 ; TODO(signing): when an EV/OV cert lands, add
