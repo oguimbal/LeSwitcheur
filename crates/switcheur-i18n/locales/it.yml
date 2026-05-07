@@ -84,7 +84,6 @@ launcher:
   open_url: "Apri URL"
 
 audio:
-  now_playing: "In riproduzione"
   section_header: "In riproduzione"
 
 keys:

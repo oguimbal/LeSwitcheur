@@ -454,10 +454,9 @@ impl Item {
                 }
             }
             // For the audio row the secondary line prefers, in order: the
-            // MediaRemote artist (e.g. "Spotify · The Beatles"), the resolved
-            // tab's host (e.g. "youtube.com"), or the app name when neither
-            // is available. The renderer also folds in an i18n "Now Playing"
-            // string when nothing better is available.
+            // MediaRemote artist (e.g. "The Beatles"), the resolved tab's
+            // host (e.g. "youtube.com"), or the app name when neither is
+            // available.
             Item::CurrentlyPlaying(r) => r
                 .track_artist
                 .as_deref()

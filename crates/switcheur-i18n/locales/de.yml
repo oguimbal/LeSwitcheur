@@ -84,7 +84,6 @@ launcher:
   open_url: "URL öffnen"
 
 audio:
-  now_playing: "Wird abgespielt"
   section_header: "Wird abgespielt"
 
 keys:

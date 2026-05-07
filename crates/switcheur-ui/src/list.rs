@@ -25,13 +25,7 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
         Item::OpenUrl(_) => tr("launcher.open_url"),
         _ => item.primary().to_string(),
     };
-    // App-only audio row has no natural secondary text (no host, no window
-    // title); show a localised "Now Playing" hint so the row reads as
-    // deliberate rather than half-blank.
-    let secondary = match item {
-        Item::CurrentlyPlaying(r) if r.browser_tab.is_none() => Some(tr("audio.now_playing")),
-        _ => item.secondary().map(str::to_string),
-    };
+    let secondary = item.secondary().map(str::to_string);
     let minimized = item.is_minimized();
 
     let row_bg = if selected {
