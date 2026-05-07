@@ -240,7 +240,7 @@ If any signing/notarisation secret is missing, CI either falls back to ad-hoc (s
 
 ### Update manifest
 
-`crates/switcheur/src/main.rs:blocking_update_check` poll `https://leswitcheur.app/api/updates/latest` for `{ version, url, ... }`. After CI publish, server-side manifest must be bumped to advertise new GitHub Release `.dmg` URL — otherwise running install never see update. Not yet automated.
+`crates/switcheur/src/main.rs:blocking_update_check` poll `https://leswitcheur.app/api/updates/latest` for `{ version, url, ... }`. The `leswitcheur.app` backend derives this from the GitHub `releases/latest` endpoint at request time, so a successful CI publish is enough — no manual manifest bump needed. Download URLs use `releases/latest/download/...` which GitHub redirects to the current tag.
 
 ## Not in v0 (roadmap)
 
