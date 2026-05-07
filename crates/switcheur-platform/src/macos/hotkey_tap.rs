@@ -461,6 +461,8 @@ mod tests {
         assert!(is_system_reserved(&spec(&["cmd"], "Space")));
         assert!(is_system_reserved(&spec(&["alt", "cmd"], "space")));
         assert!(is_system_reserved(&spec(&["cmd", "alt"], "space")));
+        assert!(is_system_reserved(&spec(&["ctrl"], "space")));
+        assert!(is_system_reserved(&spec(&["ctrl", "shift"], "space")));
         assert!(is_system_reserved(&spec(&["cmd"], "tab")));
         assert!(is_system_reserved(&spec(&["cmd", "shift"], "tab")));
         assert!(is_system_reserved(&spec(&["cmd"], "`")));

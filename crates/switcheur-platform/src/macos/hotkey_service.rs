@@ -28,7 +28,7 @@ enum Inner {
 }
 
 pub struct HotkeyService {
-    inner: Mutex<Inner>,
+    inner: Mutex<Option<Inner>>,
     tx_out: Sender<HotkeyEvent>,
     rx_out: Receiver<HotkeyEvent>,
 }
@@ -43,7 +43,7 @@ impl HotkeyService {
         let inner = build_inner(spec, im_granted)?;
         spawn_bridge(&inner, tx_out.clone());
         Ok(Self {
-            inner: Mutex::new(inner),
+            inner: Mutex::new(Some(inner)),
             tx_out,
             rx_out,
         })
@@ -68,14 +68,35 @@ impl HotkeyService {
     }
 
     /// Swap the bound hotkey. May change the underlying variant
-    /// (Carbon ↔ Tap) based on the new spec + IM grant state. Tears down
-    /// the previous inner before installing the new one; the bridge thread
-    /// of the old inner exits naturally when its receiver closes.
+    /// (Carbon ↔ Tap) based on the new spec + IM grant state.
+    ///
+    /// Carbon→Carbon must go through the existing `MacHotkeyService` —
+    /// `GlobalHotKeyManager::new()` fails with ENOENT on a second instance
+    /// in the same process (Carbon installs a process-wide event handler),
+    /// so building a fresh inner while the old one is still alive blows up
+    /// the registration and silently keeps the previous binding active.
     pub fn reregister(&self, spec: &HotkeySpec, im_granted: bool) -> Result<()> {
+        let want_tap = is_system_reserved(spec) && im_granted;
+        {
+            let guard = self.inner.lock().unwrap();
+            if let Some(Inner::Carbon(svc)) = guard.as_ref() {
+                if !want_tap {
+                    return svc.reregister(spec);
+                }
+            }
+        }
+        // Variant change. Drop the old inner *before* constructing the new
+        // one — `GlobalHotKeyManager::new()` fails with ENOENT on a second
+        // instance in the same process (Carbon installs a process-wide
+        // event handler), so two `MacHotkeyService`s can never coexist.
+        // The bridge thread of the old inner exits naturally when its
+        // receiver closes on drop.
+        {
+            let _dropped = self.inner.lock().unwrap().take();
+        }
         let new_inner = build_inner(spec, im_granted)?;
         spawn_bridge(&new_inner, self.tx_out.clone());
-        let mut guard = self.inner.lock().unwrap();
-        *guard = new_inner;
+        *self.inner.lock().unwrap() = Some(new_inner);
         Ok(())
     }
 
@@ -83,7 +104,7 @@ impl HotkeyService {
     /// actively intercepting a system-reserved combo). Used by the host to
     /// decide whether a missing Input Monitoring grant is a real problem.
     pub fn is_tap(&self) -> bool {
-        matches!(*self.inner.lock().unwrap(), Inner::Tap(_))
+        matches!(self.inner.lock().unwrap().as_ref(), Some(Inner::Tap(_)))
     }
 }
 

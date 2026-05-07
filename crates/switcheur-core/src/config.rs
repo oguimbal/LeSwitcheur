@@ -173,6 +173,8 @@ impl HotkeySpec {
             (mods.as_slice(), key.as_str()),
             (["cmd"], "space")
                 | (["alt", "cmd"], "space")
+                | (["ctrl"], "space")
+                | (["ctrl", "shift"], "space")
                 | (["cmd"], "tab")
                 | (["cmd", "shift"], "tab")
                 | (["cmd"], "`")
