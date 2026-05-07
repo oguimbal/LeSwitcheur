@@ -646,7 +646,64 @@ impl SwitcherView {
 
     // --- List navigation ---
 
-    fn on_select_prev(&mut self, _: &SelectPrev, _: &mut Window, cx: &mut Context<Self>) {
+    /// True when the search field currently owns keyboard focus. The
+    /// switcher treats the input as one of the navigable positions: when it
+    /// is focused, arrow keys blur it and move into the result list; when
+    /// it isn't, arrow keys at the row closest to the input refocus it.
+    fn is_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.input.read(cx).focus_handle(cx).is_focused(window)
+    }
+
+    /// Move keyboard focus off the search field and onto the SwitcherView's
+    /// own focus handle so subsequent arrow keys land on the "Switcher"
+    /// key context (and the Input's caret-motion bindings stop matching).
+    fn blur_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
+    }
+
+    /// Move focus back to the search field and select its full content so a
+    /// keystroke replaces the previous query — same affordance the user gets
+    /// from a fresh switcher session.
+    fn refocus_input_select_all(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let h = self.input.read(cx).focus_handle(cx);
+        h.focus(window, cx);
+        window.dispatch_action(
+            Box::new(gpui_component::input::SelectAll),
+            cx,
+        );
+    }
+
+    /// True when the active section is touching the input from below (the
+    /// windows list directly under the search field, or the dirs pane to
+    /// its right) and the cursor sits on its first row — the position from
+    /// which Up should refocus the input.
+    fn at_top_of_section_below_input(&self) -> bool {
+        match self.state.active_section() {
+            Section::Windows => self.state.selected_idx() == 0,
+            Section::Dirs => self.state.selected_dir_idx() == 0,
+            _ => false,
+        }
+    }
+
+    /// Mirror of [`Self::at_top_of_section_below_input`] for sections
+    /// rendered above the input (programs / currently-playing). True when
+    /// the cursor sits on the row that visually abuts the search field, so
+    /// Down should refocus the input.
+    fn at_bottom_of_section_above_input(&self) -> bool {
+        match self.state.active_section() {
+            Section::Programs => {
+                let n = self.state.filtered_programs().len();
+                n > 0 && self.state.selected_program_idx() + 1 == n
+            }
+            Section::Audio => {
+                let n = self.state.currently_playing().len();
+                n > 0 && self.state.selected_audio_idx() + 1 == n
+            }
+            _ => false,
+        }
+    }
+
+    fn on_select_prev(&mut self, _: &SelectPrev, window: &mut Window, cx: &mut Context<Self>) {
         if self.nag_phase != NagPhase::Hidden {
             return;
         }
@@ -656,11 +713,27 @@ impl SwitcherView {
             cx.notify();
             return;
         }
+        if self.is_input_focused(window, cx) {
+            // Treat the input as a focusable: Up blurs it and moves the list
+            // cursor up by one (which usually advances out of Windows[0]
+            // into the closest section above, when one is visible).
+            self.blur_input(window, cx);
+            self.select_prev_external(cx);
+            self.emit_open_with_if_dirs(cx);
+            return;
+        }
+        if self.at_top_of_section_below_input() {
+            // First row of the section closest to the input from below —
+            // Up moves "into" the input rather than wrapping or jumping
+            // over to a section above.
+            self.refocus_input_select_all(window, cx);
+            return;
+        }
         self.select_prev_external(cx);
         self.emit_open_with_if_dirs(cx);
     }
 
-    fn on_select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_select_next(&mut self, _: &SelectNext, window: &mut Window, cx: &mut Context<Self>) {
         if self.nag_phase != NagPhase::Hidden {
             return;
         }
@@ -668,6 +741,16 @@ impl SwitcherView {
             self.state.open_with_next(self.current_open_with_count());
             cx.emit(SwitcherViewEvent::OpenWithStateChanged);
             cx.notify();
+            return;
+        }
+        if self.is_input_focused(window, cx) {
+            self.blur_input(window, cx);
+            self.select_next_external(cx);
+            self.emit_open_with_if_dirs(cx);
+            return;
+        }
+        if self.at_bottom_of_section_above_input() {
+            self.refocus_input_select_all(window, cx);
             return;
         }
         self.select_next_external(cx);
@@ -907,7 +990,7 @@ impl SwitcherView {
 
     // --- Text editing ---
 
-    fn on_move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_move_left(&mut self, _: &MoveLeft, window: &mut Window, cx: &mut Context<Self>) {
         // Left while the popover is focused exits the popover and returns
         // focus to the dir row. Keeps the input caret untouched.
         if self.state.open_with_index().is_some() {
@@ -916,23 +999,29 @@ impl SwitcherView {
             cx.notify();
             return;
         }
-        // When the dirs pane is focused, Left snaps focus back to the
-        // windows pane.
+        // While the search field has focus, Left is plain caret motion —
+        // hand off to the Input's own MoveLeft binding via propagation.
+        if self.is_input_focused(window, cx) {
+            cx.propagate();
+            return;
+        }
+        // List has focus. From the dirs pane, Left snaps back to the
+        // windows pane (the symmetric counterpart of Right going the other
+        // way). Anywhere else there's nothing to the left of the cursor
+        // position, so propagate (and the Input would only catch it if it
+        // were focused, which we've already ruled out).
         if self.state.active_section() == Section::Dirs {
             self.state.focus_windows();
             cx.emit(SwitcherViewEvent::OpenWithStateChanged);
             cx.notify();
             return;
         }
-        // Otherwise the Input widget already handled the caret motion via
-        // its own keybinding — this action only ran because we're in a
-        // non-text-editing pane.
         cx.propagate();
     }
 
-    fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
-        // In the Dirs pane, Right enters the "Open With" popover when one
-        // is available. Activates keyboard focus on its first row.
+    fn on_move_right(&mut self, _: &MoveRight, window: &mut Window, cx: &mut Context<Self>) {
+        // In the Dirs pane (input not focused), Right enters the "Open
+        // With" popover when one is available.
         let owc = self.current_open_with_count();
         if self.state.active_section() == Section::Dirs
             && owc > 0
@@ -943,15 +1032,25 @@ impl SwitcherView {
             cx.notify();
             return;
         }
-        // Caret-at-end → focus dirs pane (when visible). Reading
-        // `read(cx).cursor()` against `value().len()` matches the Input
-        // widget's byte-offset cursor convention.
-        let cursor = self.input.read(cx).cursor();
-        let len = self.input.read(cx).value().len();
-        if self.state.active_section() != Section::Dirs
-            && self.state.dirs_visible()
-            && cursor >= len
-        {
+        if self.is_input_focused(window, cx) {
+            // Caret at end of query + dirs available → blur the input and
+            // hop into the dirs pane. Anywhere else, Right is plain caret
+            // motion and we let the Input's own binding move the cursor.
+            let cursor = self.input.read(cx).cursor();
+            let len = self.input.read(cx).value().len();
+            if cursor >= len && self.state.dirs_visible() {
+                self.blur_input(window, cx);
+                self.state.focus_dirs();
+                cx.emit(SwitcherViewEvent::OpenWithStateChanged);
+                cx.notify();
+                return;
+            }
+            cx.propagate();
+            return;
+        }
+        // List has focus. Outside the dirs pane, Right hops into it when
+        // it's visible — same shortcut as the input-focused path above.
+        if self.state.active_section() != Section::Dirs && self.state.dirs_visible() {
             self.state.focus_dirs();
             cx.emit(SwitcherViewEvent::OpenWithStateChanged);
             cx.notify();

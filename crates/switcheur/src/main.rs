@@ -194,6 +194,36 @@ fn main() -> Result<()> {
 
     let mut config = Config::load_or_default();
     let show_onboarding = !config.onboarding_completed;
+    // Fresh installs default to `Zoxide` (see `Config::default`) so existing
+    // zoxide users keep their pane out of the box. On a machine without
+    // zoxide that means the dirs pane stays hidden until the user discovers
+    // the picker — so before onboarding completes, swap in the first source
+    // that's actually available on this machine (Spotlight on macOS,
+    // WindowsFolders on Windows, …) and persist it.
+    if show_onboarding {
+        let entries = detect_dir_sources();
+        let configured_available = entries
+            .iter()
+            .any(|e| e.id == config.dir_source && e.available);
+        if !configured_available {
+            let pick = entries
+                .iter()
+                .find(|e| e.id != DirSourceId::Disabled && e.available)
+                .map(|e| e.id)
+                .unwrap_or(DirSourceId::Disabled);
+            if pick != config.dir_source {
+                tracing::info!(
+                    from = ?config.dir_source,
+                    to = ?pick,
+                    "configured dir source unavailable on fresh install, switching default",
+                );
+                config.dir_source = pick;
+                if let Err(e) = config.save() {
+                    tracing::warn!("persist initial dir_source: {e:#}");
+                }
+            }
+        }
+    }
     // Manual cold launches (Finder, `open -a`, dev runs) open the switcher
     // immediately — same affordance as pressing the hotkey. Two exceptions:
     // auto-launched at login (plist carries `LAUNCHED_AT_LOGIN_ARG`), where we
@@ -353,14 +383,19 @@ fn main() -> Result<()> {
         // on-blur and Escape stop killing the process.
         cx.set_quit_mode(gpui::QuitMode::Explicit);
 
-        install_key_bindings(cx);
-
         // Initialize gpui-component (theme registry, Input keybindings,
         // popovers, ...). Must run before any view that uses bundled widgets
         // is constructed. Then push our palette into the global theme so the
         // Input widget renders with our colors.
         gpui_component::init(cx);
         switcheur_ui::theme_adapter::apply(&theme_for(config.appearance), cx);
+
+        // Bind switcher keys *after* gpui-component so our bindings live at
+        // a higher index in the keymap. With matched bindings sorted by
+        // depth desc then index desc, ours win at "Input" context — which
+        // is what lets Right-at-end-of-query hop into the dirs pane instead
+        // of being swallowed by the Input's caret motion.
+        install_key_bindings(cx);
 
         // Recency tracker + observers. App-level observer is always on; the
         // window-level observer is started lazily if the user picked
@@ -641,11 +676,21 @@ fn install_key_bindings(cx: &mut App) {
         // own subscription so the Enter key lands either way.
         KeyBinding::new("enter", Confirm, Some("Switcher")),
         KeyBinding::new("escape", Dismiss, Some("Switcher")),
-        // Pane-aware caret motion. Falls through via cx.propagate() to
-        // Input's MoveLeft/MoveRight when the popover/dirs are not
-        // involved.
+        // The search Input is treated as one navigable position inside the
+        // switcher. Up/Down/Left/Right are bound at *both* "Switcher" (when
+        // the list takes over after a blur) and "Input" (when the search
+        // field has keyboard focus). Without the "Input"-context bindings,
+        // `gpui_component::Input`'s own caret-motion bindings (registered
+        // earlier with depth 1) shadow ours and the user can't navigate out
+        // of the search field with arrows. Our handlers `cx.propagate()`
+        // exactly when the Input's caret motion should still happen, so
+        // Left/Right keep editing text in the middle of the query.
+        KeyBinding::new("up", SelectPrev, Some("Input")),
+        KeyBinding::new("down", SelectNext, Some("Input")),
         KeyBinding::new("left", MoveLeft, Some("Switcher")),
         KeyBinding::new("right", MoveRight, Some("Switcher")),
+        KeyBinding::new("left", MoveLeft, Some("Input")),
+        KeyBinding::new("right", MoveRight, Some("Input")),
         // Space → toggle play/pause when an audio row is selected.
         KeyBinding::new("space", AudioToggle, Some("Switcher")),
         // Cycle keyboard focus to/from the right-side dirs pane.
