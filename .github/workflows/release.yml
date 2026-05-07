@@ -136,10 +136,11 @@ jobs:
           prerelease: false
 
   build-windows:
-    # Windows POC build: produces a stripped release `.exe` zipped with no
-    # extra runtime DLLs (statically linked MSVCRT via `+crt-static`). No
-    # signing yet — early Windows builds ship as unsigned previews until we
-    # set up SignTool with an EV cert. The job appends its asset to the
+    # Windows build: produces (1) a portable `.zip` (stripped release `.exe`
+    # statically linked against MSVCRT, no extra runtime DLLs, no installer)
+    # and (2) an Inno Setup `.exe` installer (per-user, no UAC). Neither is
+    # signed yet — early Windows builds ship as unsigned previews until we
+    # set up SignTool with an EV cert. The job appends both assets to the
     # same GitHub Release the macOS job creates (softprops merges by tag).
     runs-on: windows-latest
     permissions:
@@ -154,22 +155,42 @@ jobs:
       - name: Build release binary
         run: cargo build --release -p switcheur
 
-      - name: Stage artifact
+      - name: Stage portable zip
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           $tag = "${{ github.ref_name }}"
-          $stage = "dist\LeSwitcheur-$tag-windows-x86_64"
+          $stage = "dist\LeSwitcheur-$tag-windows-x86_64-portable"
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           Copy-Item target\release\switcheur.exe "$stage\LeSwitcheur.exe"
           Copy-Item LICENSE "$stage\LICENSE"
           Copy-Item README.md "$stage\README.md"
-          Compress-Archive -Path "$stage\*" -DestinationPath "dist\LeSwitcheur-$tag-windows-x86_64.zip" -Force
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist\LeSwitcheur-$tag-windows-x86_64-portable.zip" -Force
 
-      - name: Publish GitHub Release (Windows zip)
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"      # e.g. "v0.1.15"
+          $ver = $tag.TrimStart('v')           # "0.1.15"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\iscc.exe"
+          if (-not (Test-Path $iscc)) {
+              # Inno Setup 6 is preinstalled on the windows-latest runner image.
+              # Failing loud here is intentional: a silent skip would mean a
+              # release without the installer, which is worse than a CI failure.
+              throw "ISCC not found at $iscc - runner image changed?"
+          }
+          & $iscc /DAppVersion=$ver bundle\windows\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed: $LASTEXITCODE" }
+          $out = "dist\LeSwitcheur-$tag-windows-x86_64-setup.exe"
+          if (-not (Test-Path $out)) { throw "expected $out" }
+          Get-Item $out | Format-List Name,Length,LastWriteTime
+
+      - name: Publish GitHub Release (Windows artifacts)
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/LeSwitcheur-${{ github.ref_name }}-windows-x86_64.zip
+          files: |
+            dist/LeSwitcheur-${{ github.ref_name }}-windows-x86_64-portable.zip
+            dist/LeSwitcheur-${{ github.ref_name }}-windows-x86_64-setup.exe
           generate_release_notes: true
           draft: false
           prerelease: false
