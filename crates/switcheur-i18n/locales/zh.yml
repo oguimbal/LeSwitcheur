@@ -161,3 +161,11 @@ onboarding:
     body: "LeSwitcheur 是免费的。购买许可证(自愿付费,一次性)可支持项目并隐藏支持提示。"
     buy: "购买许可证"
     later: "稍后"
+
+local_sources:
+  active: "进行中"
+  waiting: "需要处理"
+  idle: "空闲"
+  compacting: "压缩中"
+  unknown: "状态未知"
+  focus_failed: "无法激活会话。AgentsMon 可能已停止，或会话已结束。"

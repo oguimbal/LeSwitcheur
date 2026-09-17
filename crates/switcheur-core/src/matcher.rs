@@ -49,6 +49,56 @@ impl FuzzyMatcher {
         let mut out = Vec::with_capacity(items.len());
 
         for item in items {
+            if let Item::LocalSource(source) = item {
+                let fields = source.search_fields();
+                let mut total = 0u32;
+                let mut matched = true;
+                let mut highlights = Vec::new();
+                for word in query.split_whitespace() {
+                    let word = Pattern::parse(word, CaseMatching::Smart, Normalization::Smart);
+                    let mut best = None;
+                    for (index, (field, weight)) in fields.iter().enumerate() {
+                        if field.is_empty() {
+                            continue;
+                        }
+                        indices.clear();
+                        if let Some(score) = word.indices(
+                            Utf32Str::new(field, &mut haystack_buf),
+                            &mut self.matcher,
+                            &mut indices,
+                        ) {
+                            let weighted = score.saturating_mul(*weight) / 100;
+                            if best.as_ref().is_none_or(|(s, _)| weighted > *s) {
+                                best = Some((
+                                    weighted,
+                                    if index == 0 {
+                                        indices.clone()
+                                    } else {
+                                        Vec::new()
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                    if let Some((score, positions)) = best {
+                        total = total.saturating_add(score);
+                        highlights.extend(positions);
+                    } else {
+                        matched = false;
+                        break;
+                    }
+                }
+                if matched {
+                    highlights.sort_unstable();
+                    highlights.dedup();
+                    out.push(MatchResult {
+                        item: item.clone(),
+                        score: total,
+                        indices: highlights,
+                    });
+                }
+                continue;
+            }
             let text = item.search_text();
             let haystack = Utf32Str::new(&text, &mut haystack_buf);
             indices.clear();

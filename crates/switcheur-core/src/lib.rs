@@ -21,7 +21,9 @@ pub use exclusions::{ExclusionFilter, ExclusionRule};
 pub use matcher::{FuzzyMatcher, MatchResult};
 pub use model::{
     AppRef, AudioRowRef, Browser, BrowserTabRef, DirRef, DirSource, Item, LlmProvider,
-    PlaybackState, ProgramRef, WindowRef,
+    LocalSourceRef, PlaybackState, ProgramRef, WindowRef,
 };
 pub use sort::{sort_items, RecencyTracker, SortOrder};
 pub use state::{Section, SwitcherState};
+
+pub use local_source_ipc::{Entry as LocalSourceEntry, SessionState as LocalSessionState};

@@ -161,3 +161,11 @@ onboarding:
     body: "LeSwitcheur è gratuito. Acquistare una licenza (prezzo libero, una tantum) sostiene il progetto e nasconde l'avviso di supporto."
     buy: "Acquista licenza"
     later: "Più tardi"
+
+local_sources:
+  active: "In corso"
+  waiting: "Richiede attenzione"
+  idle: "Inattiva"
+  compacting: "Compattazione"
+  unknown: "Stato sconosciuto"
+  focus_failed: "Impossibile attivare la sessione. AgentsMon o la sessione potrebbero essere terminati."

@@ -370,3 +370,5 @@ pub fn register_hotkey(spec: &HotkeySpec, im_granted: bool) -> Result<HotkeyServ
 pub fn register_hotkey(_spec: &HotkeySpec, _im_granted: bool) -> Result<()> {
     anyhow::bail!("hotkey registration not supported on this platform");
 }
+
+pub mod local_sources;

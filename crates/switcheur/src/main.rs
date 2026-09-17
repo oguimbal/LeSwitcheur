@@ -648,6 +648,7 @@ struct WindowSlot {
 /// The switcher slot carries the typed entity in addition to the handle so
 /// Quick Type can route intercepted keystrokes straight into the view.
 struct SwitcherSlot {
+    local_focus_pending: bool,
     handle: AnyWindowHandle,
     entity: Entity<SwitcherView>,
     _sub: Subscription,
@@ -1043,9 +1044,8 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
             | Item::OpenUrl(_)
             | Item::Dir(_)
             | Item::BrowserTab(_)
-            | Item::CurrentlyPlaying(_) => {
-                /* Cmd+Tab cycles only ever carry Window/App items */
-            }
+            | Item::CurrentlyPlaying(_)
+            | Item::LocalSource(_) => { /* Cmd+Tab cycles only ever carry Window/App items */ }
         }
     }
     let res = match &item {
@@ -1056,7 +1056,8 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
         | Item::OpenUrl(_)
         | Item::Dir(_)
         | Item::BrowserTab(_)
-        | Item::CurrentlyPlaying(_) => {
+        | Item::CurrentlyPlaying(_)
+        | Item::LocalSource(_) => {
             tracing::warn!("unexpected non-window/app item in Cmd+Tab cycle");
             Ok(())
         }
@@ -1313,6 +1314,7 @@ fn open_switcher_with_items(
     );
 
     *state.current.borrow_mut() = Some(SwitcherSlot {
+        local_focus_pending: false,
         handle: handle.into(),
         entity: entity.clone(),
         _sub: sub,
@@ -1325,6 +1327,49 @@ fn open_switcher_with_items(
     let _ = cx.update(|cx| {
         entity.update(cx, |view, cx| view.request_currently_playing(cx));
     });
+
+    for definition in switcheur_platform::local_sources::SOURCES {
+        let source = definition.id;
+        let weak = entity.downgrade();
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            let mut last_error = None;
+            let mut backoff = switcheur_platform::local_sources::PollBackoff::default();
+            loop {
+                if weak.upgrade().is_none() {
+                    return;
+                }
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { switcheur_platform::local_sources::list(source) })
+                    .await;
+                let delay = backoff.next_delay(result.is_ok());
+                let rows = match result {
+                    Ok(rows) => {
+                        last_error = None;
+                        rows
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        if !switcheur_platform::local_sources::is_disconnection(&error)
+                            && last_error.as_ref() != Some(&message)
+                        {
+                            tracing::warn!(source, %error, "local source unavailable");
+                        }
+                        last_error = Some(message);
+                        Vec::new()
+                    }
+                };
+                if weak
+                    .update(cx, |view, cx| view.set_local_source(source, rows, cx))
+                    .is_err()
+                {
+                    return;
+                }
+                cx.background_executor().timer(delay).await;
+            }
+        })
+        .detach();
+    }
 
     if initial_selected != 0 {
         let _ = cx.update(|cx| {
@@ -1340,6 +1385,49 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
 
     // License-card events keep the panel open — the nag card lives inside it.
     match ev {
+        SwitcherViewEvent::Confirmed(Item::LocalSource(target)) => {
+            let entity = {
+                let mut current = state.current.borrow_mut();
+                let Some(slot) = current.as_mut() else {
+                    return;
+                };
+                if slot.local_focus_pending {
+                    return;
+                }
+                slot.local_focus_pending = true;
+                slot.entity.clone()
+            };
+            let target = target.clone();
+            let state = state.clone();
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { switcheur_platform::local_sources::focus(&target) })
+                    .await;
+                cx.update(|cx| {
+                    let is_original_panel = state
+                        .current
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|slot| slot.entity.entity_id() == entity.entity_id());
+                    if !is_original_panel {
+                        return;
+                    }
+                    match result {
+                        Ok(()) => handle_view_event(&SwitcherViewEvent::Dismissed, &state, cx),
+                        Err(error) => {
+                            tracing::warn!(%error, "local source focus failed");
+                            if let Some(slot) = state.current.borrow_mut().as_mut() {
+                                slot.local_focus_pending = false;
+                            }
+                            entity.update(cx, |view, cx| view.local_source_focus_failed(cx));
+                        }
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
         SwitcherViewEvent::LicenseActivateRequested => {
             // Nag's "Buy a licence" button: open the buy page in the user's
             // browser and close the in-panel nag. Post-purchase the success
@@ -1669,7 +1757,8 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                     | Item::OpenUrl(_)
                     | Item::Dir(_)
                     | Item::BrowserTab(_)
-                    | Item::CurrentlyPlaying(_) => {
+                    | Item::CurrentlyPlaying(_)
+                    | Item::LocalSource(_) => {
                         // The audio row's underlying app/window picks up
                         // recency through the activation NSNotification —
                         // bumping again here would double-count.
@@ -1710,6 +1799,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                 }
                 Item::BrowserTab(t) => state.platform.activate_browser_tab(t),
                 Item::CurrentlyPlaying(row) => activate_currently_playing(row, state),
+                Item::LocalSource(_) => unreachable!("handled asynchronously above"),
             };
             if let Err(e) = res {
                 tracing::warn!("activate: {e:#}");

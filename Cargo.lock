@@ -3685,6 +3685,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
+name = "local-source-ipc"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6481,6 +6491,7 @@ dependencies = [
  "gpui_platform",
  "ico",
  "image",
+ "local-source-ipc",
  "open",
  "semver",
  "serde_json",
@@ -6502,6 +6513,7 @@ dependencies = [
  "base64",
  "directories",
  "ed25519-dalek",
+ "local-source-ipc",
  "meval",
  "nucleo-matcher",
  "rand 0.8.6",
@@ -6542,6 +6554,7 @@ dependencies = [
  "global-hotkey",
  "image",
  "libproc",
+ "local-source-ipc",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",

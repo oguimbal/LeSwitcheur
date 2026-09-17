@@ -179,3 +179,11 @@ onboarding:
     body: "LeSwitcheur is free. Buying a licence (pay what you want, one-time) supports development and hides the support popup."
     buy: "Buy a licence"
     later: "Later"
+
+local_sources:
+  active: "Working"
+  waiting: "Needs attention"
+  idle: "Idle"
+  compacting: "Compacting"
+  unknown: "Unknown status"
+  focus_failed: "Could not focus the session. AgentsMon may have stopped or the session may have ended."

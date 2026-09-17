@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+local-source-ipc = { path = "../local-source-ipc" }
 nucleo-matcher = { workspace = true }
 meval = { workspace = true }
 rquickjs = { workspace = true }

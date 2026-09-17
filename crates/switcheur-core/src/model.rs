@@ -353,9 +353,59 @@ impl LlmProvider {
     }
 }
 
+/// Result owned by another running application. Its opaque ID is sent back for focus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSourceRef {
+    pub source: String,
+    pub source_name: String,
+    pub instance: String,
+    pub entry: local_source_ipc::Entry,
+    subtitle: String,
+}
+
+impl LocalSourceRef {
+    pub fn new(source: String, instance: String, entry: local_source_ipc::Entry) -> Self {
+        let subtitle = [
+            Some(entry.provider_name.as_str()),
+            entry.title.as_deref().filter(|s| !s.is_empty()),
+            Some(entry.repository_path.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+        Self {
+            source_name: source.clone(),
+            source,
+            instance,
+            entry,
+            subtitle,
+        }
+    }
+
+    pub fn same_target(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.instance == other.instance
+            && self.entry.id == other.entry.id
+    }
+
+    /// Weights apply per query word, allowing a project and a title to match together.
+    pub fn search_fields(&self) -> Vec<(&str, u32)> {
+        vec![
+            (&self.entry.label, 100),
+            (self.entry.custom_name.as_deref().unwrap_or(""), 100),
+            (self.entry.title.as_deref().unwrap_or(""), 85),
+            (self.entry.group_name.as_deref().unwrap_or(""), 80),
+            (&self.entry.project_name, 70),
+            (&self.entry.repository_path, 35),
+        ]
+    }
+}
+
 /// Anything selectable in the switcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
+    LocalSource(Arc<LocalSourceRef>),
     Window(Arc<WindowRef>),
     App(Arc<AppRef>),
     Program(Arc<ProgramRef>),
@@ -387,6 +437,7 @@ impl Item {
     /// The text used as a haystack for fuzzy matching.
     pub fn search_text(&self) -> String {
         match self {
+            Item::LocalSource(r) => r.entry.label.clone(),
             Item::Window(w) => {
                 if w.title.is_empty() {
                     w.app_name.clone()
@@ -413,6 +464,7 @@ impl Item {
 
     pub fn primary(&self) -> &str {
         match self {
+            Item::LocalSource(r) => &r.entry.label,
             Item::Window(w) => w.display_title(),
             Item::App(a) => &a.name,
             Item::Program(p) => &p.name,
@@ -435,6 +487,7 @@ impl Item {
 
     pub fn secondary(&self) -> Option<&str> {
         match self {
+            Item::LocalSource(r) => Some(&r.subtitle),
             Item::Window(w) => w.display_subtitle(),
             Item::OpenUrl(url) => Some(url),
             Item::Dir(d) => {
@@ -482,6 +535,7 @@ impl Item {
     /// Stable short code used to color the placeholder icon.
     pub fn icon_seed(&self) -> &str {
         match self {
+            Item::LocalSource(r) => &r.entry.provider_name,
             Item::Window(w) => w.bundle_id.as_deref().unwrap_or(&w.app_name),
             Item::App(a) => a.bundle_id.as_deref().unwrap_or(&a.name),
             Item::Program(p) => p.bundle_id.as_deref().unwrap_or(&p.name),
@@ -496,6 +550,7 @@ impl Item {
     /// First visible character of the app name, for placeholder icons.
     pub fn icon_initial(&self) -> char {
         let name = match self {
+            Item::LocalSource(r) => r.entry.provider_name.as_str(),
             Item::Window(w) => w.app_name.as_str(),
             Item::App(a) => a.name.as_str(),
             Item::Program(p) => p.name.as_str(),
@@ -511,6 +566,7 @@ impl Item {
     /// Path to a cached PNG of the icon, if the platform resolved one.
     pub fn icon_path(&self) -> Option<&std::path::Path> {
         match self {
+            Item::LocalSource(_) => None,
             Item::Window(w) => w.icon_path.as_deref(),
             Item::App(a) => a.icon_path.as_deref(),
             Item::Program(p) => p.icon_path.as_deref(),

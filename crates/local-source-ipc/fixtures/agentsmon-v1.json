@@ -1,0 +1,26 @@
+{
+  "protocol": "local-sources",
+  "version": 1,
+  "source": "agentsmon",
+  "source_version": 1,
+  "method": "list",
+  "payload": {
+    "instance": "test-instance-1",
+    "capabilities": ["list", "focus"],
+    "entries": [{
+      "id": "{\"provider\":\"claude\",\"session_id\":\"session-1\"}",
+      "label": "Auth API",
+      "project_name": "api",
+      "repository_path": "/projects/api",
+      "title": "Refresh token validation",
+      "custom_name": "Auth API",
+      "group_name": "Backend",
+      "provider_name": "Claude",
+      "accent_rgb": 13400156,
+      "state": "waiting",
+      "unread": true,
+      "context_percent": 42,
+      "last_activity_ms": 1700000000000
+    }]
+  }
+}

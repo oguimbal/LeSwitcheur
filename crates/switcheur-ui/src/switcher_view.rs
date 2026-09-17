@@ -71,7 +71,7 @@ pub enum SwitcherViewEvent {
     /// output and feed it back via [`SwitcherView::set_currently_playing`].
     /// Fired once per session at open time, regardless of query state —
     /// the row only renders when the query is empty (see
-    /// [`switcheur_core::SwitcherState::currently_playing_visible`]).
+    /// [`switcheur_core::SwitcherState::suggested_items_visible`]).
     NeedsCurrentlyPlaying,
     /// Any state touching the "Open With" popover just changed: the dir
     /// selection moved, the popover gained/lost keyboard focus, or the
@@ -157,6 +157,7 @@ pub struct SwitcherView {
     /// current switcher session? One-shot per open, mirroring the
     /// `browser_tabs_requested` latch. Reset in `set_items`.
     currently_playing_requested: bool,
+    local_focus_failed: bool,
     /// Number of *selectable* rows in the "Open With" popover for folder
     /// rows — alternative folder openers, default excluded. Host sets this
     /// whenever its detected-apps list changes. When zero (and the current
@@ -210,6 +211,7 @@ impl SwitcherView {
             browser_tabs_requested: false,
             browser_tabs_retry_after: None,
             currently_playing_requested: false,
+            local_focus_failed: false,
             open_with_folder_count: 0,
             open_with_file_count: 0,
             dirs_panel_top_y: Rc::new(Cell::new(None)),
@@ -414,8 +416,9 @@ impl SwitcherView {
         // [`Self::request_currently_playing`] — set_items runs inside the
         // `cx.new` builder, before the host installs its event subscriber,
         // so any emit from here is swallowed.
-        self.state.clear_currently_playing();
+        self.state.clear_suggestions();
         self.currently_playing_requested = false;
+        self.local_focus_failed = false;
         if self.dirs_enabled {
             cx.emit(SwitcherViewEvent::QueryChanged(String::new()));
         }
@@ -508,6 +511,17 @@ impl SwitcherView {
     /// source detected; clears any stale rows from the previous session.
     pub fn set_currently_playing(&mut self, rows: Vec<Item>, cx: &mut Context<Self>) {
         self.state.set_currently_playing(rows);
+        self.emit_height_delta_if_changed(cx);
+        cx.notify();
+    }
+
+    pub fn local_source_focus_failed(&mut self, cx: &mut Context<Self>) {
+        self.local_focus_failed = true;
+        cx.notify();
+    }
+
+    pub fn set_local_source(&mut self, source: &str, rows: Vec<Item>, cx: &mut Context<Self>) {
+        self.state.set_local_source(source, rows);
         self.emit_height_delta_if_changed(cx);
         cx.notify();
     }
@@ -695,9 +709,9 @@ impl SwitcherView {
                 let n = self.state.filtered_programs().len();
                 n > 0 && self.state.selected_program_idx() + 1 == n
             }
-            Section::Audio => {
-                let n = self.state.currently_playing().len();
-                n > 0 && self.state.selected_audio_idx() + 1 == n
+            Section::Suggestions => {
+                let n = self.state.suggested_items().len();
+                n > 0 && self.state.selected_suggestion_idx() + 1 == n
             }
             _ => false,
         }
@@ -892,21 +906,21 @@ impl SwitcherView {
         cx.notify();
     }
 
-    fn on_audio_row_click(&mut self, idx: usize, cx: &mut Context<Self>) {
-        self.state.set_selected_audio(idx);
+    fn on_suggestion_row_click(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.state.set_selected_suggestion(idx);
         if let Some(item) = self.state.selected().cloned() {
             self._activation_sub = None;
             cx.emit(SwitcherViewEvent::Confirmed(item));
         }
     }
 
-    fn on_audio_row_hover(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if self.state.active_section() == Section::Audio
-            && self.state.selected_audio_idx() == idx
+    fn on_suggestion_row_hover(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.state.active_section() == Section::Suggestions
+            && self.state.selected_suggestion_idx() == idx
         {
             return;
         }
-        self.state.set_selected_audio(idx);
+        self.state.set_selected_suggestion(idx);
         cx.notify();
     }
 
@@ -1073,9 +1087,9 @@ impl SwitcherView {
             cx.propagate();
             return;
         }
-        if self.state.active_section() == Section::Audio {
-            let idx = self.state.selected_audio_idx();
-            if let Some(Item::CurrentlyPlaying(r)) = self.state.currently_playing().get(idx) {
+        if self.state.active_section() == Section::Suggestions {
+            let idx = self.state.selected_suggestion_idx();
+            if let Some(Item::CurrentlyPlaying(r)) = self.state.suggested_items().get(idx) {
                 if r.supports_toggle() {
                     let row = r.clone();
                     cx.emit(SwitcherViewEvent::TogglePlayPause(row));
@@ -1276,8 +1290,18 @@ impl Render for SwitcherView {
             .text_color(theme.foreground)
             .text_size(px(14.0))
             .children(render_update_banner(self.update_banner.clone(), &theme, cx))
+            .when(self.local_focus_failed, |root| {
+                root.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_size(px(11.0))
+                        .text_color(theme.muted)
+                        .child(tr("local_sources.focus_failed")),
+                )
+            })
             .children(if nag_phase == NagPhase::Hidden {
-                currently_playing_section(&self.state, &theme, cx)
+                suggestions_section(&self.state, &theme, cx)
             } else {
                 None
             })
@@ -1559,34 +1583,29 @@ fn programs_section(
     )
 }
 
-/// "Currently Playing" row, rendered above the result list. Hidden whenever
-/// the query is non-empty or no audio source was detected (see
-/// [`switcheur_core::SwitcherState::currently_playing_visible`]). Mirrors
-/// the [`programs_section`] structure but renders a single row.
-fn currently_playing_section(
+fn suggestion_group(item: &Item) -> &str {
+    match item {
+        Item::LocalSource(source) => &source.source,
+        _ => "audio",
+    }
+}
+
+fn suggestions_section(
     state: &SwitcherState,
     theme: &Theme,
     cx: &mut Context<SwitcherView>,
 ) -> Option<AnyElement> {
     use switcheur_core::MatchResult;
 
-    if !state.currently_playing_visible() {
+    if !state.suggested_items_visible() {
         return None;
     }
-    let items = state.currently_playing();
+    let items = state.suggested_items();
     if items.is_empty() {
         return None;
     }
-    let section_active = state.active_section() == Section::Audio;
-    let selected = state.selected_audio_idx();
-
-    let header = div()
-        .px_3()
-        .pt_1()
-        .pb_0p5()
-        .text_size(px(11.0))
-        .text_color(theme.muted)
-        .child(tr("audio.section_header"));
+    let section_active = state.active_section() == Section::Suggestions;
+    let selected = state.selected_suggestion_idx();
 
     let rows: Vec<AnyElement> = items
         .iter()
@@ -1614,17 +1633,37 @@ fn currently_playing_section(
             if let Some((row_ref, state)) = toggle_data {
                 row = row.child(render_play_pause_button(idx, row_ref, state, theme, cx));
             }
-            row.id(SharedString::from(format!("switcher-audio-row-{idx}")))
+            let row = row
+                .id(SharedString::from(format!("switcher-suggestion-row-{idx}")))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                    this.on_audio_row_click(idx, cx);
+                    this.on_suggestion_row_click(idx, cx);
                 }))
                 .on_hover(cx.listener(move |this, hovering: &bool, _w, cx| {
                     if *hovering {
-                        this.on_audio_row_hover(idx, cx);
+                        this.on_suggestion_row_hover(idx, cx);
                     }
                 }))
-                .into_any_element()
+                .into_any_element();
+            let starts_group =
+                idx == 0 || suggestion_group(&items[idx - 1]) != suggestion_group(item);
+            let mut container = div().flex().flex_col();
+            if starts_group {
+                let title = match item {
+                    Item::LocalSource(source) => source.source_name.clone(),
+                    _ => tr("audio.section_header"),
+                };
+                container = container.child(
+                    div()
+                        .px_3()
+                        .pt_1()
+                        .pb_0p5()
+                        .text_size(px(11.0))
+                        .text_color(theme.muted)
+                        .child(title),
+                );
+            }
+            container.child(row).into_any_element()
         })
         .collect();
 
@@ -1635,7 +1674,6 @@ fn currently_playing_section(
             .pb_1()
             .border_b_1()
             .border_color(theme.border)
-            .child(header)
             .children(rows)
             .into_any_element(),
     )
@@ -2021,13 +2059,19 @@ fn extras_above_input_height(state: &SwitcherState) -> f32 {
         const SECTION_PADDING: f32 = 10.0; // py_1 top + py_1 bottom + border
         total += state.filtered_programs().len() as f32 * ROW + SECTION_PADDING;
     }
-    if state.currently_playing_visible() {
-        let n = state.currently_playing().len();
+    if state.suggested_items_visible() {
+        let n = state.suggested_items().len();
         if n > 0 {
             // Header (~18px: pt_1 + 11px text + pb_0p5) + N rows + pb_1 + border
             const HEADER: f32 = 18.0;
             const SECTION_PADDING: f32 = 5.0; // pb_1 + border_b_1
-            total += HEADER + n as f32 * ROW + SECTION_PADDING;
+            let groups = state
+                .suggested_items()
+                .windows(2)
+                .filter(|pair| suggestion_group(&pair[0]) != suggestion_group(&pair[1]))
+                .count()
+                + 1;
+            total += groups as f32 * HEADER + n as f32 * ROW + SECTION_PADDING;
         }
     }
     total

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/local-source-ipc",
     "crates/switcheur",
     "crates/switcheur-core",
     "crates/switcheur-i18n",

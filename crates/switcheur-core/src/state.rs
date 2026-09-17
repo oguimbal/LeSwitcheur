@@ -25,11 +25,8 @@ const MIN_QUERY_LEN_FOR_BROWSER_TABS: usize = 3;
 /// Which section of the switcher the keyboard cursor currently lives in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
-    /// "Currently Playing" row above the result list, populated only when
-    /// the query is empty and an audio source has been detected. Mutually
-    /// exclusive with [`Section::Programs`] (which requires a non-empty
-    /// query).
-    Audio,
+    /// Audio and local-source attention suggestions above the search field.
+    Suggestions,
     Programs,
     Windows,
     /// Right-side pane fed externally (zoxide today, possibly other sources
@@ -73,18 +70,10 @@ pub struct SwitcherState {
     /// selected dir row, but keyboard focus still belongs to the dir list so
     /// Enter opens the folder in the default app.
     open_with_index: Option<usize>,
-    /// "Currently Playing" rows, populated asynchronously after the panel
-    /// opens via [`SwitcherState::set_currently_playing`]. Empty means no
-    /// audio source was detected (or detection is unsupported on this OS).
-    /// Visibility is also gated on [`Self::query`] being empty — the rows
-    /// are hidden the moment the user starts typing. Order is the order
-    /// returned by the platform probe (typically: foreground producer first,
-    /// then paused/registered sessions).
-    currently_playing: Vec<Item>,
-    /// Cursor inside the audio rows when [`Section::Audio`] is active.
-    /// Clamped on each `set_currently_playing` so a shrinking list doesn't
-    /// leave the cursor past the end.
-    selected_audio: usize,
+    /// Empty-query suggestions: audio rows followed by waiting/unread local sessions.
+    suggested_items: Vec<Item>,
+    local_sources: Vec<Item>,
+    selected_suggestion: usize,
 }
 
 impl SwitcherState {
@@ -108,8 +97,9 @@ impl SwitcherState {
             llm_provider_order: LlmProvider::default_order(),
             ask_llm_enabled: true,
             open_with_index: None,
-            currently_playing: Vec::new(),
-            selected_audio: 0,
+            suggested_items: Vec::new(),
+            local_sources: Vec::new(),
+            selected_suggestion: 0,
         }
     }
 
@@ -165,56 +155,118 @@ impl SwitcherState {
     /// must not yank the cursor. The audio cursor is clamped to the new
     /// list length so a shrinking list doesn't dangle.
     pub fn set_currently_playing(&mut self, rows: Vec<Item>) {
-        debug_assert!(rows.iter().all(|it| matches!(it, Item::CurrentlyPlaying(_))));
-        self.currently_playing = rows;
-        if self.currently_playing.is_empty() {
-            self.selected_audio = 0;
-        } else if self.selected_audio >= self.currently_playing.len() {
-            self.selected_audio = self.currently_playing.len() - 1;
+        debug_assert!(rows
+            .iter()
+            .all(|it| matches!(it, Item::CurrentlyPlaying(_))));
+        let selected = self.selected().cloned();
+        let mut suggestions = rows;
+        let mut attention: Vec<_> = self
+            .local_sources
+            .iter()
+            .filter_map(|item| {
+                let Item::LocalSource(source) = item else {
+                    return None;
+                };
+                (source.entry.state == crate::LocalSessionState::Waiting || source.entry.unread)
+                    .then_some(item.clone())
+            })
+            .collect();
+        attention.sort_by_key(|item| {
+            let Item::LocalSource(source) = item else {
+                unreachable!()
+            };
+            (
+                source.entry.state != crate::LocalSessionState::Waiting,
+                std::cmp::Reverse(source.entry.last_activity_ms),
+            )
+        });
+        attention.truncate(3);
+        suggestions.extend(attention);
+        self.suggested_items = suggestions;
+        self.selected_suggestion = self
+            .selected_suggestion
+            .min(self.suggested_items.len().saturating_sub(1));
+        if self.active_section == Section::Suggestions {
+            if let Some(index) = selected.as_ref().and_then(|selected| {
+                self.suggested_items
+                    .iter()
+                    .position(|item| same_target(item, selected))
+            }) {
+                self.selected_suggestion = index;
+            }
+            if !self.suggested_items_visible() {
+                self.active_section = Section::Windows;
+            }
         }
-        if self.active_section == Section::Audio && !self.currently_playing_visible() {
-            self.active_section = Section::Windows;
+    }
+
+    /// Replace one provider's live results, preserving the selected target across refreshes.
+    pub fn set_local_source(&mut self, source: &str, rows: Vec<Item>) {
+        let selected = self.selected().cloned();
+        let section = self.active_section;
+        self.local_sources
+            .retain(|item| !matches!(item, Item::LocalSource(r) if r.source == source));
+        self.local_sources.extend(
+            rows.into_iter()
+                .filter(|item| matches!(item, Item::LocalSource(r) if r.source == source)),
+        );
+        self.rerank_inner(RerankReset::PreserveSelection);
+        if section == Section::Windows {
+            if let Some(index) = selected.as_ref().and_then(|selected| {
+                self.filtered
+                    .iter()
+                    .position(|result| same_target(&result.item, selected))
+            }) {
+                self.selected_idx = index;
+            }
         }
+        let audio = self
+            .suggested_items
+            .iter()
+            .filter(|item| matches!(item, Item::CurrentlyPlaying(_)))
+            .cloned()
+            .collect();
+        self.set_currently_playing(audio);
     }
 
-    /// The "Currently Playing" rows. Visibility (rendering decision) uses
-    /// [`Self::currently_playing_visible`] so rows hide on typing.
-    pub fn currently_playing(&self) -> &[Item] {
-        &self.currently_playing
+    /// Audio and local attention suggestions. Visibility uses
+    /// [`Self::suggested_items_visible`] so rows hide on typing.
+    pub fn suggested_items(&self) -> &[Item] {
+        &self.suggested_items
     }
 
-    /// Cursor index inside the audio rows. Only meaningful when
-    /// [`Section::Audio`] is active.
-    pub fn selected_audio_idx(&self) -> usize {
-        self.selected_audio
+    /// Cursor index inside the suggestions. Only meaningful when
+    /// [`Section::Suggestions`] is active.
+    pub fn selected_suggestion_idx(&self) -> usize {
+        self.selected_suggestion
     }
 
-    /// True when the audio rows should render: query is empty AND at least
+    /// True when suggestions should render: query is empty AND at least
     /// one source detected. Mirrors [`Self::programs_visible`] but inverted
     /// on the empty-query check (the two sections are mutually exclusive).
-    pub fn currently_playing_visible(&self) -> bool {
-        self.query.trim().is_empty() && !self.currently_playing.is_empty()
+    pub fn suggested_items_visible(&self) -> bool {
+        self.query.trim().is_empty() && !self.suggested_items.is_empty()
     }
 
-    /// Move keyboard focus into the audio rows (last row — closest to the
+    /// Move keyboard focus into suggestions (last row — closest to the
     /// windows list, so Up flows naturally from Windows[0]). No-op when
     /// hidden.
-    pub fn focus_audio(&mut self) {
-        if !self.currently_playing_visible() {
+    pub fn focus_suggestions(&mut self) {
+        if !self.suggested_items_visible() {
             return;
         }
-        self.active_section = Section::Audio;
-        self.selected_audio = self.currently_playing.len() - 1;
+        self.active_section = Section::Suggestions;
+        self.selected_suggestion = self.suggested_items.len() - 1;
     }
 
-    /// Click/hover handler for an audio row. Activates the section and
+    /// Click/hover handler for a suggestion. Activates the section and
     /// jumps the cursor to the clicked index.
-    pub fn set_selected_audio(&mut self, idx: usize) {
-        if !self.currently_playing_visible() {
+    pub fn set_selected_suggestion(&mut self, idx: usize) {
+        if !self.suggested_items_visible() {
             return;
         }
-        self.active_section = Section::Audio;
-        self.selected_audio = idx.min(self.currently_playing.len() - 1);
+        self.active_section = Section::Suggestions;
+        self.selected_suggestion = idx.min(self.suggested_items.len() - 1);
     }
 
     /// Flip the playback state of the audio row at `idx` between Playing
@@ -223,7 +275,7 @@ impl SwitcherState {
     /// of range or the row's state is `Unknown` (we have no truth to
     /// flip *to*).
     pub fn toggle_audio_row_state(&mut self, idx: usize) {
-        let Some(item) = self.currently_playing.get(idx) else {
+        let Some(item) = self.suggested_items.get(idx) else {
             return;
         };
         let Item::CurrentlyPlaying(row) = item else {
@@ -238,15 +290,16 @@ impl SwitcherState {
         // rebuild the Item so we don't mutate a shared reference.
         let mut updated = (**row).clone();
         updated.state = new_state;
-        self.currently_playing[idx] = Item::CurrentlyPlaying(Arc::new(updated));
+        self.suggested_items[idx] = Item::CurrentlyPlaying(Arc::new(updated));
     }
 
-    /// Forget the audio rows. Called when the switcher closes so the next
+    /// Forget live source data. Called when the switcher closes so the next
     /// open starts with a fresh detection pass.
-    pub fn clear_currently_playing(&mut self) {
-        self.currently_playing.clear();
-        self.selected_audio = 0;
-        if self.active_section == Section::Audio {
+    pub fn clear_suggestions(&mut self) {
+        self.local_sources.clear();
+        self.suggested_items.clear();
+        self.selected_suggestion = 0;
+        if self.active_section == Section::Suggestions {
             self.active_section = Section::Windows;
         }
     }
@@ -507,7 +560,7 @@ impl SwitcherState {
 
     pub fn selected(&self) -> Option<&Item> {
         match self.active_section {
-            Section::Audio => self.currently_playing.get(self.selected_audio),
+            Section::Suggestions => self.suggested_items.get(self.selected_suggestion),
             Section::Programs => self
                 .filtered_programs
                 .get(self.selected_program)
@@ -534,9 +587,9 @@ impl SwitcherState {
         // group; the topmost row is a no-op (no wrap-back-to-bottom — that
         // would conflict with the symmetric move_down which exits the
         // group into Windows).
-        if self.active_section == Section::Audio {
-            if self.selected_audio > 0 {
-                self.selected_audio -= 1;
+        if self.active_section == Section::Suggestions {
+            if self.selected_suggestion > 0 {
+                self.selected_suggestion -= 1;
             }
             return;
         }
@@ -564,19 +617,19 @@ impl SwitcherState {
                     };
                     return;
                 }
-                Section::Dirs | Section::Audio => unreachable!("handled above"),
+                Section::Dirs | Section::Suggestions => unreachable!("handled above"),
             }
         }
         // No programs section: Up from Windows row 0 enters the audio
         // group at its last (closest) row, when one is visible (mutually
         // exclusive with programs — see the empty-query gate in
-        // `currently_playing_visible`).
+        // `suggested_items_visible`).
         if self.active_section == Section::Windows
             && self.selected_idx == 0
-            && self.currently_playing_visible()
+            && self.suggested_items_visible()
         {
-            self.active_section = Section::Audio;
-            self.selected_audio = self.currently_playing.len() - 1;
+            self.active_section = Section::Suggestions;
+            self.selected_suggestion = self.suggested_items.len() - 1;
             return;
         }
         if self.filtered.is_empty() {
@@ -600,9 +653,9 @@ impl SwitcherState {
         }
         // Down inside the audio group cycles forward; from the last row
         // it drops into the windows list at row 0.
-        if self.active_section == Section::Audio {
-            if self.selected_audio + 1 < self.currently_playing.len() {
-                self.selected_audio += 1;
+        if self.active_section == Section::Suggestions {
+            if self.selected_suggestion + 1 < self.suggested_items.len() {
+                self.selected_suggestion += 1;
                 return;
             }
             self.active_section = Section::Windows;
@@ -628,7 +681,7 @@ impl SwitcherState {
                     self.selected_idx = (self.selected_idx + 1) % self.filtered.len();
                     return;
                 }
-                Section::Dirs | Section::Audio => unreachable!("handled above"),
+                Section::Dirs | Section::Suggestions => unreachable!("handled above"),
             }
         }
         if self.filtered.is_empty() {
@@ -678,6 +731,13 @@ impl SwitcherState {
         }
         self.filtered = self.matcher.rank(&self.query, &self.items);
         let window_count = self.filtered.len();
+        let local_matches = if self.query.trim().is_empty() {
+            Vec::new()
+        } else {
+            self.matcher.rank(&self.query, &self.local_sources)
+        };
+        let local_count = local_matches.len();
+        self.filtered.extend(local_matches);
         if self.query.trim().is_empty() {
             self.filtered_programs.clear();
         } else {
@@ -716,6 +776,7 @@ impl SwitcherState {
         if self.ask_llm_enabled
             && !self.query.trim().is_empty()
             && window_count == 0
+            && local_count == 0
             && tab_count <= ASK_LLM_MAX_TABS
             && self.filtered_programs.is_empty()
             && self.eval_result.is_none()
@@ -758,6 +819,13 @@ impl SwitcherState {
                 // Leave `active_section` alone: the user chose it.
             }
         }
+    }
+}
+
+fn same_target(a: &Item, b: &Item) -> bool {
+    match (a, b) {
+        (Item::LocalSource(a), Item::LocalSource(b)) => a.same_target(b),
+        _ => a == b,
     }
 }
 
@@ -1358,11 +1426,11 @@ mod tests {
     fn audio_row_visible_only_when_query_empty() {
         let mut s = SwitcherState::new();
         s.set_items(vec![win("Mail", "Inbox")]);
-        assert!(!s.currently_playing_visible());
+        assert!(!s.suggested_items_visible());
         s.set_currently_playing(vec![audio("Spotify")]);
-        assert!(s.currently_playing_visible());
+        assert!(s.suggested_items_visible());
         s.set_query("a");
-        assert!(!s.currently_playing_visible());
+        assert!(!s.suggested_items_visible());
     }
 
     #[test]
@@ -1373,7 +1441,7 @@ mod tests {
         assert_eq!(s.active_section(), Section::Windows);
         assert_eq!(s.selected_idx(), 0);
         s.move_up();
-        assert_eq!(s.active_section(), Section::Audio);
+        assert_eq!(s.active_section(), Section::Suggestions);
         match s.selected().unwrap() {
             Item::CurrentlyPlaying(r) => assert_eq!(r.app_name, "Spotify"),
             _ => panic!("expected audio row"),
@@ -1386,7 +1454,7 @@ mod tests {
         s.set_items(vec![win("Mail", "Inbox"), win("VSCode", "x")]);
         s.set_currently_playing(vec![audio("Spotify")]);
         s.move_up();
-        assert_eq!(s.active_section(), Section::Audio);
+        assert_eq!(s.active_section(), Section::Suggestions);
         s.move_down();
         assert_eq!(s.active_section(), Section::Windows);
         assert_eq!(s.selected_idx(), 0);
@@ -1398,10 +1466,10 @@ mod tests {
         s.set_items(vec![win("Mail", "Inbox")]);
         s.set_currently_playing(vec![audio("Spotify")]);
         s.move_up();
-        assert_eq!(s.active_section(), Section::Audio);
+        assert_eq!(s.active_section(), Section::Suggestions);
         s.move_up();
         // Stays on Audio — no wrap to bottom of windows.
-        assert_eq!(s.active_section(), Section::Audio);
+        assert_eq!(s.active_section(), Section::Suggestions);
     }
 
     #[test]
@@ -1426,7 +1494,7 @@ mod tests {
         s.set_items(vec![win("Mail", "Inbox")]);
         s.set_currently_playing(vec![audio("Spotify")]);
         s.move_up();
-        assert_eq!(s.active_section(), Section::Audio);
+        assert_eq!(s.active_section(), Section::Suggestions);
         s.set_query("ma");
         assert_eq!(s.active_section(), Section::Windows);
     }
@@ -1442,19 +1510,19 @@ mod tests {
         s.set_currently_playing(vec![audio("Spotify")]);
         s.set_query("saf");
         assert!(s.programs_visible());
-        assert!(!s.currently_playing_visible());
+        assert!(!s.suggested_items_visible());
     }
 
     #[test]
-    fn clear_currently_playing_resets_section() {
+    fn clear_suggestions_resets_section() {
         let mut s = SwitcherState::new();
         s.set_items(vec![win("Mail", "Inbox")]);
         s.set_currently_playing(vec![audio("Spotify")]);
         s.move_up();
-        assert_eq!(s.active_section(), Section::Audio);
-        s.clear_currently_playing();
+        assert_eq!(s.active_section(), Section::Suggestions);
+        s.clear_suggestions();
         assert_eq!(s.active_section(), Section::Windows);
-        assert!(!s.currently_playing_visible());
+        assert!(!s.suggested_items_visible());
     }
 
     #[test]
@@ -1477,14 +1545,14 @@ mod tests {
         s.set_items(vec![win("Mail", "Inbox")]);
         s.set_currently_playing(vec![audio("Spotify"), audio("Chrome")]);
         s.move_up();
-        assert_eq!(s.active_section(), Section::Audio);
-        assert_eq!(s.selected_audio_idx(), 1);
+        assert_eq!(s.active_section(), Section::Suggestions);
+        assert_eq!(s.selected_suggestion_idx(), 1);
         s.move_up();
-        assert_eq!(s.selected_audio_idx(), 0);
+        assert_eq!(s.selected_suggestion_idx(), 0);
         s.move_up();
-        assert_eq!(s.selected_audio_idx(), 0);
+        assert_eq!(s.selected_suggestion_idx(), 0);
         s.move_down();
-        assert_eq!(s.selected_audio_idx(), 1);
+        assert_eq!(s.selected_suggestion_idx(), 1);
         s.move_down();
         assert_eq!(s.active_section(), Section::Windows);
         assert_eq!(s.selected_idx(), 0);
@@ -1496,9 +1564,9 @@ mod tests {
         s.set_items(vec![win("Mail", "Inbox")]);
         s.set_currently_playing(vec![audio("Spotify"), audio("Chrome")]);
         s.move_up();
-        assert_eq!(s.selected_audio_idx(), 1);
+        assert_eq!(s.selected_suggestion_idx(), 1);
         s.set_currently_playing(vec![audio("Spotify")]);
-        assert_eq!(s.selected_audio_idx(), 0);
+        assert_eq!(s.selected_suggestion_idx(), 0);
     }
 
     #[test]

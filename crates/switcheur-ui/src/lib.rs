@@ -18,3 +18,5 @@ pub use settings_view::{SettingsView, SettingsViewEvent};
 pub use switcher_view::{NagPhase, SwitcherView, SwitcherViewEvent};
 pub use thanks_view::{ThanksState, ThanksView, ThanksViewEvent};
 pub use theme::Theme;
+
+mod local_source;

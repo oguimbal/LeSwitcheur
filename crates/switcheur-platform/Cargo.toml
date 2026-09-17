@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+local-source-ipc = { path = "../local-source-ipc" }
 switcheur-core = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

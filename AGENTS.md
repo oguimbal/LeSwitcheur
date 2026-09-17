@@ -182,6 +182,14 @@ If can't test a case: say so explicit, don't claim still work.
 - First-run: if file missing, `Config::default()` written to disk.
 - `deny_unknown_fields`: catch typos. If add fields with backwards compat concerns, drop this or use `serde(alias)`.
 
+## Local application sources
+
+- `crates/local-source-ipc` is a standalone, versioned crate vendored identically in AgentsMon. Its README defines the transport, bounds, compatibility policy and v1 fixture. Neither repository depends on the sibling checkout.
+- macOS uses a private Unix socket owned by the running source; Windows currently leaves this integration unavailable. Never launch AgentsMon or read its session files from LeSwitcheur.
+- `switcheur-platform/src/local_sources.rs` registers local sources and validates snapshots. `Item::LocalSource` carries an opaque session ID and process-instance ID; focus always returns to the owning source.
+- Panel-scoped background polling clears disconnected/incompatible sources. Keep network/IPC work off the GPUI thread and preserve target identity during refresh.
+- Empty-query suggestions combine audio with at most three waiting/unread sessions. Search weights and a synthetic GPUI preview are documented in `crates/local-source-ipc/README.md`.
+
 ## Key files
 
 - `Cargo.toml` (root) — workspace members, shared versions, GPUI SHA.

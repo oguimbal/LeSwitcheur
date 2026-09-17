@@ -35,6 +35,7 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
     };
 
     let base_icon: AnyElement = match item {
+        Item::LocalSource(source) => crate::local_source::icon(source, theme),
         Item::AskLlm { provider, .. } => llm_icon(*provider),
         _ => match item.icon_path() {
             Some(path) => img(path.to_path_buf())
@@ -140,11 +141,22 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
         base_icon
     };
 
-    let primary_el = div()
+    let mut primary_el = div()
         .text_size(px(14.0))
         .text_color(theme.foreground)
         .truncate()
         .child(primary);
+
+    if let Item::LocalSource(source) = item {
+        let mut background = crate::local_source::state_color(&source.entry.state, theme);
+        background.a = 0.18;
+        primary_el = primary_el
+            .self_start()
+            .max_w_full()
+            .px_2()
+            .rounded_full()
+            .bg(background);
+    }
 
     let mut text_col = div()
         .flex()
@@ -164,7 +176,7 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
         );
     }
 
-    div()
+    let mut row = div()
         .flex()
         .flex_row()
         .items_center()
@@ -175,7 +187,20 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
         .bg(row_bg)
         .w_full()
         .child(icon)
-        .child(text_col)
+        .child(text_col);
+    if let Item::LocalSource(source) = item {
+        row = row.child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(11.0))
+                .text_color(crate::local_source::status_color(
+                    &source.entry.state,
+                    theme,
+                ))
+                .child(crate::local_source::status(source)),
+        );
+    }
+    row
 }
 
 /// Deterministic hue in [0, 1] from a seed string. Used to color the initial
