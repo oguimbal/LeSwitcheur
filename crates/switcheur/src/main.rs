@@ -16,7 +16,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
@@ -484,6 +484,18 @@ fn main() -> Result<()> {
         }
         spawn_tray_command_loop(cx, state.clone(), tray_cmd_rx);
 
+        // Warm the window cache so the first hotkey can paint from it
+        // instead of waiting on every app's AX answer.
+        {
+            let platform = state.platform.clone();
+            let show_all_spaces = state.config.borrow().show_all_spaces;
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = platform.list_windows(show_all_spaces);
+                })
+                .detach();
+        }
+
         if open_on_start {
             tracing::info!("cold launch: triggering switcher on startup");
             state.hotkey.trigger();
@@ -911,11 +923,15 @@ fn apply_system_switcher_event(cx: &mut AsyncApp, state: &AppState, ev: SystemSw
                 return;
             }
             // Fresh cycle: snapshot items, arm the grace timer. Panel stays
-            // invisible unless the timer fires before Cmd release.
-            let items = {
-                let cfg = state.config.borrow();
-                let tracker = state.tracker.lock().unwrap();
-                collect_items(&state.platform, &cfg, &state.filter.borrow(), &tracker)
+            // invisible unless the timer fires before Cmd release. A quick
+            // tap confirms within the grace period, far sooner than a full
+            // AX listing, so take the cache and refresh it for next time.
+            let items = match current_items_cached(state) {
+                Some(items) => {
+                    spawn_window_cache_refresh(cx, state);
+                    items
+                }
+                None => current_items(state),
             };
             if items.is_empty() {
                 return;
@@ -1096,6 +1112,7 @@ fn promote_pending_to_panel(cx: &mut AsyncApp, state: &AppState) -> Result<()> {
         return Ok(());
     };
     open_switcher_with_items(cx, state, pc.items, pc.selected, false)?;
+    spawn_items_refresh(cx, state);
     Ok(())
 }
 
@@ -1143,12 +1160,91 @@ fn open_switcher_with(
     state: &AppState,
     dismiss_on_blur: bool,
 ) -> Result<()> {
-    let items = {
-        let cfg = state.config.borrow();
-        let tracker = state.tracker.lock().unwrap();
-        collect_items(&state.platform, &cfg, &state.filter.borrow(), &tracker)
+    // Paint from the cache, then swap in the full listing: a busy or napped
+    // app can take hundreds of ms to answer AX, and that wait used to sit
+    // between the hotkey and the first frame.
+    match current_items_cached(state) {
+        Some(items) => {
+            open_switcher_with_items(cx, state, items, 0, dismiss_on_blur)?;
+            spawn_items_refresh(cx, state);
+            Ok(())
+        }
+        None => open_switcher_with_items(cx, state, current_items(state), 0, dismiss_on_blur),
+    }
+}
+
+fn current_items(state: &AppState) -> Vec<Item> {
+    let cfg = state.config.borrow();
+    let tracker = state.tracker.lock().unwrap();
+    collect_items(&state.platform, &cfg, &state.filter.borrow(), &tracker)
+}
+
+fn current_items_cached(state: &AppState) -> Option<Vec<Item>> {
+    let cfg = state.config.borrow();
+    let started = Instant::now();
+    let windows = state.platform.cached_windows(cfg.show_all_spaces)?;
+    if windows.is_empty() {
+        return None;
+    }
+    let tracker = state.tracker.lock().unwrap();
+    Some(windows_to_items(
+        Ok(windows),
+        started.elapsed(),
+        "cache",
+        &cfg,
+        &state.filter.borrow(),
+        &tracker,
+    ))
+}
+
+/// Run the full listing off the UI thread and feed it to the panel that is
+/// open now. Dropped if that panel closed meanwhile (the weak handle dies).
+fn spawn_items_refresh(cx: &mut AsyncApp, state: &AppState) {
+    let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
+    let Some(entity) = entity_opt else {
+        return;
     };
-    open_switcher_with_items(cx, state, items, 0, dismiss_on_blur)
+    let weak = entity.downgrade();
+    let platform = state.platform.clone();
+    let show_all_spaces = state.config.borrow().show_all_spaces;
+    let state = state.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let started = Instant::now();
+        let listed = cx
+            .background_executor()
+            .spawn(async move { platform.list_windows(show_all_spaces) })
+            .await;
+        if let Err(e) = &listed {
+            // Keep the cached rows rather than blanking the panel.
+            tracing::warn!("refresh list_windows: {e:#}");
+            return;
+        }
+        let items = {
+            let cfg = state.config.borrow();
+            let tracker = state.tracker.lock().unwrap();
+            windows_to_items(
+                listed,
+                started.elapsed(),
+                "refresh",
+                &cfg,
+                &state.filter.borrow(),
+                &tracker,
+            )
+        };
+        let _ = weak.update(cx, |view, cx| view.refresh_items(items, cx));
+    })
+    .detach();
+}
+
+/// Keep the window cache fresh when no panel is showing (Cmd+Tab quick tap).
+fn spawn_window_cache_refresh(cx: &mut AsyncApp, state: &AppState) {
+    let platform = state.platform.clone();
+    let show_all_spaces = state.config.borrow().show_all_spaces;
+    cx.background_executor()
+        .spawn(async move {
+            let _ = platform.list_windows(show_all_spaces);
+        })
+        .detach();
 }
 
 /// Open the switcher panel with a caller-supplied item list and initial
@@ -3991,12 +4087,26 @@ fn collect_items(
     filter: &ExclusionFilter,
     tracker: &RecencyTracker,
 ) -> Vec<Item> {
+    let started = Instant::now();
+    let listed = platform.list_windows(config.show_all_spaces);
+    windows_to_items(listed, started.elapsed(), "sync", config, filter, tracker)
+}
+
+fn windows_to_items(
+    listed: Result<Vec<switcheur_core::WindowRef>>,
+    elapsed: Duration,
+    source: &'static str,
+    config: &Config,
+    filter: &ExclusionFilter,
+    tracker: &RecencyTracker,
+) -> Vec<Item> {
     let mut items: Vec<Item> = Vec::new();
     // Hide our own switcher popup from its own list. Any other window we own
     // (notably the settings window) has a real title and stays visible — the
     // switcher popup is the only titleless window we ever create.
     let own_pid = std::process::id() as i32;
-    match platform.list_windows(config.show_all_spaces) {
+    let elapsed_ms = elapsed.as_millis();
+    match listed {
         Ok(ws) => {
             let total = ws.len();
             let mut kept: Vec<_> = ws
@@ -4012,11 +4122,13 @@ fn collect_items(
                 include_minimized = config.include_minimized,
                 show_all_spaces = config.show_all_spaces,
                 sort_order = ?config.sort_order,
+                source,
+                elapsed_ms,
                 "list_windows ok"
             );
             items.extend(kept.into_iter().map(Item::from));
         }
-        Err(e) => tracing::warn!("list_windows: {e:#}"),
+        Err(e) => tracing::warn!(elapsed_ms, "list_windows: {e:#}"),
     }
     tracing::info!(total = items.len(), "collect_items");
     items

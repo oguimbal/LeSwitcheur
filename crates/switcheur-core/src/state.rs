@@ -342,6 +342,25 @@ impl SwitcherState {
         self.rerank();
     }
 
+    /// Swap in a fresher window list (async refresh after the panel already
+    /// painted from a cached one) without moving the user's cursor off the
+    /// row they had selected.
+    pub fn refresh_items(&mut self, items: Vec<Item>) {
+        let selected = self.selected().cloned();
+        let section = self.active_section;
+        self.items = items;
+        self.rerank_inner(RerankReset::PreserveSelection);
+        if section == Section::Windows {
+            if let Some(index) = selected.as_ref().and_then(|selected| {
+                self.filtered
+                    .iter()
+                    .position(|result| same_row(&result.item, selected))
+            }) {
+                self.selected_idx = index;
+            }
+        }
+    }
+
     /// Drop the window with the given CGWindowID from the candidate set and
     /// re-rank. Used after the user closes a window from the row × button so
     /// the dead row disappears immediately, before the platform's window list
@@ -822,6 +841,15 @@ impl SwitcherState {
     }
 }
 
+/// Like [`same_target`], but a window keeps its identity across a title
+/// change between two listings.
+fn same_row(a: &Item, b: &Item) -> bool {
+    match (a, b) {
+        (Item::Window(a), Item::Window(b)) => a.id == b.id && a.pid == b.pid,
+        _ => same_target(a, b),
+    }
+}
+
 fn same_target(a: &Item, b: &Item) -> bool {
     match (a, b) {
         (Item::LocalSource(a), Item::LocalSource(b)) => a.same_target(b),
@@ -920,6 +948,55 @@ mod tests {
         s.move_down();
         assert_eq!(s.selected_idx(), 1);
         s.set_query("a");
+        assert_eq!(s.selected_idx(), 0);
+    }
+
+    fn win_id(id: u64, title: &str) -> Item {
+        Item::Window(Arc::new(WindowRef {
+            id,
+            pid: 1,
+            title: title.into(),
+            app_name: "App".into(),
+            bundle_id: None,
+            icon_path: None,
+            minimized: false,
+        }))
+    }
+
+    #[test]
+    fn refresh_items_keeps_selected_row() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win_id(1, "a"), win_id(2, "b"), win_id(3, "c")]);
+        s.move_down();
+        s.move_down();
+        assert_eq!(s.selected().unwrap().primary(), "c");
+        // Fresher list: a new window up front, and "c" got retitled.
+        s.refresh_items(vec![
+            win_id(4, "new"),
+            win_id(1, "a"),
+            win_id(2, "b"),
+            win_id(3, "c2"),
+        ]);
+        assert_eq!(s.selected_idx(), 3);
+        assert_eq!(s.selected().unwrap().primary(), "c2");
+    }
+
+    #[test]
+    fn refresh_items_keeps_query() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win_id(1, "alpha"), win_id(2, "beta")]);
+        s.set_query("bet");
+        s.refresh_items(vec![win_id(1, "alpha"), win_id(2, "beta"), win_id(3, "gamma")]);
+        assert_eq!(s.query(), "bet");
+        assert_eq!(s.selected().unwrap().primary(), "beta");
+    }
+
+    #[test]
+    fn refresh_items_clamps_when_selected_row_vanishes() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win_id(1, "a"), win_id(2, "b")]);
+        s.move_down();
+        s.refresh_items(vec![win_id(1, "a")]);
         assert_eq!(s.selected_idx(), 0);
     }
 

@@ -72,6 +72,10 @@ impl WindowSource for MacPlatform {
         windows::list_windows(show_all_spaces)
     }
 
+    fn cached_windows(&self, show_all_spaces: bool) -> Option<Vec<WindowRef>> {
+        windows::cached_windows(show_all_spaces)
+    }
+
     fn list_apps(&self) -> Result<Vec<AppRef>> {
         windows::list_apps()
     }

@@ -439,11 +439,11 @@ impl SwitcherView {
         cx.emit(SwitcherViewEvent::NeedsCurrentlyPlaying);
     }
 
-    /// Refresh the candidate set in place without wiping the query or input.
-    /// Used after closing a window from the list so the dead row disappears
-    /// while the user's typing is preserved.
+    /// Refresh the candidate set in place without wiping the query, input or
+    /// selected row. Used when the full window listing lands after the panel
+    /// painted from the cached one.
     pub fn refresh_items(&mut self, items: Vec<Item>, cx: &mut Context<Self>) {
-        self.state.set_items(items);
+        self.state.refresh_items(items);
         self.emit_height_delta_if_changed(cx);
         cx.notify();
     }

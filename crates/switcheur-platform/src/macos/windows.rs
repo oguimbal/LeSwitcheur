@@ -17,12 +17,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use accessibility_sys::{
-    kAXErrorSuccess, kAXMinimizedAttribute, kAXPositionAttribute, kAXSizeAttribute,
+    kAXErrorCannotComplete, kAXErrorSuccess, kAXMinimizedAttribute, kAXPositionAttribute, kAXSizeAttribute,
     kAXSubroleAttribute, kAXTitleAttribute, kAXValueTypeCGPoint, kAXValueTypeCGSize,
     kAXWindowsAttribute, AXError, AXUIElementCopyAttributeValue, AXUIElementCreateApplication,
-    AXUIElementRef, AXValueGetType, AXValueGetValue, AXValueRef,
+    AXUIElementRef, AXUIElementSetMessagingTimeout, AXValueGetType, AXValueGetValue, AXValueRef,
 };
 use anyhow::{anyhow, Result};
 use core_foundation::array::CFArray;
@@ -80,6 +83,33 @@ pub fn list_windows(show_all_spaces: bool) -> Result<Vec<WindowRef>> {
             Vec::new()
         }
     };
+    merge_with_cg(ax_wins, show_all_spaces)
+}
+
+/// Instant listing from the last AX pass, revalidated against live CG state
+/// (in-process, no IPC into other apps). `None` until a full
+/// [`list_windows`] has run once. Titles may be one refresh old.
+pub fn cached_windows(show_all_spaces: bool) -> Option<Vec<WindowRef>> {
+    if !AX_CACHE_WARM.load(Ordering::Acquire) {
+        return None;
+    }
+    let alive: HashSet<i32> = list_apps().ok()?.into_iter().map(|a| a.pid).collect();
+    let valid = valid_cg_window_ids();
+    let on_screen = (!show_all_spaces).then(current_space_window_ids);
+    let ax_wins: Vec<WindowRef> = {
+        let cache = ax_cache().lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .iter()
+            .filter(|(pid, _)| alive.contains(pid))
+            .flat_map(|(_, ws)| ws.iter())
+            .filter(|w| still_valid(w, &valid) && on_space(w, on_screen.as_ref()))
+            .cloned()
+            .collect()
+    };
+    merge_with_cg(ax_wins, show_all_spaces).ok()
+}
+
+fn merge_with_cg(ax_wins: Vec<WindowRef>, show_all_spaces: bool) -> Result<Vec<WindowRef>> {
     let known_ids: HashSet<u64> = ax_wins.iter().map(|w| w.id).collect();
     // Belt-and-suspenders dedup for *titled* CG entries: AX only falls back
     // to a synthetic id if `_AXUIElementGetWindow` failed (rare now that
@@ -304,14 +334,170 @@ fn list_windows_via_ax(show_all_spaces: bool) -> Result<Vec<WindowRef>> {
     // only a geometry check catches it: a real window always has some
     // overlap with a physical display.
     let screens = active_display_rects();
+    let results = ax_windows_parallel(&apps, &valid, &screens);
+
+    let mut cache = ax_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let alive: HashSet<i32> = apps.iter().map(|a| a.pid).collect();
+    cache.retain(|pid, _| alive.contains(pid));
     let mut out = Vec::with_capacity(apps.len() * 2);
-    for app in apps {
-        match ax_windows_for(&app, on_screen.as_ref(), &valid, &screens) {
-            Ok(mut windows) => out.append(&mut windows),
-            Err(e) => tracing::debug!(pid = app.pid, "no AX windows: {e:#}"),
+    for (app, (result, elapsed)) in apps.iter().zip(results) {
+        let elapsed_ms = elapsed.as_millis();
+        if elapsed_ms >= SLOW_AX_APP_MS {
+            let partial = !matches!(result, Ok(AxAppWindows { degraded: false, .. }));
+            tracing::warn!(pid = app.pid, app = %app.name, elapsed_ms, partial, "slow AX app");
+        }
+        let windows = match result {
+            Ok(r) if !r.degraded => {
+                cache.insert(app.pid, r.windows.clone());
+                r.windows
+            }
+            // Busy / napped app answered partially or not at all: fill the
+            // gaps from its last complete answer rather than dropping rows.
+            Ok(r) => {
+                let mut ws = r.windows;
+                let seen: HashSet<u64> = ws.iter().map(|w| w.id).collect();
+                if let Some(cached) = cache.get(&app.pid) {
+                    ws.extend(
+                        cached
+                            .iter()
+                            .filter(|w| !seen.contains(&w.id) && still_valid(w, &valid))
+                            .cloned(),
+                    );
+                }
+                ws
+            }
+            // A plain error is the app's real answer (no AX windows); only a
+            // timeout falls back to the cache.
+            Err(e) if !e.is::<AxTimeout>() => {
+                tracing::debug!(pid = app.pid, "no AX windows: {e:#}");
+                cache.remove(&app.pid);
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::debug!(pid = app.pid, "AX timed out: {e:#}");
+                cache
+                    .get(&app.pid)
+                    .map(|cached| {
+                        cached
+                            .iter()
+                            .filter(|w| still_valid(w, &valid))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+        };
+        out.extend(windows.into_iter().filter(|w| on_space(w, on_screen.as_ref())));
+    }
+    AX_CACHE_WARM.store(true, Ordering::Release);
+    Ok(out)
+}
+
+// AX calls are synchronous IPC into the target app; a busy app otherwise
+// stalls the switcher for the default ~6 s messaging timeout per call.
+const AX_APP_TIMEOUT_SECS: f32 = 0.15;
+// Safety net for an app that times out call after call; the rest of its
+// windows come from the cache.
+const AX_APP_BUDGET: Duration = Duration::from_millis(1000);
+const SLOW_AX_APP_MS: u128 = 30;
+const AX_WORKERS: usize = 12;
+
+static AX_CACHE_WARM: AtomicBool = AtomicBool::new(false);
+
+/// Last complete AX answer per pid, before the current-Space filter so a
+/// Space switch doesn't empty it.
+fn ax_cache() -> &'static Mutex<HashMap<i32, Vec<WindowRef>>> {
+    static CACHE: OnceLock<Mutex<HashMap<i32, Vec<WindowRef>>>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Replay of the AX ghost filter for cached entries: closed windows drop out
+/// of CG's valid set. Minimized windows aren't in it, so they're kept.
+fn still_valid(w: &WindowRef, valid: &HashSet<CGWindowID>) -> bool {
+    w.minimized || u32::try_from(w.id).is_ok_and(|id| valid.contains(&id))
+}
+
+/// Current-desktop filter: keep minimized windows (they belong to the
+/// current Space conceptually) and anything whose CGWindowID is in the
+/// on-screen set. Synthetic ids (no CGWindowID) drop out — better than
+/// showing off-Space windows when the user asked for the current-only view.
+fn on_space(w: &WindowRef, on_screen: Option<&HashSet<CGWindowID>>) -> bool {
+    match on_screen {
+        None => true,
+        Some(on_screen) => {
+            w.minimized || u32::try_from(w.id).is_ok_and(|id| on_screen.contains(&id))
         }
     }
-    Ok(out)
+}
+
+#[link(name = "System")]
+extern "C" {
+    fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+}
+const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+
+/// Query every app concurrently: wall time is the slowest app instead of the
+/// sum, which matters when several napped apps each burn the AX timeout.
+fn ax_windows_parallel(
+    apps: &[AppRef],
+    valid: &HashSet<CGWindowID>,
+    screens: &[Rect],
+) -> Vec<AxAppResult> {
+    let next = AtomicUsize::new(0);
+    let slots: Vec<Mutex<Option<AxAppResult>>> =
+        apps.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..AX_WORKERS.min(apps.len()) {
+            scope.spawn(|| {
+                // Default QoS for a fresh thread ranks below the UI under
+                // load; the user is waiting on this result.
+                unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(app) = apps.get(i) else { break };
+                    let started = Instant::now();
+                    let result = ax_windows_for(app, valid, screens, started);
+                    *slots[i].lock().unwrap() = Some((result, started.elapsed()));
+                }
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .unwrap()
+                .expect("every index is claimed by a worker")
+        })
+        .collect()
+}
+
+type AxAppResult = (Result<AxAppWindows>, Duration);
+
+struct AxAppWindows {
+    windows: Vec<WindowRef>,
+    /// Some calls timed out or the budget ran out: `windows` may be missing
+    /// entries (an attribute timeout makes a window fail the subrole/title
+    /// filter), so it must not replace the cache.
+    degraded: bool,
+}
+
+thread_local! {
+    // Set by `ax_copy_raw` on `kAXErrorCannotComplete` (messaging timeout).
+    // Wall-clock can't tell a timeout from a merely slow answer under load.
+    static AX_TIMED_OUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("AX messaging timeout")]
+struct AxTimeout;
+
+struct OwnedAxElement(AXUIElementRef);
+
+impl Drop for OwnedAxElement {
+    fn drop(&mut self) {
+        unsafe { core_foundation::base::CFRelease(self.0 as _) };
+    }
 }
 
 // Real user-facing windows report one of these subroles. Finder's hidden
@@ -327,22 +513,34 @@ const ALLOWED_SUBROLES: &[&str] = &[
 
 fn ax_windows_for(
     app: &AppRef,
-    on_screen: Option<&HashSet<CGWindowID>>,
     valid_cg_ids: &HashSet<CGWindowID>,
     screens: &[Rect],
-) -> Result<Vec<WindowRef>> {
+    started: Instant,
+) -> Result<AxAppWindows> {
     let mut out = Vec::new();
+    let mut budget_exceeded = false;
+    AX_TIMED_OUT.set(false);
     unsafe {
         let elem = AXUIElementCreateApplication(app.pid);
         if elem.is_null() {
             return Err(anyhow!("AXUIElementCreateApplication returned null"));
         }
-        let Some(windows) = ax_copy_array(elem, kAXWindowsAttribute) else {
-            return Ok(out);
+        let elem = OwnedAxElement(elem);
+        AXUIElementSetMessagingTimeout(elem.0, AX_APP_TIMEOUT_SECS);
+        let Some(windows) = ax_copy_array(elem.0, kAXWindowsAttribute) else {
+            if AX_TIMED_OUT.get() {
+                return Err(AxTimeout.into());
+            }
+            return Err(anyhow!("kAXWindows unavailable"));
         };
         for i in 0..windows.len() {
+            if started.elapsed() >= AX_APP_BUDGET {
+                budget_exceeded = true;
+                break;
+            }
             let Some(w) = windows.get(i) else { continue };
             let wref = w.as_CFTypeRef() as AXUIElementRef;
+            AXUIElementSetMessagingTimeout(wref, AX_APP_TIMEOUT_SECS);
             let subrole = ax_copy_string(wref, kAXSubroleAttribute);
             let title = ax_copy_string(wref, kAXTitleAttribute).unwrap_or_default();
             let keep = match subrole.as_deref() {
@@ -407,18 +605,6 @@ fn ax_windows_for(
                     }
                 }
             }
-            if let Some(on_screen) = on_screen {
-                // Current-desktop filter: keep minimized windows (they belong
-                // to the current Space conceptually) and anything whose
-                // CGWindowID is in the on-screen set. Windows whose id we
-                // can't resolve drop out — better than showing off-Space
-                // windows when the user asked for the current-only view.
-                let keep_space = minimized
-                    || cg_id.map_or(false, |id| on_screen.contains(&id));
-                if !keep_space {
-                    continue;
-                }
-            }
             out.push(WindowRef {
                 // Prefer the real CGWindowID; fall back to the pre-existing
                 // synthetic `(pid << 32) | idx` scheme when AX refuses to
@@ -435,7 +621,10 @@ fn ax_windows_for(
             });
         }
     }
-    Ok(out)
+    Ok(AxAppWindows {
+        windows: out,
+        degraded: budget_exceeded || AX_TIMED_OUT.get(),
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -684,6 +873,9 @@ unsafe fn ax_copy_raw(elem: AXUIElementRef, attr: &str) -> Option<*const c_void>
     let mut value: *const c_void = std::ptr::null();
     let err: AXError =
         AXUIElementCopyAttributeValue(elem, attr_cf.as_concrete_TypeRef(), &mut value);
+    if err == kAXErrorCannotComplete {
+        AX_TIMED_OUT.set(true);
+    }
     if err != kAXErrorSuccess || value.is_null() {
         return None;
     }

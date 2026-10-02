@@ -17,6 +17,13 @@ pub trait WindowSource: Send + Sync {
     /// across every Space are returned (requires Screen Recording permission
     /// to read cross-Space window titles on macOS 14.4+).
     fn list_windows(&self, show_all_spaces: bool) -> Result<Vec<WindowRef>>;
+    /// Instant, possibly slightly stale listing that skips the slow
+    /// per-app queries, for painting the switcher before
+    /// [`Self::list_windows`] returns. `None` when the platform has no cache
+    /// yet; callers then block on `list_windows`.
+    fn cached_windows(&self, _show_all_spaces: bool) -> Option<Vec<WindowRef>> {
+        None
+    }
     fn list_apps(&self) -> Result<Vec<AppRef>>;
     fn activate_window(&self, w: &WindowRef) -> Result<()>;
     fn activate_app(&self, a: &AppRef) -> Result<()>;
