@@ -110,6 +110,7 @@ Replace SHA in `Cargo.toml` (two entries: `gpui` + `gpui_platform`). Run `cargo 
   1. `WindowKind::Normal` / `Floating` (settings, onboarding) — else no foreground.
   2. `WindowKind::PopUp` (the switcher) — else keyboard input not delivered.
 - **Switcher confirm order**: panel still active during `activate_window`, close after. Path A SLPS works regardless of caller activation state. Closing before risks dropping the click before SLPS posts.
+- **GPUI has no NSAccessibility** — dictation tools (MacWhisper) need a focused `AXTextField`. `macos/text_field_ax.rs` adds AX methods to `GPUIView` at runtime (role text field while an input handler is focused, `AXSelectedText` write → `insertText:`). Focus notifications posted on switcher open. objc2 debug type check: GPUI declares `{NSRange=QQ}`, objc2's `NSRange` is `{_NSRange=QQ}` → local mirror struct. MacWhisper ignores processes without bundle id → test from `.app` (`bundle/bundle.sh`), not `cargo run`.
 - Karabiner Elements / non-US keyboard layouts: `global-hotkey` map to physical W3C key codes. `Code::Equal` bind to US `=` physical position, sit under different keycaps on AZERTY/QWERTZ. Prefer keys unambiguous across layouts (letters, digits, Space, arrows) for default.
 
 ## Regression scenarios — focus + listing

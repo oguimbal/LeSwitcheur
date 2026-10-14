@@ -19,6 +19,7 @@ pub mod spotlight;
 pub mod recency;
 pub mod startup;
 pub mod system_switcher;
+pub mod text_field_ax;
 pub mod windows;
 
 pub use hotkey::MacHotkeyService;

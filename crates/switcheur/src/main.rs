@@ -374,6 +374,9 @@ fn main() -> Result<()> {
         // Flip back to `.accessory` here; `cx.activate(true)` still works to
         // foreground our Normal windows (settings/onboarding) on demand.
         set_accessory_activation_policy();
+        // Let dictation tools (MacWhisper…) see our inputs as AX text fields.
+        #[cfg(target_os = "macos")]
+        switcheur_platform::macos::text_field_ax::install();
 
         // GPUI's default quit mode is `LastWindowClosed` everywhere except
         // macOS — so on Windows the process exits the moment the search
@@ -1403,7 +1406,18 @@ fn open_switcher_with_items(
         let _ = handle.update(cx, |_view, window, _cx| {
             window.activate_window();
         });
+        #[cfg(target_os = "macos")]
+        switcheur_platform::macos::text_field_ax::notify_focus_changed();
     });
+    // Key-window promotion can land after `activate_window` returns.
+    #[cfg(target_os = "macos")]
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(100))
+            .await;
+        cx.update(|_| switcheur_platform::macos::text_field_ax::notify_focus_changed());
+    })
+    .detach();
 
     // Wire confirm/dismiss → platform + close.
     let entity = entity_slot.borrow().clone().expect("builder populated slot");
