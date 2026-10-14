@@ -102,6 +102,9 @@ impl LlmLauncher for WinPlatform {
             LlmProvider::Claude => "https://claude.ai/new",
             LlmProvider::Mistral => "https://chat.mistral.ai/",
             LlmProvider::Perplexity => "https://www.perplexity.ai/",
+            LlmProvider::OpenClaw => {
+                anyhow::bail!("OpenClaw instructions go through crate::openclaw")
+            }
         };
         let q = url_encode(prompt);
         let full = if q.is_empty() {

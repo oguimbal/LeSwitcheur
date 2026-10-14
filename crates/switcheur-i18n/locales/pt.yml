@@ -4,6 +4,11 @@ window:
   onboarding_title: "Bem-vindo ao LeSwitcheur"
 
 settings:
+  openclaw_not_configured: "Não configurado"
+  openclaw_configure: "Configurar…"
+  openclaw_set_up: "Configurar…"
+  openclaw_disconnect: "Desconectar"
+  openclaw_hint: "«Enviar instrução para …» envia a consulta para uma sessão OpenClaw sem abrir nada. Prima Enter novamente para abrir a conversa."
   header: "Ajustes"
   tab_general: "Geral"
   tab_shortcuts: "Atalhos"
@@ -68,6 +73,9 @@ picker:
   no_matches: "Sem apps correspondentes"
 
 switcher:
+  instruction_sending: "Enviando para %{name}…"
+  instruction_open: "Enviado ✓ — prima Enter novamente para abrir %{name}"
+  instruction_failed: "Falha ao enviar para %{name}: %{reason}"
   search_placeholder: "Pesquisar…"
   no_windows: "Nenhuma janela encontrada"
   no_results: "Sem resultados"
@@ -75,6 +83,7 @@ switcher:
   dirs_header: "Pastas zoxide"
 
 llm:
+  send_instruction: "Enviar instrução para %{name}"
   ask_claude: "Perguntar ao Claude"
   ask_chatgpt: "Perguntar ao ChatGPT"
   ask_mistral: "Perguntar ao Le Chat"

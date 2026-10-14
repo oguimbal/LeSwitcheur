@@ -4,6 +4,11 @@ window:
   onboarding_title: "Willkommen bei LeSwitcheur"
 
 settings:
+  openclaw_not_configured: "Nicht eingerichtet"
+  openclaw_configure: "Konfigurieren…"
+  openclaw_set_up: "Einrichten…"
+  openclaw_disconnect: "Trennen"
+  openclaw_hint: "„Anweisung an … senden“ schickt die Anfrage an eine OpenClaw-Sitzung, ohne etwas zu öffnen. Erneut Enter öffnet die Unterhaltung."
   header: "Einstellungen"
   tab_general: "Allgemein"
   tab_shortcuts: "Tastenkürzel"
@@ -68,6 +73,9 @@ picker:
   no_matches: "Keine passenden Apps"
 
 switcher:
+  instruction_sending: "Wird an %{name} gesendet…"
+  instruction_open: "Gesendet ✓ — erneut Enter, um %{name} zu öffnen"
+  instruction_failed: "Senden an %{name} fehlgeschlagen: %{reason}"
   search_placeholder: "Suchen…"
   no_windows: "Keine Fenster gefunden"
   no_results: "Keine Ergebnisse"
@@ -75,6 +83,7 @@ switcher:
   dirs_header: "Zoxide-Ordner"
 
 llm:
+  send_instruction: "Anweisung an %{name} senden"
   ask_claude: "Claude fragen"
   ask_chatgpt: "ChatGPT fragen"
   ask_mistral: "Le Chat fragen"

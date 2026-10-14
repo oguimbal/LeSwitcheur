@@ -1,12 +1,37 @@
 //! Result list rendering.
 
-use gpui::{div, hsla, img, px, rgb, svg, AnyElement, Div, IntoElement, ParentElement, Styled};
+use std::path::Path;
+use std::sync::Arc;
+
+use gpui::{
+    div, hsla, img, px, rgb, svg, AnyElement, Div, IntoElement, ParentElement, SharedString,
+    Styled,
+};
 use switcheur_core::{Item, LlmProvider, MatchResult, PlaybackState};
-use switcheur_i18n::tr;
+use switcheur_i18n::{tr, tr_sub};
 
 use crate::theme::Theme;
 
 const ICON_SIZE: f32 = 26.0;
+
+/// How the OpenClaw "Send instruction" row presents its agent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenClawRow {
+    pub name: SharedString,
+    /// Cached agent avatar; else `emoji`; else the OpenClaw mark.
+    pub avatar: Option<Arc<Path>>,
+    pub emoji: Option<SharedString>,
+}
+
+impl Default for OpenClawRow {
+    fn default() -> Self {
+        Self {
+            name: LlmProvider::OpenClaw.display_name().into(),
+            avatar: None,
+            emoji: None,
+        }
+    }
+}
 /// Size of the badge overlaid on an icon's bottom-right corner (minimized
 /// windows and browser tabs). Sized relative to [`ICON_SIZE`] so the badge
 /// reads as deliberate rather than crammed.
@@ -18,9 +43,18 @@ const ROW_HEIGHT: f32 = 44.0;
 
 /// Returns the row as a concrete [`Div`] so the caller can chain an `.id(...)`
 /// + click/hover handlers on top before converting to `AnyElement`.
-pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> Div {
+pub fn render_row(
+    match_result: &MatchResult,
+    selected: bool,
+    theme: &Theme,
+    openclaw: &OpenClawRow,
+) -> Div {
     let item = &match_result.item;
     let primary = match item {
+        Item::AskLlm {
+            provider: LlmProvider::OpenClaw,
+            ..
+        } => tr_sub("llm.send_instruction", &[("name", &openclaw.name)]),
         Item::AskLlm { provider, .. } => tr(provider.i18n_key()),
         Item::OpenUrl(_) => tr("launcher.open_url"),
         _ => item.primary().to_string(),
@@ -36,6 +70,26 @@ pub fn render_row(match_result: &MatchResult, selected: bool, theme: &Theme) -> 
 
     let base_icon: AnyElement = match item {
         Item::LocalSource(source) => crate::local_source::icon(source, theme),
+        Item::AskLlm {
+            provider: LlmProvider::OpenClaw,
+            ..
+        } if openclaw.avatar.is_some() => img(openclaw.avatar.clone().unwrap())
+            .w(px(ICON_SIZE))
+            .h(px(ICON_SIZE))
+            .rounded_full()
+            .into_any_element(),
+        Item::AskLlm {
+            provider: LlmProvider::OpenClaw,
+            ..
+        } if openclaw.emoji.is_some() => div()
+            .w(px(ICON_SIZE))
+            .h(px(ICON_SIZE))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(20.0))
+            .child(openclaw.emoji.clone().unwrap())
+            .into_any_element(),
         Item::AskLlm { provider, .. } => llm_icon(*provider),
         _ => match item.icon_path() {
             Some(path) => img(path.to_path_buf())
@@ -226,6 +280,7 @@ fn llm_icon(provider: LlmProvider) -> AnyElement {
         LlmProvider::Claude => ("llm_icons/claude.svg", 0xCC785C),
         LlmProvider::ChatGpt => ("llm_icons/chatgpt.svg", 0x10A37F),
         LlmProvider::Perplexity => ("llm_icons/perplexity.svg", 0x20808D),
+        LlmProvider::OpenClaw => ("llm_icons/openclaw.svg", 0xE5484D),
     };
     svg()
         .path(asset)

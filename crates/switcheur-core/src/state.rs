@@ -1113,8 +1113,8 @@ mod tests {
         // isn't held back by an in-flight fetch.
         s.set_browser_tabs(Vec::new());
         s.set_query("xyznomatchatall");
-        // 4 providers in default order (Mistral first).
-        assert_eq!(s.filtered().len(), 4);
+        // 5 providers in default order (Mistral first).
+        assert_eq!(s.filtered().len(), 5);
         match s.selected().unwrap() {
             Item::AskLlm { provider, query } => {
                 assert_eq!(*provider, LlmProvider::Mistral);
@@ -1282,14 +1282,14 @@ mod tests {
         s.set_items(vec![win("Mail", "Inbox")]);
         s.set_browser_tabs(vec![tab("GitHub", "https://github.com/")]);
         s.set_query("github");
-        // 1 tab + 4 AskLlm rows (thin tab signal → offer AI handoff).
+        // 1 tab + 5 AskLlm rows (thin tab signal → offer AI handoff).
         assert!(matches!(s.filtered()[0].item, Item::BrowserTab(_)));
         assert_eq!(
             s.filtered()
                 .iter()
                 .filter(|m| matches!(m.item, Item::AskLlm { .. }))
                 .count(),
-            4
+            5
         );
     }
 
@@ -1316,7 +1316,7 @@ mod tests {
             .filter(|m| matches!(m.item, Item::AskLlm { .. }))
             .count();
         assert_eq!(tabs, 3);
-        assert_eq!(llms, 4);
+        assert_eq!(llms, 5);
         // Tabs first, LLM rows appended at the end.
         assert!(matches!(items[0].item, Item::BrowserTab(_)));
         assert!(matches!(items.last().unwrap().item, Item::AskLlm { .. }));

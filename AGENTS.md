@@ -163,6 +163,15 @@ If can't test a case: say so explicit, don't claim still work.
 29. **Daemon refusal silent** — `current_now_playing` returns `None` on every error path (no helper, helper crashed, bad JSON, daemon refused even via perl). No log spam.
 30. **`LESWITCHEUR_BUNDLE` env override** — `cargo run --example probe_audio` resolves the helper via this var pointed at `dist/LeSwitcheur.app`, since `NSBundle::mainBundle()` from a cargo example points at the example binary's parent dir.
 
+### OpenClaw
+
+31. **Unpaired pick** — row reads "Send instruction to OpenClaw"; Enter opens setup window, panel dismisses.
+32. **Send stays open** — paired, type text, Enter on the row: input clears, panel shrinks to the input row only, spinner then green check drawing itself, placeholder "press Enter again to open <nickname>"; blur still dismisses.
+33. **Second Enter** — empty query after send opens the conversation (`<url>/chat/<agent>`, or the created session in "new session" mode) once, closes panel. Any other key brings the list back; OpenClaw row sends again.
+34. **Send failure** — gateway down: text restored in input, list back, red error line with code, no panel close.
+35. **Pairing approval** — remote gateway: approve command shown, auto-retry succeeds after `openclaw devices approve`, window moves to the agent step; closing the window stops the loop.
+36. **Agent step** — agents listed with avatar (else emoji, else initial); Save stores the agent's name and emoji, caches the avatar, and the switcher row shows avatar → emoji → OpenClaw mark. Agents that fail to load still allow Save with the configured agent.
+
 ### Don't-do
 
 - AppleScript for window mgmt — banned.
@@ -189,6 +198,18 @@ If can't test a case: say so explicit, don't claim still work.
 - `switcheur-platform/src/local_sources.rs` registers local sources and validates snapshots. `Item::LocalSource` carries an opaque session ID and process-instance ID; focus always returns to the owning source.
 - Panel-scoped background polling clears disconnected/incompatible sources. Keep network/IPC work off the GPUI thread and preserve target identity during refresh.
 - Empty-query suggestions combine audio with at most three waiting/unread sessions. Search weights and a synthetic GPUI preview are documented in `crates/local-source-ipc/README.md`.
+
+## OpenClaw provider
+
+- `LlmProvider::OpenClaw` row is always listed with the other "Ask …" rows, labelled "Send instruction to <nickname>". Not paired → Enter opens the setup window (`crates/switcheur/src/openclaw.rs`, `switcheur-ui/src/openclaw_setup_view.rs`). Paired → Enter does **not** close the panel: view emits `SendInstruction`, host clears the input, sends off the UI thread, then `instruction_sent` (animated check + placeholder "press Enter again to open") or `instruction_failed` (text restored + error line). Second Enter on empty query emits `Confirmed(Item::OpenUrl(<Control UI session URL>))`.
+- Gateway client: `switcheur-platform/src/openclaw/` — ported from AgentsMon (`../agentsmon`, `docs/openclaw-gateway.md`), protocol v4, but scope `operator.write` (needed by `chat.send`), `displayName: "LeSwitcheur"`. Own Ed25519 identity, separate from AgentsMon's read-only one. Connect-per-send, no persistent socket, no retry loop on refused auth.
+- Storage: `config.toml` `[openclaw]` = `url`, `nickname` (agent name copied at setup, no field to edit), `emoji` (row icon when there is no avatar image), `agent_id` (default `main`), `session_mode` (`main` | `new` | `given`), `session_key` (used by `given`; bare `<rest>` is scoped to `agent_id`), no secret. `OpenClawConfig::target()` resolves them. `openclaw-device.json` (0600, same dir) = Ed25519 secret + device tokens per gateway origin. `openclaw-avatar-<hash>.<ext>` = selected agent's avatar (hash in the name because GPUI caches images by path). Shared gateway token typed at setup is used to pair only, never written.
+- Setup window has two steps: connection (URL + token, pairing), then agent and session mode. Already paired → opens on the agent step. `agents.list` (`operator.read`, implied by `operator.write`) gives the roster but only config-set avatars; each agent's effective identity comes from `agent.identity.get`, whose `avatar` is a `data:` URL (local file) or http(s) URL (fetched without credentials) for non-Control-UI clients, else just the emoji / a default letter (not an image).
+- Sending: `main`/`given` → `chat.send {sessionKey}`; `new` → `sessions.create {agentId, message}` (initial turn; `runStarted: false` = failure), conversation URL built from the returned key.
+- Pairing: remote gateway answers `PAIRING_REQUIRED` → window shows `openclaw devices approve <requestId>`, retries every 3 s (manual Retry when `pauseReconnect`), gives up after 15 min. Loopback gateways auto-approve. Empty token + already paired URL = skip to the agent step.
+- Never log the shared token or gateway `error.message` (may echo input); only error codes. `handle_view_event` skips its `?ev` log for `SendInstruction` and the OpenClaw `Confirmed(AskLlm)`. (Pre-existing `QueryChanged` logging still records typed queries when a dir source is on.)
+- Enter reaches the view twice: the `Confirm` action runs first (the input propagates Enter), then the input's deferred `PressEnter`. Both go through `confirm_selection`, which holds the Sending/Sent handling; a `confirmed` latch keeps `Confirmed` to one emit per panel (reset when a local-source focus fails and the panel stays). After a send the view is `input_only` until the next non-Enter key (`capture_key_down`), so there is no list to arrow into.
+- `rustls` must keep exactly one crypto provider (`ring`, shared with `ureq`); `gateway::tests::tls_has_exactly_one_crypto_provider` guards it.
 
 ## Key files
 

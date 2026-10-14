@@ -152,11 +152,18 @@ fn cg_supplement_windows(
     already_have_pid_title: &HashSet<(i32, String)>,
     ax_pids: &HashSet<i32>,
 ) -> Vec<WindowRef> {
-    let apps_by_pid: HashMap<i32, AppRef> = list_apps()
+    let mut apps_by_pid: HashMap<i32, AppRef> = list_apps()
         .unwrap_or_default()
         .into_iter()
         .map(|a| (a.pid, a))
         .collect();
+    // We run as an accessory app, so `list_apps` drops us, and the AX pass
+    // never queries our own process (it would block on our main thread).
+    // Our titled windows (Settings, OpenClaw setup…) come from CG instead.
+    let own_pid = std::process::id() as i32;
+    if let Some(me) = own_app() {
+        apps_by_pid.insert(own_pid, me);
+    }
 
     let base = if show_all_spaces {
         kCGWindowListOptionAll
@@ -222,7 +229,7 @@ fn cg_supplement_windows(
         // we're inside a fullscreen Space). On-screen layer-0 windows
         // the AX path already handled with its subrole filter.
         let on_screen = cg_get_bool(dict, "kCGWindowIsOnscreen").unwrap_or(false);
-        if on_screen {
+        if on_screen && pid != own_pid {
             continue;
         }
         let alpha = cg_get_f64(dict, "kCGWindowAlpha").unwrap_or(1.0);
@@ -241,6 +248,10 @@ fn cg_supplement_windows(
             continue;
         }
         let title = cg_get_string(dict, "kCGWindowName").unwrap_or_default();
+        if pid == own_pid && title.is_empty() {
+            // The switcher panel itself and GPUI helper surfaces.
+            continue;
+        }
 
         if !title.is_empty() {
             if already_have_pid_title.contains(&(pid, title.clone())) {
@@ -829,6 +840,31 @@ fn list_windows_via_cg(show_all_spaces: bool) -> Result<Vec<WindowRef>> {
     }
 
     Ok(out)
+}
+
+/// This process as an [`AppRef`], whatever its activation policy.
+fn own_app() -> Option<AppRef> {
+    use objc2_app_kit::NSRunningApplication;
+
+    let app = NSRunningApplication::currentApplication();
+    let name = app
+        .localizedName()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "LeSwitcheur".to_string());
+    let bundle_id = app.bundleIdentifier().map(|s| s.to_string());
+    let pid = app.processIdentifier();
+    let icon_key = bundle_id.clone().unwrap_or_else(|| format!("pid-{pid}"));
+    let icon_path = app
+        .bundleURL()
+        .and_then(|u| u.path())
+        .map(|s| s.to_string())
+        .and_then(|p| super::icons::icon_for_bundle(&p, &icon_key));
+    Some(AppRef {
+        pid,
+        name,
+        bundle_id,
+        icon_path,
+    })
 }
 
 pub fn list_apps() -> Result<Vec<AppRef>> {

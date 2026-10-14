@@ -3,7 +3,7 @@
 use gpui::{
     canvas, div, linear, percentage, prelude::*, px, svg, uniform_list, Animation, AnimationExt,
     AnyElement, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, MouseButton, MouseDownEvent, ParentElement, Render, ScrollStrategy, SharedString,
+    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Render, ScrollStrategy, SharedString,
     Styled, Subscription, Transformation, UniformListScrollHandle, Window,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -14,14 +14,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use switcheur_core::{
-    DirRef, Item, PlaybackState, ProgramRef, Section, SwitcherState, WindowRef,
+    DirRef, Item, LlmProvider, PlaybackState, ProgramRef, Section, SwitcherState, WindowRef,
 };
-use switcheur_i18n::tr;
+use switcheur_i18n::{tr, tr_sub};
 
 use crate::actions::{
     Confirm, Dismiss, FocusNextPane, FocusPrevPane, MoveLeft, MoveRight, SelectNext, SelectPrev,
 };
-use crate::list::render_row;
+use crate::list::{render_row, OpenClawRow};
 use crate::theme::Theme;
 
 #[derive(Debug, Clone)]
@@ -89,6 +89,21 @@ pub enum SwitcherViewEvent {
     /// toggle path (browser tab JS injection vs. AppleScript scripting
     /// dictionary) without re-deriving it from a bundle id.
     TogglePlayPause(Arc<switcheur_core::AudioRowRef>),
+    /// Enter on the OpenClaw row while a gateway is configured. The panel
+    /// stays open: the host clears the query, sends the instruction off the
+    /// UI thread and reports back through [`SwitcherView::instruction_sent`]
+    /// or [`SwitcherView::instruction_failed`].
+    SendInstruction(String),
+}
+
+/// Progress of the last OpenClaw instruction sent from this panel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InstructionPhase {
+    Idle,
+    Sending,
+    /// Enter on an empty query now opens `conversation_url`.
+    Sent { conversation_url: Option<Arc<str>> },
+    Failed { message: SharedString },
 }
 
 /// Top-of-panel banner shown when the startup update check reported a newer
@@ -175,6 +190,17 @@ pub struct SwitcherView {
     /// when the dirs panel isn't visible so the host can skip popover
     /// placement until a fresh measurement lands.
     dirs_panel_top_y: Rc<Cell<Option<f32>>>,
+    /// Configured (and paired) OpenClaw agent. `None` when it isn't set up
+    /// yet: picking the row then goes to the host (setup window).
+    openclaw: Option<OpenClawRow>,
+    instruction_phase: InstructionPhase,
+    /// Bumped per send so the checkmark animation replays.
+    instruction_seq: usize,
+    /// Set by a send: only the input row is shown until the next key press.
+    input_only: bool,
+    /// Enter reaches both the input's `PressEnter` and the `Confirm`
+    /// action; emit `Confirmed` once per panel.
+    confirmed: bool,
 }
 
 /// Cooldown between scan-failure retries. Long enough that a slow Chrome
@@ -215,7 +241,112 @@ impl SwitcherView {
             open_with_folder_count: 0,
             open_with_file_count: 0,
             dirs_panel_top_y: Rc::new(Cell::new(None)),
+            openclaw: None,
+            instruction_phase: InstructionPhase::Idle,
+            instruction_seq: 0,
+            input_only: false,
+            confirmed: false,
         }
+    }
+
+    /// Configured OpenClaw agent, `None` when not set up.
+    pub fn set_openclaw(&mut self, openclaw: Option<OpenClawRow>, cx: &mut Context<Self>) {
+        self.openclaw = openclaw;
+        cx.notify();
+    }
+
+    fn openclaw_label(&self) -> SharedString {
+        self.openclaw.clone().unwrap_or_default().name
+    }
+
+    /// Host acknowledged a [`SwitcherViewEvent::SendInstruction`]: clear the
+    /// query so the panel is ready for the next instruction.
+    pub fn instruction_sending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let placeholder = tr_sub("switcher.instruction_sending", &[("name", &self.openclaw_label())]);
+        self.input_only = true;
+        self.input.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+            s.set_placeholder(placeholder, window, cx);
+        });
+        self.sync_query(cx);
+    }
+
+    pub fn instruction_sent(
+        &mut self,
+        conversation_url: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.instruction_seq += 1;
+        self.instruction_phase = InstructionPhase::Sent {
+            conversation_url: conversation_url.map(Arc::from),
+        };
+        let placeholder = tr_sub("switcher.instruction_open", &[("name", &self.openclaw_label())]);
+        self.input
+            .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
+        self.emit_height_delta_if_changed(cx);
+        cx.notify();
+    }
+
+    /// Put the instruction back in the field so it isn't lost, and show why.
+    pub fn instruction_failed(
+        &mut self,
+        text: String,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.instruction_phase = InstructionPhase::Failed {
+            message: message.into(),
+        };
+        self.input_only = false;
+        let placeholder = tr("switcher.search_placeholder");
+        self.input.update(cx, |s, cx| {
+            s.set_placeholder(placeholder, window, cx);
+            if s.value().is_empty() {
+                s.set_value(text, window, cx);
+            }
+        });
+        self.sync_query(cx);
+    }
+
+    /// Routes a confirmed item: a configured OpenClaw row sends in place,
+    /// everything else goes to the host and closes the panel.
+    fn confirm_item(&mut self, item: Item, cx: &mut Context<Self>) {
+        if let Item::AskLlm {
+            provider: LlmProvider::OpenClaw,
+            query,
+        } = &item
+        {
+            if self.openclaw.is_some() {
+                if self.instruction_phase != InstructionPhase::Sending {
+                    self.confirmed = false;
+                    self.instruction_phase = InstructionPhase::Sending;
+                    cx.emit(SwitcherViewEvent::SendInstruction(query.to_string()));
+                    cx.notify();
+                }
+                return;
+            }
+        }
+        self.emit_confirmed(item, cx);
+    }
+
+    fn emit_confirmed(&mut self, item: Item, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.confirmed, true) {
+            return;
+        }
+        self._activation_sub = None;
+        cx.emit(SwitcherViewEvent::Confirmed(item));
+    }
+
+    /// First key press after a send brings the list back.
+    fn on_key_down_capture(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_only || matches!(ev.keystroke.key.as_str(), "enter" | "escape") {
+            return;
+        }
+        self.input_only = false;
+        self.emit_height_delta_if_changed(cx);
+        cx.notify();
     }
 
     /// Install the host-computed counts of "open with" selectable rows for
@@ -419,6 +550,7 @@ impl SwitcherView {
         self.state.clear_suggestions();
         self.currently_playing_requested = false;
         self.local_focus_failed = false;
+        self.confirmed = false;
         if self.dirs_enabled {
             cx.emit(SwitcherViewEvent::QueryChanged(String::new()));
         }
@@ -517,6 +649,8 @@ impl SwitcherView {
 
     pub fn local_source_focus_failed(&mut self, cx: &mut Context<Self>) {
         self.local_focus_failed = true;
+        // The panel stays open: let the user pick again.
+        self.confirmed = false;
         cx.notify();
     }
 
@@ -618,8 +752,7 @@ impl SwitcherView {
     /// Confirm the current selection from an external driver (Cmd release).
     pub fn confirm_external(&mut self, cx: &mut Context<Self>) {
         if let Some(item) = self.state.selected().cloned() {
-            self._activation_sub = None;
-            cx.emit(SwitcherViewEvent::Confirmed(item));
+            self.confirm_item(item, cx);
         }
     }
 
@@ -791,7 +924,11 @@ impl SwitcherView {
     }
 
     fn emit_height_delta_if_changed(&mut self, cx: &mut Context<Self>) {
-        let extras = extras_above_input_height(&self.state);
+        let extras = if self.input_only {
+            0.0
+        } else {
+            extras_above_input_height(&self.state)
+        };
         let shrink = self.current_list_shrink();
         let d_extras = extras - self.last_extras_above_input;
         let d_shrink = shrink - self.last_list_shrink;
@@ -816,6 +953,9 @@ impl SwitcherView {
     /// window. Non-zero only when we're rendering an eval result with no
     /// matching items (and the nag card isn't covering the list).
     fn current_list_shrink(&self) -> f32 {
+        if self.input_only {
+            return INPUT_ONLY_SHRINK;
+        }
         let suppress = self.nag_phase == NagPhase::Hidden
             && self.state.filtered().is_empty()
             && self.state.eval_result().is_some();
@@ -831,8 +971,23 @@ impl SwitcherView {
     }
 
     fn confirm_selection(&mut self, cx: &mut Context<Self>) {
-        if self.nag_phase != NagPhase::Hidden {
+        if self.nag_phase != NagPhase::Hidden || self.confirmed {
             return;
+        }
+        // Right after a send, Enter on the empty field opens the
+        // conversation instead of the top window.
+        if self.state.query().is_empty() {
+            match &self.instruction_phase {
+                InstructionPhase::Sending => return,
+                InstructionPhase::Sent {
+                    conversation_url: Some(url),
+                } => {
+                    let item = Item::OpenUrl(url.clone());
+                    self.emit_confirmed(item, cx);
+                    return;
+                }
+                _ => {}
+            }
         }
         // Popover has keyboard focus → hand off to the host so it launches
         // the dir with the selected app instead of the default handler.
@@ -841,8 +996,7 @@ impl SwitcherView {
             return;
         }
         if let Some(item) = self.state.selected().cloned() {
-            self._activation_sub = None;
-            cx.emit(SwitcherViewEvent::Confirmed(item));
+            self.confirm_item(item, cx);
         }
     }
 
@@ -851,8 +1005,7 @@ impl SwitcherView {
     fn on_row_click(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.state.set_selected(idx);
         if let Some(item) = self.state.selected().cloned() {
-            self._activation_sub = None;
-            cx.emit(SwitcherViewEvent::Confirmed(item));
+            self.confirm_item(item, cx);
         }
     }
 
@@ -1213,6 +1366,7 @@ impl Render for SwitcherView {
                     let selected = this.state.selected_idx();
                     let window_active = this.state.active_section() == Section::Windows;
                     let theme = this.theme;
+                    let openclaw_row = this.openclaw.clone().unwrap_or_default();
                     // `filtered()` borrows `this`, but we also need `cx.listener`
                     // which borrows `this` mutably. Build the rows first using
                     // the shared borrow, then attach handlers after it drops.
@@ -1224,7 +1378,12 @@ impl Render for SwitcherView {
                             (
                                 i,
                                 is_window,
-                                render_row(mr, window_active && i == selected, &theme),
+                                render_row(
+                                    mr,
+                                    window_active && i == selected,
+                                    &theme,
+                                    &openclaw_row,
+                                ),
                             )
                         })
                         .collect();
@@ -1280,6 +1439,7 @@ impl Render for SwitcherView {
             .on_action(cx.listener(Self::on_audio_space))
             .on_action(cx.listener(Self::on_focus_next_pane))
             .on_action(cx.listener(Self::on_focus_prev_pane))
+            .capture_key_down(cx.listener(Self::on_key_down_capture))
             .flex()
             .flex_col()
             .size_full()
@@ -1290,6 +1450,22 @@ impl Render for SwitcherView {
             .text_color(theme.foreground)
             .text_size(px(14.0))
             .children(render_update_banner(self.update_banner.clone(), &theme, cx))
+            .when_some(
+                match &self.instruction_phase {
+                    InstructionPhase::Failed { message } => Some(message.clone()),
+                    _ => None,
+                },
+                |root, message| {
+                    root.child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_size(px(11.0))
+                            .text_color(theme.destructive)
+                            .child(message),
+                    )
+                },
+            )
             .when(self.local_focus_failed, |root| {
                 root.child(
                     div()
@@ -1300,12 +1476,12 @@ impl Render for SwitcherView {
                         .child(tr("local_sources.focus_failed")),
                 )
             })
-            .children(if nag_phase == NagPhase::Hidden {
+            .children(if nag_phase == NagPhase::Hidden && !self.input_only {
                 suggestions_section(&self.state, &theme, cx)
             } else {
                 None
             })
-            .children(if nag_phase == NagPhase::Hidden {
+            .children(if nag_phase == NagPhase::Hidden && !self.input_only {
                 programs_section(&self.state, &theme, cx)
             } else {
                 None
@@ -1325,6 +1501,11 @@ impl Render for SwitcherView {
                             .flex_1()
                             .child(Input::new(&self.input).appearance(false).bordered(false)),
                     )
+                    .children(render_instruction_status(
+                        &self.instruction_phase,
+                        self.instruction_seq,
+                        &theme,
+                    ))
                     .child(render_cog_or_spinner(self.dirs_loading, &theme, cx)),
             )
             .children(self.state.eval_result().map(|res| {
@@ -1375,7 +1556,7 @@ impl Render for SwitcherView {
                             .child("⧉"),
                     )
             }))
-            .children(if hide_empty_list {
+            .children(if hide_empty_list || self.input_only {
                 None
             } else {
                 let dirs_visible = nag_phase == NagPhase::Hidden && self.state.dirs_visible();
@@ -1555,7 +1736,7 @@ fn programs_section(
         .iter()
         .enumerate()
         .map(|(i, m)| {
-            render_row(m, section_active && i == selected, theme)
+            render_row(m, section_active && i == selected, theme, &OpenClawRow::default())
                 .id(("switcher-program-row", i))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
@@ -1629,7 +1810,7 @@ fn suggestions_section(
                 } else {
                     None
                 };
-            let mut row = render_row(&mr, active, theme);
+            let mut row = render_row(&mr, active, theme, &OpenClawRow::default());
             if let Some((row_ref, state)) = toggle_data {
                 row = row.child(render_play_pause_button(idx, row_ref, state, theme, cx));
             }
@@ -1709,7 +1890,12 @@ fn render_dirs_panel(
                 score: 0,
                 indices: Vec::new(),
             };
-            let mut row = render_row(&mr, section_active && i == selected, theme);
+            let mut row = render_row(
+                &mr,
+                section_active && i == selected,
+                theme,
+                &OpenClawRow::default(),
+            );
             if removable {
                 row = row.child(render_dir_remove_button(i, theme, cx));
             }
@@ -1807,6 +1993,122 @@ fn render_cog_or_spinner(
             .child("⚙")
             .into_any_element()
     }
+}
+
+/// Spinner while an OpenClaw instruction is in flight, then a checkmark that
+/// pops in (scale overshoot + fade) once the gateway accepted it.
+fn render_instruction_status(
+    phase: &InstructionPhase,
+    seq: usize,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    let base = div()
+        .ml_2()
+        .w(px(24.0))
+        .h(px(24.0))
+        .flex()
+        .items_center()
+        .justify_center();
+    match phase {
+        InstructionPhase::Sending => Some(
+            base.child(
+                svg()
+                    .path("browser_icons/spinner.svg")
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .text_color(theme.muted)
+                    .with_animation(
+                        "instruction_spinner",
+                        Animation::new(Duration::from_millis(900))
+                            .repeat()
+                            .with_easing(linear),
+                        |s, delta| s.with_transformation(Transformation::rotate(percentage(delta))),
+                    ),
+            )
+            .into_any_element(),
+        ),
+        InstructionPhase::Sent { .. } => Some(
+            base.child(
+                div()
+                    .size(px(22.0))
+                    .with_animation(
+                        ("instruction_sent", seq),
+                        Animation::new(Duration::from_millis(700)).with_easing(linear),
+                        |d, delta| d.child(sent_check_canvas(delta)),
+                    ),
+            )
+            .into_any_element(),
+        ),
+        InstructionPhase::Idle | InstructionPhase::Failed { .. } => None,
+    }
+}
+
+/// Green check that draws itself: the circle sweeps around, its fill fades
+/// in, then the tick is traced. `t` runs 0 → 1 over the animation.
+fn sent_check_canvas(t: f32) -> impl IntoElement {
+    const GREEN: u32 = 0x30A46C;
+    let ease = |x: f32| 1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3);
+    let ring = ease(t / 0.5);
+    let fill = ease((t - 0.3) / 0.4);
+    let tick = ease((t - 0.45) / 0.55);
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let side = bounds.size.width.min(bounds.size.height);
+            let unit = side / 22.0;
+            let at = |x: f32, y: f32| {
+                gpui::point(bounds.origin.x + unit * x, bounds.origin.y + unit * y)
+            };
+            let green: gpui::Hsla = gpui::rgb(GREEN).into();
+            let (cx, cy, r) = (11.0_f32, 11.0_f32, 9.5_f32);
+            let circle_point = |a: f32| at(cx + r * a.cos(), cy + r * a.sin());
+            let start = -std::f32::consts::FRAC_PI_2;
+
+            if fill > 0.0 {
+                let mut path = gpui::PathBuilder::fill();
+                path.move_to(circle_point(start));
+                for i in 1..=48 {
+                    path.line_to(circle_point(start + std::f32::consts::TAU * i as f32 / 48.0));
+                }
+                path.close();
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, green.opacity(0.18 * fill));
+                }
+            }
+            if ring > 0.0 {
+                let steps = ((48.0 * ring).ceil() as usize).max(1);
+                let sweep = std::f32::consts::TAU * ring;
+                let mut path = gpui::PathBuilder::stroke(unit * 1.8);
+                path.move_to(circle_point(start));
+                for i in 1..=steps {
+                    path.line_to(circle_point(start + sweep * i as f32 / steps as f32));
+                }
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, green);
+                }
+            }
+            if tick > 0.0 {
+                // Two legs, traced in proportion to their lengths.
+                let (a, b, c) = ((6.6, 11.4), (9.7, 14.4), (15.6, 8.2));
+                let leg = |p: (f32, f32), q: (f32, f32)| (q.0 - p.0).hypot(q.1 - p.1);
+                let (l1, l2) = (leg(a, b), leg(b, c));
+                let mut done = tick * (l1 + l2);
+                let mut path = gpui::PathBuilder::stroke(unit * 2.2);
+                path.move_to(at(a.0, a.1));
+                let k = (done / l1).min(1.0);
+                path.line_to(at(a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k));
+                done -= l1;
+                if done > 0.0 {
+                    let k = (done / l2).min(1.0);
+                    path.line_to(at(b.0 + (c.0 - b.0) * k, b.1 + (c.1 - b.1) * k));
+                }
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, green);
+                }
+            }
+        },
+    )
+    .size_full()
 }
 
 /// Inline "scanning browser tabs" row shown while the AppleScript fetch is
@@ -2047,6 +2349,9 @@ fn render_update_banner(
 /// list is suppressed (eval-only mode) the window shrinks by this amount.
 /// Rough budget: base HEIGHT minus input row + eval row + borders/padding.
 const LIST_AREA_HEIGHT: f32 = 300.0;
+
+/// Shrink leaving only the input row (base height 400 minus ~60 px).
+const INPUT_ONLY_SHRINK: f32 = 340.0;
 
 /// Total extra vertical pixels added above the input row by all sections
 /// that grow upward (programs section + currently-playing section). The

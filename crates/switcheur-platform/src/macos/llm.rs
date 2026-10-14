@@ -42,6 +42,9 @@ pub fn open_llm(provider: LlmProvider, prompt: &str) -> Result<()> {
                 open_url(&format!("https://www.perplexity.ai/search?q={encoded}"))
             }
         }
+        LlmProvider::OpenClaw => {
+            Err(anyhow!("OpenClaw instructions go through crate::openclaw"))
+        }
     }
 }
 

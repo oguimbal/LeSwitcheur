@@ -50,6 +50,7 @@ use switcheur_ui::{
 };
 use tracing_subscriber::EnvFilter;
 
+mod openclaw;
 mod tray;
 
 const WIDTH: f32 = 640.0;
@@ -441,6 +442,7 @@ fn main() -> Result<()> {
             settings_entity: Rc::new(RefCell::new(None)),
             onboarding: Rc::new(RefCell::new(None)),
             thanks: Rc::new(RefCell::new(None)),
+            openclaw_setup: Rc::new(RefCell::new(None)),
             licensed: Rc::new(Cell::new(licensed_now)),
             nag_shown_this_session: Rc::new(Cell::new(false)),
             pending_update: Rc::new(RefCell::new(None)),
@@ -561,6 +563,8 @@ struct AppState {
     /// Post-activation confirmation popup (thank-you card on success, error
     /// card on failure). At most one at a time.
     thanks: Rc<RefCell<Option<WindowSlot>>>,
+    /// OpenClaw gateway setup window, at most one.
+    openclaw_setup: Rc<RefCell<Option<WindowSlot>>>,
     licensed: Rc<Cell<bool>>,
     /// Set to true after the first unlicensed switcher open of this process.
     /// Drives the "nag on first open each launch" behaviour; reset implicitly
@@ -1314,6 +1318,7 @@ fn open_switcher_with_items(
     );
     let llm_order = state.config.borrow().llm_provider_order.clone();
     let ask_llm_enabled = state.config.borrow().ask_llm_enabled;
+    let openclaw_row = openclaw::ready_row(&state.config.borrow());
     // Dirs pane is enabled iff a source was successfully built: user picked
     // a backend and its tool is actually available. The view emits
     // QueryChanged events only when on, so the host's source.query() call
@@ -1353,6 +1358,7 @@ fn open_switcher_with_items(
             view.set_programs(programs_for_builder, cx);
             view.set_llm_provider_order(llm_order, cx);
             view.set_ask_llm_enabled(ask_llm_enabled, cx);
+            view.set_openclaw(openclaw_row.clone(), cx);
             view.set_open_with_counts(open_with_folder_count, open_with_file_count, cx);
             if show_nag {
                 view.set_nag_phase(NagPhase::Visible, cx);
@@ -1477,10 +1483,24 @@ fn open_switcher_with_items(
 }
 
 fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
-    tracing::info!(?ev, "switcher view event");
+    // Never log instruction text bound for OpenClaw.
+    if !matches!(
+        ev,
+        SwitcherViewEvent::SendInstruction(_)
+            | SwitcherViewEvent::Confirmed(Item::AskLlm {
+                provider: switcheur_core::LlmProvider::OpenClaw,
+                ..
+            })
+    ) {
+        tracing::info!(?ev, "switcher view event");
+    }
 
     // License-card events keep the panel open — the nag card lives inside it.
     match ev {
+        SwitcherViewEvent::SendInstruction(text) => {
+            openclaw::send_from_panel(text.clone(), state, cx);
+            return;
+        }
         SwitcherViewEvent::Confirmed(Item::LocalSource(target)) => {
             let entity = {
                 let mut current = state.current.borrow_mut();
@@ -1865,6 +1885,14 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                 Item::Window(w) => state.platform.activate_window(w),
                 Item::App(a) => state.platform.activate_app(a),
                 Item::Program(p) => state.platform.launch_program(p),
+                Item::AskLlm {
+                    provider: switcheur_core::LlmProvider::OpenClaw,
+                    ..
+                } => {
+                    // Only reached while no gateway is paired (the view sends
+                    // in place otherwise): set one up.
+                    openclaw::open_setup_window(state, cx)
+                }
                 Item::AskLlm { provider, query } => {
                     // Remember the pick so next time this provider floats to
                     // the top of the fallback row.
@@ -1922,7 +1950,8 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
         | SwitcherViewEvent::QueryChanged(_)
         | SwitcherViewEvent::NeedsBrowserTabs
         | SwitcherViewEvent::NeedsCurrentlyPlaying
-        | SwitcherViewEvent::TogglePlayPause(_) => unreachable!("handled above"),
+        | SwitcherViewEvent::TogglePlayPause(_)
+        | SwitcherViewEvent::SendInstruction(_) => unreachable!("handled above"),
     };
 
     if let Some(slot) = slot_to_close {
@@ -2580,6 +2609,12 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
         &switcheur_platform::file_manager::detected_folder_opener_bundle_ids(),
     );
 
+    let openclaw_summary = state
+        .config
+        .borrow()
+        .openclaw
+        .as_ref()
+        .map(|oc| (oc.nickname.clone(), oc.url.clone()));
     let bounds = initial_bounds(cx, SETTINGS_WIDTH, SETTINGS_HEIGHT);
     tracing::info!(?bounds, "settings window bounds");
 
@@ -2633,6 +2668,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
                 cx,
             );
             v.set_theme(theme, cx);
+            v.set_openclaw(openclaw_summary.clone(), cx);
             v
         });
         *slot_for_builder.borrow_mut() = Some(entity.clone());
@@ -2897,6 +2933,12 @@ fn handle_settings_event(
                 }
             }
         }
+        SettingsViewEvent::OpenClawConfigure => {
+            if let Err(e) = openclaw::open_setup_window(state, cx) {
+                tracing::warn!("open openclaw setup: {e:#}");
+            }
+        }
+        SettingsViewEvent::OpenClawDisconnect => openclaw::disconnect(state, cx),
         SettingsViewEvent::AskLlmEnabledChanged(on) => {
             let mut c = state.config.borrow_mut();
             c.ask_llm_enabled = *on;

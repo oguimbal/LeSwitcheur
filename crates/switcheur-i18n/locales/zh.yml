@@ -4,6 +4,11 @@ window:
   onboarding_title: "欢迎使用 LeSwitcheur"
 
 settings:
+  openclaw_not_configured: "未配置"
+  openclaw_configure: "配置…"
+  openclaw_set_up: "设置…"
+  openclaw_disconnect: "断开连接"
+  openclaw_hint: "「向 … 发送指令」会将查询发送到 OpenClaw 会话，而不打开任何内容。再按 Enter 打开对话。"
   header: "设置"
   tab_general: "通用"
   tab_shortcuts: "快捷键"
@@ -68,6 +73,9 @@ picker:
   no_matches: "没有匹配的应用"
 
 switcher:
+  instruction_sending: "正在发送到 %{name}…"
+  instruction_open: "已发送 ✓ — 再按 Enter 打开 %{name}"
+  instruction_failed: "无法发送到 %{name}：%{reason}"
   search_placeholder: "搜索…"
   no_windows: "未找到窗口"
   no_results: "无结果"
@@ -75,6 +83,7 @@ switcher:
   dirs_header: "Zoxide 目录"
 
 llm:
+  send_instruction: "向 %{name} 发送指令"
   ask_claude: "问 Claude"
   ask_chatgpt: "问 ChatGPT"
   ask_mistral: "问 Le Chat"

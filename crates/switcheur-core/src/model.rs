@@ -307,6 +307,9 @@ pub enum LlmProvider {
     Claude,
     ChatGpt,
     Perplexity,
+    /// Self-hosted OpenClaw gateway. Unlike the others it doesn't open a
+    /// chat: the query is sent as an instruction to a configured session.
+    OpenClaw,
 }
 
 impl LlmProvider {
@@ -319,6 +322,7 @@ impl LlmProvider {
             LlmProvider::Claude,
             LlmProvider::ChatGpt,
             LlmProvider::Perplexity,
+            LlmProvider::OpenClaw,
         ]
     }
 
@@ -329,6 +333,7 @@ impl LlmProvider {
             LlmProvider::Claude => "Claude",
             LlmProvider::ChatGpt => "ChatGPT",
             LlmProvider::Perplexity => "Perplexity",
+            LlmProvider::OpenClaw => "OpenClaw",
         }
     }
 
@@ -339,6 +344,7 @@ impl LlmProvider {
             LlmProvider::Claude => "llm.ask_claude",
             LlmProvider::ChatGpt => "llm.ask_chatgpt",
             LlmProvider::Perplexity => "llm.ask_perplexity",
+            LlmProvider::OpenClaw => "llm.send_instruction",
         }
     }
 
@@ -349,6 +355,7 @@ impl LlmProvider {
             LlmProvider::Claude => 'C',
             LlmProvider::ChatGpt => 'G',
             LlmProvider::Perplexity => 'P',
+            LlmProvider::OpenClaw => 'O',
         }
     }
 }

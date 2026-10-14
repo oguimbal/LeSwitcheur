@@ -114,6 +114,9 @@ unsafe fn cross_space_focus(pid: i32, wid: u32) {
 }
 
 pub fn activate_window(win: &WindowRef) -> Result<()> {
+    if win.pid == std::process::id() as i32 {
+        return activate_own_window(win.id);
+    }
     unsafe {
         let app_elem = AXUIElementCreateApplication(win.pid);
         if app_elem.is_null() {
@@ -459,3 +462,22 @@ unsafe fn ax_window_title(elem: AXUIElementRef) -> Option<String> {
     Some(s.to_string())
 }
 
+
+/// One of our own windows (Settings, OpenClaw setup…): raise it in-process.
+/// AX against our own pid from the main thread would wait on ourselves.
+fn activate_own_window(window_number: u64) -> Result<()> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    let mtm = MainThreadMarker::new().ok_or_else(|| anyhow!("own window activation off main thread"))?;
+    let app = NSApplication::sharedApplication(mtm);
+    let windows = app.windows();
+    let target = windows
+        .iter()
+        .find(|w| w.windowNumber() as u64 == window_number)
+        .ok_or_else(|| anyhow!("own window {window_number} not found"))?;
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+    target.makeKeyAndOrderFront(None);
+    Ok(())
+}

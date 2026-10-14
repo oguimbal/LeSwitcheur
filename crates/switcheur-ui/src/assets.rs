@@ -13,6 +13,8 @@ const CLAUDE: &[u8] = include_bytes!("../assets/llm_icons/claude.svg");
 const CHATGPT: &[u8] = include_bytes!("../assets/llm_icons/chatgpt.svg");
 const MISTRAL: &[u8] = include_bytes!("../assets/llm_icons/mistral.svg");
 const PERPLEXITY: &[u8] = include_bytes!("../assets/llm_icons/perplexity.svg");
+const OPENCLAW: &[u8] = include_bytes!("../assets/llm_icons/openclaw.svg");
+const CHECK: &[u8] = include_bytes!("../assets/browser_icons/check.svg");
 const TAB_OVERLAY: &[u8] = include_bytes!("../assets/browser_icons/tab_overlay.svg");
 const SPINNER: &[u8] = include_bytes!("../assets/browser_icons/spinner.svg");
 const BRAND_LOGO: &[u8] = include_bytes!("../../../brand/logo-256.png");
@@ -28,6 +30,8 @@ impl AssetSource for Assets {
             "llm_icons/chatgpt.svg" => Ok(Some(Cow::Borrowed(CHATGPT))),
             "llm_icons/mistral.svg" => Ok(Some(Cow::Borrowed(MISTRAL))),
             "llm_icons/perplexity.svg" => Ok(Some(Cow::Borrowed(PERPLEXITY))),
+            "llm_icons/openclaw.svg" => Ok(Some(Cow::Borrowed(OPENCLAW))),
+            "browser_icons/check.svg" => Ok(Some(Cow::Borrowed(CHECK))),
             "browser_icons/tab_overlay.svg" => Ok(Some(Cow::Borrowed(TAB_OVERLAY))),
             "browser_icons/spinner.svg" => Ok(Some(Cow::Borrowed(SPINNER))),
             "brand/logo.png" => Ok(Some(Cow::Borrowed(BRAND_LOGO))),
@@ -41,6 +45,8 @@ impl AssetSource for Assets {
             SharedString::from("chatgpt.svg"),
             SharedString::from("mistral.svg"),
             SharedString::from("perplexity.svg"),
+            SharedString::from("openclaw.svg"),
+            SharedString::from("check.svg"),
             SharedString::from("tab_overlay.svg"),
             SharedString::from("spinner.svg"),
             SharedString::from("logo.png"),

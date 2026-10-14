@@ -82,6 +82,10 @@ pub enum SettingsViewEvent {
     SearchAppsChanged(bool),
     DisplayInTrayChanged(bool),
     AskLlmEnabledChanged(bool),
+    /// Open the OpenClaw setup window (first setup or reconfigure).
+    OpenClawConfigure,
+    /// Forget the OpenClaw gateway and its device token.
+    OpenClawDisconnect,
     IncludeMinimizedChanged(bool),
     ShowAllSpacesChanged(bool),
     /// User clicked the "grant permission" button under the
@@ -145,6 +149,8 @@ pub enum SettingsViewEvent {
 }
 
 pub struct SettingsView {
+    /// `(nickname, url)` of the configured OpenClaw gateway.
+    openclaw: Option<(SharedString, SharedString)>,
     hotkey: HotkeySpec,
     launch_at_startup: bool,
     search_apps: bool,
@@ -316,6 +322,7 @@ impl SettingsView {
             picker_query: None,
             _picker_query_sub: None,
             current_tab: SettingsTab::default(),
+            openclaw: None,
             license_key: license_key.map(SharedString::from),
             license_entry_open: false,
             license_entry,
@@ -1124,6 +1131,87 @@ impl SettingsView {
         cx.notify();
     }
 
+    pub fn set_openclaw(&mut self, openclaw: Option<(String, String)>, cx: &mut Context<Self>) {
+        self.openclaw = openclaw.map(|(name, url)| (name.into(), url.into()));
+        cx.notify();
+    }
+
+    fn render_openclaw_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let button = |label: SharedString| {
+            div()
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.selection)
+                .text_color(theme.foreground)
+                .cursor_pointer()
+                .child(label)
+        };
+        let summary: SharedString = match &self.openclaw {
+            Some((name, url)) => format!("{name} · {url}").into(),
+            None => tr("settings.openclaw_not_configured"),
+        };
+        let configure_label = if self.openclaw.is_some() {
+            tr("settings.openclaw_configure")
+        } else {
+            tr("settings.openclaw_set_up")
+        };
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(140.0))
+                    .text_color(theme.muted)
+                    .child(SharedString::from("OpenClaw")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(theme.foreground)
+                    .child(summary),
+            )
+            .child(button(configure_label).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                    cx.emit(SettingsViewEvent::OpenClawConfigure);
+                }),
+            ));
+        if self.openclaw.is_some() {
+            row = row.child(
+                button(tr("settings.openclaw_disconnect"))
+                    .text_color(theme.destructive)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                            cx.emit(SettingsViewEvent::OpenClawDisconnect);
+                        }),
+                    ),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(row)
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.muted)
+                    .child(tr("settings.openclaw_hint")),
+            )
+            .into_any_element()
+    }
+
     fn render_general_tab(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
         div()
@@ -1158,6 +1246,7 @@ impl SettingsView {
                 &theme,
                 cx.listener(Self::toggle_ask_llm),
             ))
+            .child(self.render_openclaw_row(cx))
             .child(toggle_row(
                 tr("settings.include_minimized"),
                 Some(tr("settings.include_minimized_hint")),

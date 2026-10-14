@@ -4,6 +4,11 @@ window:
   onboarding_title: "Te damos la bienvenida a LeSwitcheur"
 
 settings:
+  openclaw_not_configured: "Sin configurar"
+  openclaw_configure: "Configurar…"
+  openclaw_set_up: "Configurar…"
+  openclaw_disconnect: "Desconectar"
+  openclaw_hint: "«Enviar instrucción a …» envía la consulta a una sesión de OpenClaw sin abrir nada. Pulsa Intro de nuevo para abrir la conversación."
   header: "Ajustes"
   tab_general: "General"
   tab_shortcuts: "Atajos"
@@ -68,6 +73,9 @@ picker:
   no_matches: "No hay apps coincidentes"
 
 switcher:
+  instruction_sending: "Enviando a %{name}…"
+  instruction_open: "Enviado ✓ — pulsa Intro de nuevo para abrir %{name}"
+  instruction_failed: "No se pudo enviar a %{name}: %{reason}"
   search_placeholder: "Buscar…"
   no_windows: "No se encontraron ventanas"
   no_results: "Sin resultados"
@@ -75,6 +83,7 @@ switcher:
   dirs_header: "Carpetas zoxide"
 
 llm:
+  send_instruction: "Enviar instrucción a %{name}"
   ask_claude: "Preguntar a Claude"
   ask_chatgpt: "Preguntar a ChatGPT"
   ask_mistral: "Preguntar a Le Chat"

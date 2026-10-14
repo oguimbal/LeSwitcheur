@@ -132,6 +132,90 @@ pub struct Config {
     /// default keeps the app discoverable.
     #[serde(default = "default_true")]
     pub display_in_tray: bool,
+    /// OpenClaw gateway targeted by the "Send instruction to …" row. Holds
+    /// no secret: the device token minted at pairing lives in a separate
+    /// owner-only file next to this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openclaw: Option<OpenClawConfig>,
+}
+
+/// Non-secret half of the OpenClaw setup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OpenClawConfig {
+    /// Control UI URL, as opened in the browser (`http(s)://host:18789/`).
+    pub url: String,
+    /// Name shown in "Send instruction to <nickname>": the agent's name,
+    /// copied from the gateway at setup.
+    pub nickname: String,
+    /// Agent emoji, shown on the switcher row when it has no avatar image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+    /// Agent that receives instructions.
+    #[serde(default = "OpenClawConfig::default_agent_id")]
+    pub agent_id: String,
+    #[serde(default)]
+    pub session_mode: OpenClawSessionMode,
+    /// Session used by [`OpenClawSessionMode::Given`]: a full
+    /// `agent:<id>:<rest>` key, or a bare `<rest>` scoped to `agent_id`.
+    #[serde(default = "OpenClawConfig::default_session_key")]
+    pub session_key: String,
+}
+
+/// Which session of the agent an instruction lands in.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenClawSessionMode {
+    /// The agent's main session.
+    #[default]
+    Main,
+    /// A fresh session per instruction.
+    New,
+    /// The session named by `session_key`.
+    Given,
+}
+
+/// Where an instruction is sent, resolved from [`OpenClawConfig`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenClawTarget {
+    Session(String),
+    NewSession { agent_id: String },
+}
+
+impl OpenClawConfig {
+    pub const DEFAULT_AGENT_ID: &'static str = "main";
+    pub const DEFAULT_SESSION_KEY: &'static str = "agent:main:main";
+
+    pub fn default_agent_id() -> String {
+        Self::DEFAULT_AGENT_ID.to_string()
+    }
+
+    pub fn default_session_key() -> String {
+        Self::DEFAULT_SESSION_KEY.to_string()
+    }
+
+    pub fn target(&self) -> OpenClawTarget {
+        let agent = match self.agent_id.trim() {
+            "" => Self::DEFAULT_AGENT_ID,
+            id => id,
+        };
+        match self.session_mode {
+            OpenClawSessionMode::Main => OpenClawTarget::Session(format!("agent:{agent}:main")),
+            OpenClawSessionMode::New => OpenClawTarget::NewSession {
+                agent_id: agent.to_string(),
+            },
+            OpenClawSessionMode::Given => {
+                let key = self.session_key.trim();
+                if key.is_empty() {
+                    OpenClawTarget::Session(format!("agent:{agent}:main"))
+                } else if key.to_ascii_lowercase().starts_with("agent:") {
+                    OpenClawTarget::Session(key.to_string())
+                } else {
+                    OpenClawTarget::Session(format!("agent:{agent}:{key}"))
+                }
+            }
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -247,6 +331,7 @@ impl Default for Config {
             file_manager: None,
             folder_opener_order: Vec::new(),
             display_in_tray: true,
+            openclaw: None,
         }
     }
 }
@@ -365,7 +450,12 @@ impl Config {
 }
 
 fn config_path() -> Option<PathBuf> {
-    ProjectDirs::from(QUALIFIER, ORG, APP).map(|d| d.config_dir().join(FILE_NAME))
+    config_dir().map(|d| d.join(FILE_NAME))
+}
+
+/// Directory holding `config.toml` and the other per-user state files.
+pub fn config_dir() -> Option<PathBuf> {
+    ProjectDirs::from(QUALIFIER, ORG, APP).map(|d| d.config_dir().to_path_buf())
 }
 
 /// Escape hatch for tests and advanced callers: load from an explicit file.
@@ -581,5 +671,79 @@ mod tests {
         let text = toml::to_string_pretty(&c).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn openclaw_section_roundtrips_and_defaults_session() {
+        let text = "hotkey = { modifiers = [\"ctrl\"], key = \"=\" }\n\
+            include_minimized = false\n\
+            launch_at_startup = false\n\
+            appearance = \"system\"\n\
+            [openclaw]\n\
+            url = \"http://gw.example:18789/\"\n\
+            nickname = \"Pandai\"\n";
+        let c: Config = toml::from_str(text).unwrap();
+        let oc = c.openclaw.clone().unwrap();
+        assert_eq!(oc.nickname, "Pandai");
+        assert_eq!(oc.session_key, OpenClawConfig::DEFAULT_SESSION_KEY);
+        let back: Config = toml::from_str(&toml::to_string_pretty(&c).unwrap()).unwrap();
+        assert_eq!(c, back);
+        assert!(!toml::to_string_pretty(&Config::default())
+            .unwrap()
+            .contains("openclaw"));
+    }
+
+    #[test]
+    fn openclaw_session_key_only_config_still_loads() {
+        // Shape written before agent/session mode existed.
+        let text = "[openclaw]\n\
+            url = \"http://gw.example:18789/\"\n\
+            nickname = \"Pandai\"\n\
+            session_key = \"agent:main:main\"\n";
+        let oc = toml::from_str::<Config>(text).unwrap().openclaw.unwrap();
+        assert_eq!(oc.agent_id, "main");
+        assert_eq!(oc.session_mode, OpenClawSessionMode::Main);
+        assert_eq!(oc.target(), OpenClawTarget::Session("agent:main:main".into()));
+    }
+
+    #[test]
+    fn openclaw_target_follows_session_mode() {
+        let mut oc = OpenClawConfig {
+            url: "http://gw".into(),
+            nickname: "Ops".into(),
+            emoji: Some("🐼".into()),
+            agent_id: "ops".into(),
+            session_mode: OpenClawSessionMode::Main,
+            session_key: "inbox".into(),
+        };
+        assert_eq!(oc.target(), OpenClawTarget::Session("agent:ops:main".into()));
+        oc.session_mode = OpenClawSessionMode::Given;
+        assert_eq!(oc.target(), OpenClawTarget::Session("agent:ops:inbox".into()));
+        oc.session_key = "agent:main:triage".into();
+        assert_eq!(oc.target(), OpenClawTarget::Session("agent:main:triage".into()));
+        oc.session_mode = OpenClawSessionMode::New;
+        assert_eq!(
+            oc.target(),
+            OpenClawTarget::NewSession {
+                agent_id: "ops".into()
+            }
+        );
+        let back: Config = toml::from_str(
+            &toml::to_string_pretty(&Config {
+                openclaw: Some(oc.clone()),
+                ..Config::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(back.openclaw, Some(oc));
+    }
+
+    #[test]
+    fn existing_llm_order_gains_openclaw_on_load() {
+        let mut c = Config::default();
+        c.llm_provider_order = vec![LlmProvider::Claude];
+        assert!(c.migrate_legacy_fields());
+        assert_eq!(c.llm_provider_order.last(), Some(&LlmProvider::OpenClaw));
     }
 }
