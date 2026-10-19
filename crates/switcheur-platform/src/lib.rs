@@ -223,6 +223,7 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+pub mod linear;
 pub mod openclaw;
 pub mod zoxide;
 

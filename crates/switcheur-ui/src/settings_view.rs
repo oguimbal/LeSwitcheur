@@ -86,6 +86,18 @@ pub enum SettingsViewEvent {
     OpenClawConfigure,
     /// Forget the OpenClaw gateway and its device token.
     OpenClawDisconnect,
+    /// Validate a Linear personal API key and add its workspace. Host
+    /// answers with [`SettingsView::linear_connected`] or
+    /// [`SettingsView::linear_connect_failed`].
+    LinearConnect(String),
+    /// Forget a connected Linear workspace (by organization id).
+    LinearRemove(String),
+    /// Start the browser OAuth flow. Host answers like `LinearConnect`.
+    LinearOAuthStart,
+    /// Stop waiting for the browser.
+    LinearOAuthCancel,
+    /// Open Linear's API key settings page.
+    LinearOpenApiKeyPage,
     IncludeMinimizedChanged(bool),
     ShowAllSpacesChanged(bool),
     /// User clicked the "grant permission" button under the
@@ -148,9 +160,25 @@ pub enum SettingsViewEvent {
     Dismissed,
 }
 
+/// A connected Linear workspace as listed in the settings.
+#[derive(Debug, Clone)]
+pub struct LinearAccountRow {
+    pub id: SharedString,
+    pub label: SharedString,
+}
+
 pub struct SettingsView {
     /// `(nickname, url)` of the configured OpenClaw gateway.
     openclaw: Option<(SharedString, SharedString)>,
+    linear_accounts: Vec<LinearAccountRow>,
+    /// API key field, installed by the host via [`Self::set_linear_entry`].
+    linear_entry: Option<Entity<InputState>>,
+    _linear_entry_sub: Option<Subscription>,
+    linear_entry_open: bool,
+    linear_connecting: bool,
+    /// Browser consent in progress.
+    linear_waiting: bool,
+    linear_error: Option<SharedString>,
     hotkey: HotkeySpec,
     launch_at_startup: bool,
     search_apps: bool,
@@ -323,6 +351,13 @@ impl SettingsView {
             _picker_query_sub: None,
             current_tab: SettingsTab::default(),
             openclaw: None,
+            linear_accounts: Vec::new(),
+            linear_entry: None,
+            _linear_entry_sub: None,
+            linear_entry_open: false,
+            linear_connecting: false,
+            linear_waiting: false,
+            linear_error: None,
             license_key: license_key.map(SharedString::from),
             license_entry_open: false,
             license_entry,
@@ -1136,6 +1171,253 @@ impl SettingsView {
         cx.notify();
     }
 
+    pub fn set_linear_accounts(&mut self, accounts: Vec<LinearAccountRow>, cx: &mut Context<Self>) {
+        self.linear_accounts = accounts;
+        cx.notify();
+    }
+
+    /// Install the (masked) API key input; needs a `Window`, hence the host.
+    pub fn set_linear_entry(&mut self, entry: Entity<InputState>, cx: &mut Context<Self>) {
+        let sub = cx.subscribe(&entry, |this: &mut Self, _state, ev: &InputEvent, cx| match ev {
+            InputEvent::PressEnter { .. } => this.submit_linear_key(cx),
+            InputEvent::Change => {
+                if this.linear_error.take().is_some() {
+                    cx.notify();
+                }
+            }
+            _ => {}
+        });
+        self.linear_entry = Some(entry);
+        self._linear_entry_sub = Some(sub);
+    }
+
+    pub fn linear_connected(
+        &mut self,
+        accounts: Vec<LinearAccountRow>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.linear_accounts = accounts;
+        self.linear_connecting = false;
+        self.linear_waiting = false;
+        self.linear_entry_open = false;
+        self.linear_error = None;
+        if let Some(entry) = &self.linear_entry {
+            entry.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    /// `message` = `None` for a silent stop (user cancelled).
+    pub fn linear_connect_failed(&mut self, message: Option<String>, cx: &mut Context<Self>) {
+        self.linear_connecting = false;
+        self.linear_waiting = false;
+        self.linear_error = message.map(Into::into);
+        cx.notify();
+    }
+
+    fn submit_linear_key(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = &self.linear_entry else {
+            return;
+        };
+        let key = entry.read(cx).value().trim().to_string();
+        if key.is_empty() || self.linear_connecting {
+            return;
+        }
+        self.linear_connecting = true;
+        self.linear_error = None;
+        cx.emit(SettingsViewEvent::LinearConnect(key));
+        cx.notify();
+    }
+
+    fn render_linear_block(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = self.theme;
+        let button = |label: SharedString| {
+            div()
+                .px_3()
+                .py_1p5()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.selection)
+                .text_color(theme.foreground)
+                .cursor_pointer()
+                .child(label)
+        };
+        let mut accounts = div().flex().flex_col().flex_1().min_w_0().gap_2();
+        if self.linear_accounts.is_empty() {
+            accounts = accounts.child(
+                div()
+                    .py_1p5()
+                    .text_color(theme.muted)
+                    .child(tr("settings.linear_none")),
+            );
+        }
+        for account in &self.linear_accounts {
+            let id = account.id.clone();
+            accounts = accounts.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(account.label.clone()),
+                    )
+                    .child(
+                        button(tr("settings.linear_remove"))
+                            .text_color(theme.destructive)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |_, _: &MouseDownEvent, _, cx| {
+                                    cx.emit(SettingsViewEvent::LinearRemove(id.to_string()));
+                                }),
+                            ),
+                    ),
+            );
+        }
+        let link = |label: SharedString| {
+            div()
+                .text_size(px(11.0))
+                .text_color(theme.accent)
+                .cursor_pointer()
+                .child(label)
+        };
+        if self.linear_waiting {
+            accounts = accounts.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(theme.muted)
+                            .child(tr("settings.linear_waiting")),
+                    )
+                    .child(button(tr("settings.linear_cancel")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            this.linear_waiting = false;
+                            cx.emit(SettingsViewEvent::LinearOAuthCancel);
+                            cx.notify();
+                        }),
+                    )),
+            );
+        } else {
+            accounts = accounts.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(button(tr("settings.linear_add")).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            this.linear_waiting = true;
+                            this.linear_error = None;
+                            cx.emit(SettingsViewEvent::LinearOAuthStart);
+                            cx.notify();
+                        }),
+                    ))
+                    .when(!self.linear_entry_open, |row| {
+                        row.child(link(tr("settings.linear_use_key")).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                this.linear_entry_open = true;
+                                cx.notify();
+                            }),
+                        ))
+                    }),
+            );
+        }
+        if !self.linear_entry_open {
+            if let Some(error) = self.linear_error.clone() {
+                accounts = accounts.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.match_highlight)
+                        .child(error),
+                );
+            }
+        } else if let Some(entry) = &self.linear_entry {
+            let disabled =
+                self.linear_connecting || entry.read(cx).value().trim().is_empty();
+            let label = if self.linear_connecting {
+                tr("settings.linear_connecting")
+            } else {
+                tr("settings.linear_connect")
+            };
+            let mut connect = button(label);
+            if disabled {
+                connect = connect.text_color(theme.muted);
+            } else {
+                connect = connect.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| this.submit_linear_key(cx)),
+                );
+            }
+            accounts = accounts.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().child(Input::new(entry).bordered(true)))
+                    .child(connect),
+            );
+            if let Some(error) = self.linear_error.clone() {
+                accounts = accounts.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.match_highlight)
+                        .child(error),
+                );
+            }
+            accounts = accounts.child(
+                div().flex().flex_row().child(link(tr("settings.linear_get_key")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _: &MouseDownEvent, _, cx| {
+                        cx.emit(SettingsViewEvent::LinearOpenApiKeyPage);
+                    }),
+                )),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(px(140.0))
+                            .py_1p5()
+                            .text_color(theme.muted)
+                            .child(SharedString::from("Linear")),
+                    )
+                    .child(accounts),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.muted)
+                    .child(tr("settings.linear_hint")),
+            )
+            .into_any_element()
+    }
+
     fn render_openclaw_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.theme;
         let button = |label: SharedString| {
@@ -1247,6 +1529,7 @@ impl SettingsView {
                 cx.listener(Self::toggle_ask_llm),
             ))
             .child(self.render_openclaw_row(cx))
+            .child(self.render_linear_block(cx))
             .child(toggle_row(
                 tr("settings.include_minimized"),
                 Some(tr("settings.include_minimized_hint")),

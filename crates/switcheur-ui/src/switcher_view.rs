@@ -94,6 +94,14 @@ pub enum SwitcherViewEvent {
     /// UI thread and reports back through [`SwitcherView::instruction_sent`]
     /// or [`SwitcherView::instruction_failed`].
     SendInstruction(String),
+    /// The query is an identifier (`ENG-123`) of a connected Linear team.
+    /// Host answers through [`SwitcherView::set_linear_issue`].
+    NeedsLinearIssue(String),
+    /// Create a Linear issue titled `title` in the host's team choice
+    /// `team` (0 = default, MRU first). The panel stays open; the host
+    /// opens the issue and closes it, or calls
+    /// [`SwitcherView::linear_issue_failed`].
+    CreateLinearIssue { title: String, team: usize },
 }
 
 /// Progress of the last OpenClaw instruction sent from this panel.
@@ -201,6 +209,15 @@ pub struct SwitcherView {
     /// Enter reaches both the input's `PressEnter` and the `Confirm`
     /// action; emit `Confirmed` once per panel.
     confirmed: bool,
+    /// Linear teams the create row can target. Above one, the "Open With"
+    /// popover lists them next to the row.
+    linear_team_count: usize,
+    /// Identifier of the last `NeedsLinearIssue`, so each is asked once.
+    linear_lookup_requested: Option<String>,
+    /// Window-local Y of the create row's centre, probed while painting.
+    linear_row_center_y: Rc<Cell<Option<f32>>>,
+    /// Anchor last handed to the host; a paint that moves it re-syncs.
+    linear_anchor_sent: Option<f32>,
 }
 
 /// Cooldown between scan-failure retries. Long enough that a slow Chrome
@@ -246,6 +263,84 @@ impl SwitcherView {
             instruction_seq: 0,
             input_only: false,
             confirmed: false,
+            linear_team_count: 0,
+            linear_lookup_requested: None,
+            linear_row_center_y: Rc::new(Cell::new(None)),
+            linear_anchor_sent: None,
+        }
+    }
+
+    /// Linear integration. `default_team` labels the create row (`None`
+    /// when no account is connected), `team_keys` gates issue lookups,
+    /// `team_count` sizes the team popover.
+    pub fn set_linear(
+        &mut self,
+        default_team: Option<String>,
+        team_keys: Vec<String>,
+        team_count: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.linear_team_count = team_count;
+        self.state.set_linear(default_team.map(Arc::from), team_keys);
+        cx.notify();
+    }
+
+    pub fn set_linear_issue(
+        &mut self,
+        identifier: String,
+        issue: Option<Item>,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.set_linear_issue(identifier, issue);
+        self.emit_linear_popover_sync(cx);
+        cx.notify();
+    }
+
+    /// Creation failed: the title stays in the field, the reason above it.
+    pub fn linear_issue_failed(&mut self, message: String, cx: &mut Context<Self>) {
+        self.instruction_phase = InstructionPhase::Failed {
+            message: message.into(),
+        };
+        self.confirmed = false;
+        cx.notify();
+    }
+
+    /// True when the selected row is "Create a Linear issue".
+    pub fn linear_create_selected(&self) -> bool {
+        self.state.active_section() == Section::Windows
+            && matches!(self.state.selected(), Some(Item::CreateLinearIssue { .. }))
+    }
+
+    /// Window-local Y of the row the popover points at.
+    pub fn open_with_anchor_y(&self) -> Option<f32> {
+        if self.linear_create_selected() {
+            return self.linear_row_center_y.get();
+        }
+        self.dirs_panel_top_y
+            .get()
+            .map(|top| top + self.dirs_row_center_from_panel_top(self.state.selected_dir_idx()))
+    }
+
+    /// `choice` indexes the popover's selectable rows; `None` = default team.
+    fn start_linear_create(&mut self, choice: Option<usize>, cx: &mut Context<Self>) {
+        let Some(Item::CreateLinearIssue { title, .. }) = self.state.selected().cloned() else {
+            return;
+        };
+        if self.instruction_phase == InstructionPhase::Sending {
+            return;
+        }
+        self.instruction_phase = InstructionPhase::Sending;
+        cx.emit(SwitcherViewEvent::CreateLinearIssue {
+            title: title.to_string(),
+            team: choice.map_or(0, |i| i + 1),
+        });
+        cx.notify();
+    }
+
+    /// Rows moved under the team popover: let the host re-anchor or hide it.
+    fn emit_linear_popover_sync(&mut self, cx: &mut Context<Self>) {
+        if self.linear_team_count > 1 {
+            cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         }
     }
 
@@ -313,6 +408,10 @@ impl SwitcherView {
     /// Routes a confirmed item: a configured OpenClaw row sends in place,
     /// everything else goes to the host and closes the panel.
     fn confirm_item(&mut self, item: Item, cx: &mut Context<Self>) {
+        if matches!(item, Item::CreateLinearIssue { .. }) {
+            self.start_linear_create(None, cx);
+            return;
+        }
         if let Item::AskLlm {
             provider: LlmProvider::OpenClaw,
             query,
@@ -377,6 +476,9 @@ impl SwitcherView {
     /// count when the selection isn't a `DirRef` (e.g. no dirs yet), which
     /// keeps the popover sized sensibly for the common case.
     fn current_open_with_count(&self) -> usize {
+        if self.linear_create_selected() {
+            return self.linear_team_count.saturating_sub(1);
+        }
         let is_file = self
             .state
             .dirs()
@@ -408,6 +510,10 @@ impl SwitcherView {
         if idx >= self.current_open_with_count() {
             return;
         }
+        if self.linear_create_selected() {
+            self.start_linear_create(Some(idx), cx);
+            return;
+        }
         cx.emit(SwitcherViewEvent::OpenWithActivated(idx));
     }
 
@@ -419,8 +525,9 @@ impl SwitcherView {
     /// popover against a panel that isn't on screen.
     pub fn open_with_visible(&self) -> bool {
         self.nag_phase == NagPhase::Hidden
-            && self.state.active_section() == Section::Dirs
-            && self.state.dirs_visible()
+            && !self.input_only
+            && (self.linear_create_selected()
+                || (self.state.active_section() == Section::Dirs && self.state.dirs_visible()))
             && self.current_open_with_count() > 0
     }
 
@@ -551,6 +658,7 @@ impl SwitcherView {
         self.currently_playing_requested = false;
         self.local_focus_failed = false;
         self.confirmed = false;
+        self.linear_lookup_requested = None;
         if self.dirs_enabled {
             cx.emit(SwitcherViewEvent::QueryChanged(String::new()));
         }
@@ -636,6 +744,7 @@ impl SwitcherView {
     /// tier (or step aside for the LLM row if none match).
     pub fn set_browser_tabs(&mut self, tabs: Vec<Item>, cx: &mut Context<Self>) {
         self.state.set_browser_tabs(tabs);
+        self.emit_linear_popover_sync(cx);
         cx.notify();
     }
 
@@ -992,7 +1101,11 @@ impl SwitcherView {
         // Popover has keyboard focus → hand off to the host so it launches
         // the dir with the selected app instead of the default handler.
         if let Some(i) = self.state.open_with_index() {
-            cx.emit(SwitcherViewEvent::OpenWithActivated(i));
+            if self.linear_create_selected() {
+                self.start_linear_create(Some(i), cx);
+            } else {
+                cx.emit(SwitcherViewEvent::OpenWithActivated(i));
+            }
             return;
         }
         if let Some(item) = self.state.selected().cloned() {
@@ -1017,6 +1130,7 @@ impl SwitcherView {
             return;
         }
         self.state.set_selected(idx);
+        self.emit_linear_popover_sync(cx);
         cx.notify();
     }
 
@@ -1190,7 +1304,8 @@ impl SwitcherView {
         // In the Dirs pane (input not focused), Right enters the "Open
         // With" popover when one is available.
         let owc = self.current_open_with_count();
-        if self.state.active_section() == Section::Dirs
+        let linear_row = self.linear_create_selected() && !self.is_input_focused(window, cx);
+        if (self.state.active_section() == Section::Dirs || linear_row)
             && owc > 0
             && self.state.open_with_index().is_none()
         {
@@ -1310,6 +1425,14 @@ impl SwitcherView {
                 cx.emit(SwitcherViewEvent::NeedsBrowserTabs);
             }
         }
+        let linear_target = self.state.linear_lookup_target();
+        if linear_target != self.linear_lookup_requested {
+            self.linear_lookup_requested = linear_target.clone();
+            if let Some(identifier) = linear_target {
+                cx.emit(SwitcherViewEvent::NeedsLinearIssue(identifier));
+            }
+        }
+        self.emit_linear_popover_sync(cx);
         self.emit_height_delta_if_changed(cx);
         cx.notify();
     }
@@ -1324,9 +1447,23 @@ impl Focusable for SwitcherView {
 impl EventEmitter<SwitcherViewEvent> for SwitcherView {}
 
 impl Render for SwitcherView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let filtered_count = self.state.filtered().len();
+        self.linear_row_center_y.set(None);
+        // Selection/scroll events reach the host before this paint fills the
+        // probe: hand it the fresh anchor once the frame is out.
+        if self.linear_team_count > 1 && self.linear_create_selected() {
+            cx.on_next_frame(window, |this, _window, cx| {
+                let y = this.linear_row_center_y.get();
+                if y.is_some() && y != this.linear_anchor_sent {
+                    this.linear_anchor_sent = y;
+                    cx.emit(SwitcherViewEvent::OpenWithStateChanged);
+                }
+            });
+        } else {
+            self.linear_anchor_sent = None;
+        }
         let query_empty = self.input.read(cx).value().is_empty();
         let nag_phase = self.nag_phase;
         // When a math/JS evaluation result is displayed and no items matched,
@@ -1375,16 +1512,18 @@ impl Render for SwitcherView {
                         .map(|i| {
                             let mr = &this.state.filtered()[i];
                             let is_window = matches!(mr.item, Item::Window(_));
-                            (
-                                i,
-                                is_window,
-                                render_row(
-                                    mr,
-                                    window_active && i == selected,
-                                    &theme,
-                                    &openclaw_row,
-                                ),
-                            )
+                            let mut row = render_row(
+                                mr,
+                                window_active && i == selected,
+                                &theme,
+                                &openclaw_row,
+                            );
+                            if matches!(mr.item, Item::CreateLinearIssue { .. }) {
+                                row = row
+                                    .relative()
+                                    .child(row_center_probe(this.linear_row_center_y.clone()));
+                            }
+                            (i, is_window, row)
                         })
                         .collect();
                     rows.into_iter()
@@ -1599,6 +1738,26 @@ impl Render for SwitcherView {
             })
     }
 }
+
+/// Zero-area canvas recording its row's vertical centre (window-local) on
+/// every paint; anchors the team popover with scrolling accounted for.
+fn row_center_probe(cell: Rc<Cell<Option<f32>>>) -> impl IntoElement {
+    canvas(
+        move |bounds, _w, _cx| {
+            let top: f32 = bounds.origin.y.into();
+            cell.set(Some(top + ROW_CENTER));
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .left(px(0.0))
+    .top(px(0.0))
+    .w(px(1.0))
+    .h(px(1.0))
+}
+
+/// Half of `list::ROW_HEIGHT`.
+const ROW_CENTER: f32 = 22.0;
 
 /// Render the query text with a visible caret and selection highlight.
 /// Small × button rendered at the right edge of a window row. Clicking it

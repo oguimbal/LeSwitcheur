@@ -7,6 +7,7 @@ pub mod config;
 pub mod exclusions;
 pub mod file_manager;
 pub mod license;
+pub mod linear;
 pub mod matcher;
 pub mod js;
 pub mod math;
@@ -22,8 +23,8 @@ pub use config::{
 pub use exclusions::{ExclusionFilter, ExclusionRule};
 pub use matcher::{FuzzyMatcher, MatchResult};
 pub use model::{
-    AppRef, AudioRowRef, Browser, BrowserTabRef, DirRef, DirSource, Item, LlmProvider,
-    LocalSourceRef, PlaybackState, ProgramRef, WindowRef,
+    AppRef, AudioRowRef, Browser, BrowserTabRef, DirRef, DirSource, Item, LinearIssueRef,
+    LlmProvider, LocalSourceRef, PlaybackState, ProgramRef, WindowRef,
 };
 pub use sort::{sort_items, RecencyTracker, SortOrder};
 pub use state::{Section, SwitcherState};

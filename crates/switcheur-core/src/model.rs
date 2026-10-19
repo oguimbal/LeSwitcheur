@@ -409,6 +409,38 @@ impl LocalSourceRef {
     }
 }
 
+/// A Linear issue found by identifier in one of the connected workspaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearIssueRef {
+    pub identifier: String,
+    pub title: String,
+    pub url: String,
+    subtitle: String,
+}
+
+impl LinearIssueRef {
+    pub fn new(
+        identifier: String,
+        title: String,
+        url: String,
+        state: Option<String>,
+        workspace: &str,
+    ) -> Self {
+        let subtitle = [Some(identifier.as_str()), state.as_deref(), Some(workspace)]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        Self {
+            identifier,
+            title,
+            url,
+            subtitle,
+        }
+    }
+}
+
 /// Anything selectable in the switcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
@@ -438,6 +470,10 @@ pub enum Item {
     /// producing audio output and the query is empty. Lives outside the
     /// fuzzy-matched list — see [`crate::state::SwitcherState::set_currently_playing`].
     CurrentlyPlaying(Arc<AudioRowRef>),
+    LinearIssue(Arc<LinearIssueRef>),
+    /// "Create a Linear issue" with the query as title. `team` labels the
+    /// default team; the host owns the team list and the actual target.
+    CreateLinearIssue { title: Arc<str>, team: Arc<str> },
 }
 
 impl Item {
@@ -466,6 +502,8 @@ impl Item {
             // by the state, not by query match. Empty haystack so a stray
             // call to rank() can't surface it.
             Item::CurrentlyPlaying(_) => String::new(),
+            // Placed by the state, never fuzzy-ranked.
+            Item::LinearIssue(_) | Item::CreateLinearIssue { .. } => String::new(),
         }
     }
 
@@ -489,6 +527,9 @@ impl Item {
                 .as_deref()
                 .or_else(|| r.browser_tab.as_ref().map(|t| &*t.title))
                 .unwrap_or(&r.app_name),
+            Item::LinearIssue(i) => &i.title,
+            // Resolved through i18n at render time.
+            Item::CreateLinearIssue { team, .. } => team,
         }
     }
 
@@ -535,6 +576,8 @@ impl Item {
                 } else {
                     None
                 }),
+            Item::LinearIssue(i) => Some(&i.subtitle),
+            Item::CreateLinearIssue { title, .. } => Some(title),
             _ => None,
         }
     }
@@ -551,6 +594,7 @@ impl Item {
             Item::Dir(_) => "dir",
             Item::BrowserTab(t) => t.browser.bundle_id(),
             Item::CurrentlyPlaying(r) => r.bundle_id.as_deref().unwrap_or(&r.app_name),
+            Item::LinearIssue(_) | Item::CreateLinearIssue { .. } => "linear",
         }
     }
 
@@ -566,6 +610,7 @@ impl Item {
             Item::Dir(_) => return '📁',
             Item::BrowserTab(_) => return 'C',
             Item::CurrentlyPlaying(r) => r.app_name.as_str(),
+            Item::LinearIssue(_) | Item::CreateLinearIssue { .. } => return 'L',
         };
         name.chars().next().unwrap_or('?').to_ascii_uppercase()
     }
@@ -577,7 +622,10 @@ impl Item {
             Item::Window(w) => w.icon_path.as_deref(),
             Item::App(a) => a.icon_path.as_deref(),
             Item::Program(p) => p.icon_path.as_deref(),
-            Item::AskLlm { .. } | Item::OpenUrl(_) => None,
+            Item::AskLlm { .. }
+            | Item::OpenUrl(_)
+            | Item::LinearIssue(_)
+            | Item::CreateLinearIssue { .. } => None,
             Item::Dir(d) => d.icon_path.as_deref(),
             Item::BrowserTab(t) => t.icon_path.as_deref(),
             Item::CurrentlyPlaying(r) => match &r.browser_tab {

@@ -50,6 +50,7 @@ use switcheur_ui::{
 };
 use tracing_subscriber::EnvFilter;
 
+mod linear;
 mod openclaw;
 mod tray;
 
@@ -446,6 +447,12 @@ fn main() -> Result<()> {
             onboarding: Rc::new(RefCell::new(None)),
             thanks: Rc::new(RefCell::new(None)),
             openclaw_setup: Rc::new(RefCell::new(None)),
+            linear: Rc::new(RefCell::new(switcheur_platform::linear::Store::load())),
+            linear_choices: Rc::new(RefCell::new(Vec::new())),
+            linear_entries: Rc::new(RefCell::new(Vec::new())),
+            linear_lookup_gen: Rc::new(Cell::new(0)),
+            linear_refreshing: Rc::new(Cell::new(false)),
+            linear_oauth_cancel: Rc::new(RefCell::new(None)),
             licensed: Rc::new(Cell::new(licensed_now)),
             nag_shown_this_session: Rc::new(Cell::new(false)),
             pending_update: Rc::new(RefCell::new(None)),
@@ -568,6 +575,18 @@ struct AppState {
     thanks: Rc<RefCell<Option<WindowSlot>>>,
     /// OpenClaw gateway setup window, at most one.
     openclaw_setup: Rc<RefCell<Option<WindowSlot>>>,
+    /// Connected Linear workspaces (API keys, cached teams, team MRU).
+    linear: Rc<RefCell<switcheur_platform::linear::Store>>,
+    /// Team choices snapshotted at panel open; `CreateLinearIssue { team }`
+    /// and the team popover index into it.
+    linear_choices: Rc<RefCell<Vec<switcheur_platform::linear::TeamChoice>>>,
+    /// Popover rows for `linear_choices` (first = default team).
+    linear_entries: Rc<RefCell<Vec<OpenWithEntry>>>,
+    /// Bumped per lookup so a superseded identifier is dropped.
+    linear_lookup_gen: Rc<Cell<u64>>,
+    linear_refreshing: Rc<Cell<bool>>,
+    /// Cancels the browser OAuth wait (settings closed, Cancel, restart).
+    linear_oauth_cancel: Rc<RefCell<Option<Arc<std::sync::atomic::AtomicBool>>>>,
     licensed: Rc<Cell<bool>>,
     /// Set to true after the first unlicensed switcher open of this process.
     /// Drives the "nag on first open each launch" behaviour; reset implicitly
@@ -1068,7 +1087,9 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
             | Item::Dir(_)
             | Item::BrowserTab(_)
             | Item::CurrentlyPlaying(_)
-            | Item::LocalSource(_) => { /* Cmd+Tab cycles only ever carry Window/App items */ }
+            | Item::LocalSource(_)
+            | Item::LinearIssue(_)
+            | Item::CreateLinearIssue { .. } => { /* Cmd+Tab cycles only ever carry Window/App items */ }
         }
     }
     let res = match &item {
@@ -1080,7 +1101,9 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
         | Item::Dir(_)
         | Item::BrowserTab(_)
         | Item::CurrentlyPlaying(_)
-        | Item::LocalSource(_) => {
+        | Item::LocalSource(_)
+        | Item::LinearIssue(_)
+        | Item::CreateLinearIssue { .. } => {
             tracing::warn!("unexpected non-window/app item in Cmd+Tab cycle");
             Ok(())
         }
@@ -1346,6 +1369,8 @@ fn open_switcher_with_items(
     let open_with_file_count = open_with_file_entries.len().saturating_sub(1);
     *state.open_with_entries.borrow_mut() = open_with_entries;
     *state.open_with_file_entries.borrow_mut() = open_with_file_entries;
+    let state_for_builder = state.clone();
+    let _ = cx.update(|cx| linear::refresh_stale_accounts(state, cx));
     let handle: WindowHandle<gpui_component::Root> = cx.open_window(options, move |window, cx| {
         let input_state = cx.new(|cx| {
             gpui_component::input::InputState::new(window, cx)
@@ -1362,6 +1387,7 @@ fn open_switcher_with_items(
             view.set_llm_provider_order(llm_order, cx);
             view.set_ask_llm_enabled(ask_llm_enabled, cx);
             view.set_openclaw(openclaw_row.clone(), cx);
+            linear::configure_view(&state_for_builder, &mut view, cx);
             view.set_open_with_counts(open_with_folder_count, open_with_file_count, cx);
             if show_nag {
                 view.set_nag_phase(NagPhase::Visible, cx);
@@ -1497,10 +1523,12 @@ fn open_switcher_with_items(
 }
 
 fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
-    // Never log instruction text bound for OpenClaw.
+    // Never log instruction text bound for OpenClaw, nor issue titles.
     if !matches!(
         ev,
         SwitcherViewEvent::SendInstruction(_)
+            | SwitcherViewEvent::CreateLinearIssue { .. }
+            | SwitcherViewEvent::Confirmed(Item::LinearIssue(_))
             | SwitcherViewEvent::Confirmed(Item::AskLlm {
                 provider: switcheur_core::LlmProvider::OpenClaw,
                 ..
@@ -1513,6 +1541,16 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
     match ev {
         SwitcherViewEvent::SendInstruction(text) => {
             openclaw::send_from_panel(text.clone(), state, cx);
+            return;
+        }
+        SwitcherViewEvent::NeedsLinearIssue(identifier) => {
+            linear::lookup(identifier.clone(), state, cx);
+            return;
+        }
+        SwitcherViewEvent::CreateLinearIssue { title, team } => {
+            // The panel stays open (spinner) until Linear answers.
+            close_open_with_popover(state, cx);
+            linear::create(title.clone(), *team, state, cx);
             return;
         }
         SwitcherViewEvent::Confirmed(Item::LocalSource(target)) => {
@@ -1888,7 +1926,9 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                     | Item::Dir(_)
                     | Item::BrowserTab(_)
                     | Item::CurrentlyPlaying(_)
-                    | Item::LocalSource(_) => {
+                    | Item::LocalSource(_)
+                    | Item::LinearIssue(_)
+                    | Item::CreateLinearIssue { .. } => {
                         // The audio row's underlying app/window picks up
                         // recency through the activation NSNotification —
                         // bumping again here would double-count.
@@ -1937,7 +1977,10 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                 }
                 Item::BrowserTab(t) => state.platform.activate_browser_tab(t),
                 Item::CurrentlyPlaying(row) => activate_currently_playing(row, state),
+                Item::LinearIssue(issue) => state.platform.open_url(&issue.url),
                 Item::LocalSource(_) => unreachable!("handled asynchronously above"),
+                // The view sends these as `CreateLinearIssue` instead.
+                Item::CreateLinearIssue { .. } => Ok(()),
             };
             if let Err(e) = res {
                 tracing::warn!("activate: {e:#}");
@@ -1965,7 +2008,9 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
         | SwitcherViewEvent::NeedsBrowserTabs
         | SwitcherViewEvent::NeedsCurrentlyPlaying
         | SwitcherViewEvent::TogglePlayPause(_)
-        | SwitcherViewEvent::SendInstruction(_) => unreachable!("handled above"),
+        | SwitcherViewEvent::SendInstruction(_)
+        | SwitcherViewEvent::NeedsLinearIssue(_)
+        | SwitcherViewEvent::CreateLinearIssue { .. } => unreachable!("handled above"),
     };
 
     if let Some(slot) = slot_to_close {
@@ -2003,45 +2048,29 @@ fn sync_open_with_popover(state: &AppState, cx: &mut App, retries_left: u8) {
     let Some(slot) = state.current.borrow().as_ref().cloned_entity() else {
         return;
     };
-    let (visible, popover_idx, panel_top_y, selected_dir, selected_is_file) =
-        cx.update_entity(&slot, |view, _cx| {
-            let is_file = view
-                .dirs()
-                .get(view.selected_dir_idx())
-                .and_then(|it| match it {
-                    Item::Dir(d) => Some(!d.is_dir),
-                    _ => None,
-                })
-                .unwrap_or(false);
-            (
-                view.open_with_visible(),
-                view.open_with_index(),
-                view.dirs_panel_top_y(),
-                view.selected_dir_idx(),
-                is_file,
-            )
-        });
-    let entries_len = if selected_is_file {
-        state.open_with_file_entries.borrow().len()
-    } else {
-        state.open_with_entries.borrow().len()
-    };
+    let (visible, popover_idx, anchor_y) = cx.update_entity(&slot, |view, _cx| {
+        (
+            view.open_with_visible(),
+            view.open_with_index(),
+            view.open_with_anchor_y(),
+        )
+    });
+    let entries = active_open_with_entries(state, &slot, cx);
+    let entries_len = entries.len();
 
     if !visible || entries_len <= 1 {
         close_open_with_popover(state, cx);
         return;
     }
 
-    // `panel_top_y` is populated by a canvas probe on the dirs panel
-    // container. It only shifts when the banner, programs section, or
-    // eval row appear/disappear — not when the popover selection moves —
-    // so one fresh reading per layout change is enough and no stale-value
-    // races occur. If we haven't gotten a reading yet, retry on the next
-    // frame via a second defer so the popover never flashes wrong.
-    let Some(panel_top_y) = panel_top_y else {
+    // The anchor comes from a canvas probe (dirs panel top, or the Linear
+    // create row itself) filled while painting. If we haven't gotten a
+    // reading yet, retry on the next frame via a second defer so the
+    // popover never flashes wrong.
+    let Some(row_center_from_top) = anchor_y else {
         if retries_left == 0 {
             tracing::warn!(
-                "sync_open_with_popover: panel_top_y still None after {} frames; closing popover",
+                "sync_open_with_popover: anchor still None after {} frames; closing popover",
                 SYNC_POPOVER_MAX_RETRIES
             );
             close_open_with_popover(state, cx);
@@ -2051,11 +2080,6 @@ fn sync_open_with_popover(state: &AppState, cx: &mut App, retries_left: u8) {
         cx.defer(move |cx| sync_open_with_popover(&state_retry, cx, retries_left - 1));
         return;
     };
-    // Row centre from window top = panel_top + header + (idx + 0.5) * row.
-    let row_center_from_top = cx.update_entity(&slot, |view, _cx| {
-        view.dirs_row_center_from_panel_top(selected_dir)
-    }) + panel_top_y;
-
     // Compute popover position relative to the main switcher's NSWindow
     // (bottom-left screen coords). Row centre is measured from the top of
     // the main window so we compensate with `my + mh - offset`.
@@ -2098,11 +2122,6 @@ fn sync_open_with_popover(state: &AppState, cx: &mut App, retries_left: u8) {
 
     // Sync entries + selection into the popover entity.
     if let Some(open_with) = state.open_with.borrow().as_ref() {
-        let entries = if selected_is_file {
-            state.open_with_file_entries.borrow().clone()
-        } else {
-            state.open_with_entries.borrow().clone()
-        };
         let entity = open_with.entity.clone();
         let selected = popover_idx;
         cx.update_entity(&entity, |v, cx| {
@@ -2266,6 +2285,9 @@ fn active_open_with_entries(
     switcher: &Entity<SwitcherView>,
     cx: &mut App,
 ) -> Vec<OpenWithEntry> {
+    if cx.update_entity(switcher, |v, _cx| v.linear_create_selected()) {
+        return state.linear_entries.borrow().clone();
+    }
     let is_dir = cx.update_entity(switcher, |v, _cx| {
         v.dirs()
             .get(v.selected_dir_idx())
@@ -2629,6 +2651,7 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
         .openclaw
         .as_ref()
         .map(|oc| (oc.nickname.clone(), oc.url.clone()));
+    let linear_accounts = linear::account_rows(&state.linear.borrow());
     let bounds = initial_bounds(cx, SETTINGS_WIDTH, SETTINGS_HEIGHT);
     tracing::info!(?bounds, "settings window bounds");
 
@@ -2654,6 +2677,11 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
             gpui_component::input::InputState::new(window, cx).placeholder(
                 switcheur_i18n::tr("license.key_placeholder"),
             )
+        });
+        let linear_entry = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx)
+                .masked(true)
+                .placeholder(switcheur_i18n::tr("settings.linear_key_placeholder"))
         });
         let entity = cx.new(|cx| {
             let mut v = SettingsView::new(
@@ -2683,6 +2711,8 @@ fn open_settings_window(state: &AppState, cx: &mut App) -> Result<()> {
             );
             v.set_theme(theme, cx);
             v.set_openclaw(openclaw_summary.clone(), cx);
+            v.set_linear_entry(linear_entry, cx);
+            v.set_linear_accounts(linear_accounts, cx);
             v
         });
         *slot_for_builder.borrow_mut() = Some(entity.clone());
@@ -2953,6 +2983,20 @@ fn handle_settings_event(
             }
         }
         SettingsViewEvent::OpenClawDisconnect => openclaw::disconnect(state, cx),
+        SettingsViewEvent::LinearConnect(key) => {
+            linear::connect(key.clone(), state, entity.clone(), cx)
+        }
+        SettingsViewEvent::LinearRemove(id) => linear::remove(id, state, entity, cx),
+        SettingsViewEvent::LinearOAuthStart => linear::start_oauth(state, entity.clone(), cx),
+        SettingsViewEvent::LinearOAuthCancel => linear::cancel_oauth(state),
+        SettingsViewEvent::LinearOpenApiKeyPage => {
+            if let Err(e) = state
+                .platform
+                .open_url(switcheur_platform::linear::API_KEY_SETTINGS_URL)
+            {
+                tracing::warn!("open linear api key page: {e:#}");
+            }
+        }
         SettingsViewEvent::AskLlmEnabledChanged(on) => {
             let mut c = state.config.borrow_mut();
             c.ask_llm_enabled = *on;
@@ -3212,6 +3256,7 @@ fn handle_settings_event(
             }
         }
         SettingsViewEvent::Dismissed => {
+            linear::cancel_oauth(state);
             let slot = state.settings.borrow_mut().take();
             *state.settings_entity.borrow_mut() = None;
             if let Some(slot) = slot {

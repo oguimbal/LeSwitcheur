@@ -521,7 +521,7 @@ fn origin_of(url: &::url::Url) -> String {
     url.origin().ascii_serialization()
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().context("device file has no parent")?;
     fs::create_dir_all(dir)?;
     let temporary = path.with_extension("json.tmp");

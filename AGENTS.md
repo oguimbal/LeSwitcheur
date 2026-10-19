@@ -173,6 +173,16 @@ If can't test a case: say so explicit, don't claim still work.
 35. **Pairing approval** — remote gateway: approve command shown, auto-retry succeeds after `openclaw devices approve`, window moves to the agent step; closing the window stops the loop.
 36. **Agent step** — agents listed with avatar (else emoji, else initial); Save stores the agent's name and emoji, caches the avatar, and the switcher row shows avatar → emoji → OpenClaw mark. Agents that fail to load still allow Save with the configured agent.
 
+### Linear
+
+37. **Identifier lookup** — type `eng-12` (connected team key): issue row on top after ~250 ms, Enter opens it. Unknown key → no request. Typing on before the answer → stale result dropped.
+38. **Create, one team** — any query: last row "Create a Linear issue in ENG"; Enter → spinner in input row, issue created, opened in browser, panel closes. Double Enter creates one issue.
+39. **Create, several teams** — select create row: team popover beside it (default greyed). Right enters, Up/Down, Enter/click creates in that team; next panel's default = last used team.
+40. **Create failure** — revoked key / offline: panel stays, query kept, red error line; Enter retries.
+41. **Zoxide focus** — query matching only dirs still moves focus to the dirs pane (create row doesn't count as a match).
+42. **Settings** — Connect a workspace → browser consent → back in settings, row "Workspace · email". Second click with `prompt=consent` → pick other workspace → two rows. Deny in browser → reason shown. Cancel / Esc stops the wait (port freed). API-key fallback still works. Remove drops the row.
+43. **Token refresh** — access token past 24 h: lookup/create still work, `linear-accounts.json` gets the rotated refresh token.
+
 ### Don't-do
 
 - AppleScript for window mgmt — banned.
@@ -211,6 +221,16 @@ If can't test a case: say so explicit, don't claim still work.
 - Never log the shared token or gateway `error.message` (may echo input); only error codes. `handle_view_event` skips its `?ev` log for `SendInstruction` and the OpenClaw `Confirmed(AskLlm)`. (Pre-existing `QueryChanged` logging still records typed queries when a dir source is on.)
 - Enter reaches the view twice: the `Confirm` action runs first (the input propagates Enter), then the input's deferred `PressEnter`. Both go through `confirm_selection`, which holds the Sending/Sent handling; a `confirmed` latch keeps `Confirmed` to one emit per panel (reset when a local-source focus fails and the panel stays). After a send the view is `input_only` until the next non-Enter key (`capture_key_down`), so there is no list to arrow into.
 - `rustls` must keep exactly one crypto provider (`ring`, shared with `ureq`); `gateway::tests::tls_has_exactly_one_crypto_provider` guards it.
+
+## Linear provider
+
+- Settings → Linear → "Connect a workspace": OAuth 2 + PKCE, public app client id in `linear.rs` (no secret). Loopback redirect `http://127.0.0.1:47823/callback` (registered on the Linear app, listener bound *before* the browser opens, state checked, 10 min timeout, cancelled on Cancel / settings Esc). `prompt=consent` so a second click can pick another workspace. Scopes `read,issues:create`. Access token 24 h → `linear::authorize` refreshes 5 min early; refresh tokens rotate, so every caller writes `Authorized::refreshed` back to the store (`store_refreshed`) before anything else can fail. Remove = best-effort revoke.
+- Fallback "or paste an API key": personal key, header `Authorization: <key>` (no `Bearer`). One credential per workspace; reconnecting a workspace replaces it.
+- Storage: `linear-accounts.json` (0600, config dir) = accounts (org id/name, user, access token or API key, OAuth refresh token + expiry, cached teams + fetch time) + team MRU. Nothing in `config.toml`. Teams refetched in background on panel open when > 6 h old.
+- Client: `switcheur-platform/src/linear.rs` (ureq, blocking, off UI thread). Lookup via documented `issue(id: "ENG-12")` (not-found = GraphQL error → `None`), creation via `issueCreate {teamId, title}`. Errors reduced to content-free codes; never log keys, `errors[].message`, or titles (`CreateLinearIssue` + `Confirmed(LinearIssue)` skipped by `handle_view_event` logging).
+- State: `SwitcherState::set_linear` (default team label + team keys). `linear_lookup_target` only for known keys → view emits `NeedsLinearIssue` once per identifier → host debounces (generation counter) → `set_linear_issue` (ignored if query moved on, cursor kept by identity). Found issue = row 0 and suppresses Ask-LLM rows. `CreateLinearIssue` row always last when connected (query non-empty, not URL/eval/identifier) so one Up from the input wraps onto it.
+- Team picker reuses the Open With popover window: `open_with_visible` / `current_open_with_count` / `open_with_anchor_y` branch on `linear_create_selected()`; anchor from a canvas probe on the create row. Host snapshots `TeamChoice`s at panel open (`AppState::linear_choices`), `CreateLinearIssue { team }` indexes it (0 = default/MRU).
+- Create: panel stays open with the instruction spinner (`InstructionPhase::Sending` doubles as the double-Enter latch); success → promote team, open issue URL, dismiss; failure → `linear_issue_failed`.
 
 ## Key files
 

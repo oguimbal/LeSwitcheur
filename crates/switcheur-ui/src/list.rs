@@ -57,6 +57,7 @@ pub fn render_row(
         } => tr_sub("llm.send_instruction", &[("name", &openclaw.name)]),
         Item::AskLlm { provider, .. } => tr(provider.i18n_key()),
         Item::OpenUrl(_) => tr("launcher.open_url"),
+        Item::CreateLinearIssue { team, .. } => tr_sub("linear.create_issue", &[("team", team)]),
         _ => item.primary().to_string(),
     };
     let secondary = item.secondary().map(str::to_string);
@@ -91,6 +92,7 @@ pub fn render_row(
             .child(openclaw.emoji.clone().unwrap())
             .into_any_element(),
         Item::AskLlm { provider, .. } => llm_icon(*provider),
+        Item::LinearIssue(_) | Item::CreateLinearIssue { .. } => linear_icon(),
         _ => match item.icon_path() {
             Some(path) => img(path.to_path_buf())
                 .w(px(ICON_SIZE))
@@ -287,6 +289,16 @@ fn llm_icon(provider: LlmProvider) -> AnyElement {
         .w(px(ICON_SIZE))
         .h(px(ICON_SIZE))
         .text_color(rgb(color))
+        .into_any_element()
+}
+
+fn linear_icon() -> AnyElement {
+    svg()
+        .path("llm_icons/linear.svg")
+        .w(px(ICON_SIZE - 4.0))
+        .h(px(ICON_SIZE - 4.0))
+        .m(px(2.0))
+        .text_color(rgb(0x5E6AD2))
         .into_any_element()
 }
 

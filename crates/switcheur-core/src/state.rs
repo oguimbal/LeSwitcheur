@@ -74,6 +74,14 @@ pub struct SwitcherState {
     suggested_items: Vec<Item>,
     local_sources: Vec<Item>,
     selected_suggestion: usize,
+    /// Default team label of the "Create a Linear issue" row; `None` while
+    /// no Linear account is connected.
+    linear_create_team: Option<Arc<str>>,
+    /// Upper-case team keys of the connected workspaces. Only identifiers
+    /// with one of these prefixes are looked up.
+    linear_team_keys: Vec<String>,
+    /// Last lookup result, keyed by the identifier it answers.
+    linear_issue: Option<(String, Item)>,
 }
 
 impl SwitcherState {
@@ -100,6 +108,9 @@ impl SwitcherState {
             suggested_items: Vec::new(),
             local_sources: Vec::new(),
             selected_suggestion: 0,
+            linear_create_team: None,
+            linear_team_keys: Vec::new(),
+            linear_issue: None,
         }
     }
 
@@ -144,8 +155,58 @@ impl SwitcherState {
     /// snatched focus for no reason. The selection is only clamped when the
     /// new list is shorter than the old cursor position.
     pub fn set_browser_tabs(&mut self, tabs: Vec<Item>) {
+        let selected = self.selected().cloned();
         self.browser_tabs_cache = Some(tabs);
         self.rerank_inner(RerankReset::PreserveSelection);
+        self.restore_selection(selected);
+    }
+
+    /// Linear integration: `create_team` labels the default team of the
+    /// "Create a Linear issue" row (`None` = no account connected);
+    /// `team_keys` gates which identifiers get looked up.
+    pub fn set_linear(&mut self, create_team: Option<Arc<str>>, team_keys: Vec<String>) {
+        self.linear_create_team = create_team;
+        self.linear_team_keys = team_keys
+            .into_iter()
+            .map(|k| k.to_ascii_uppercase())
+            .collect();
+        self.rerank();
+    }
+
+    /// Identifier (`ENG-123`) the host should look up for the current
+    /// query, when it names one of the connected teams.
+    pub fn linear_lookup_target(&self) -> Option<String> {
+        let (key, number) = crate::linear::parse_identifier(&self.query)?;
+        self.linear_team_keys
+            .contains(&key)
+            .then(|| format!("{key}-{number}"))
+    }
+
+    /// Async lookup result for `identifier`. Ignored once the query moved
+    /// on; the cursor stays on the row it was on.
+    pub fn set_linear_issue(&mut self, identifier: String, issue: Option<Item>) {
+        debug_assert!(issue.iter().all(|it| matches!(it, Item::LinearIssue(_))));
+        if self.linear_lookup_target().as_deref() != Some(identifier.as_str()) {
+            return;
+        }
+        let selected = self.selected().cloned();
+        self.linear_issue = issue.map(|item| (identifier, item));
+        self.rerank_inner(RerankReset::PreserveSelection);
+        self.restore_selection(selected);
+    }
+
+    /// Keep the cursor on the same windows-list row after an async insert.
+    fn restore_selection(&mut self, selected: Option<Item>) {
+        if self.active_section != Section::Windows {
+            return;
+        }
+        if let Some(index) = selected.as_ref().and_then(|selected| {
+            self.filtered
+                .iter()
+                .position(|result| same_target(&result.item, selected))
+        }) {
+            self.selected_idx = index;
+        }
     }
 
     /// Install the "Currently Playing" rows. Like browser tabs the caller
@@ -423,7 +484,11 @@ impl SwitcherState {
         }
         // When the left list has nothing to show but dirs do, move keyboard
         // focus there so Enter activates a dir row without a manual Tab.
-        if self.filtered.is_empty()
+        let only_create_row = self
+            .filtered
+            .iter()
+            .all(|m| matches!(m.item, Item::CreateLinearIssue { .. }));
+        if only_create_row
             && self.filtered_programs.is_empty()
             && !self.dirs.is_empty()
             && self.active_section == Section::Windows
@@ -715,8 +780,12 @@ impl SwitcherState {
         if self.filtered.is_empty() {
             return;
         }
+        let idx = idx.min(self.filtered.len() - 1);
+        if self.active_section != Section::Windows || self.selected_idx != idx {
+            self.open_with_index = None;
+        }
         self.active_section = Section::Windows;
-        self.selected_idx = idx.min(self.filtered.len() - 1);
+        self.selected_idx = idx;
     }
 
     /// Jump the programs selection to a specific index + activate the section.
@@ -773,6 +842,11 @@ impl SwitcherState {
         // even when a window also matches. Only kicks in past the minimum
         // query length (see [`MIN_QUERY_LEN_FOR_BROWSER_TABS`]) and when a
         // scan has actually been delivered for this session.
+        let linear_target = self.linear_lookup_target();
+        let linear_hit = match (&linear_target, &self.linear_issue) {
+            (Some(target), Some((identifier, item))) if target == identifier => Some(item.clone()),
+            _ => None,
+        };
         let mut tab_count = 0usize;
         if self.browser_tabs_integration && self.query_long_enough_for_browser_tabs() {
             if let Some(cache) = &self.browser_tabs_cache {
@@ -801,6 +875,7 @@ impl SwitcherState {
             && self.eval_result.is_none()
             && self.dirs.is_empty()
             && !browser_tabs_pending
+            && linear_hit.is_none()
         {
             let query: Arc<str> = Arc::from(self.query.as_str());
             self.filtered
@@ -815,11 +890,36 @@ impl SwitcherState {
                     }
                 }));
         }
+        if let Some(item) = linear_hit {
+            self.filtered.insert(
+                0,
+                MatchResult {
+                    item,
+                    score: 0,
+                    indices: Vec::new(),
+                },
+            );
+        }
+        // Last row: a single Up from the input wraps onto it.
+        if let Some(team) = &self.linear_create_team {
+            let title = self.query.trim();
+            if !title.is_empty() && self.eval_result.is_none() && linear_target.is_none() {
+                self.filtered.push(MatchResult {
+                    item: Item::CreateLinearIssue {
+                        title: Arc::from(title),
+                        team: team.clone(),
+                    },
+                    score: 0,
+                    indices: Vec::new(),
+                });
+            }
+        }
         match reset {
             RerankReset::ResetSelection => {
                 self.selected_idx = 0;
                 self.selected_program = 0;
                 self.active_section = Section::Windows;
+                self.open_with_index = None;
             }
             RerankReset::PreserveSelection => {
                 // Clamp to the new lengths — the cursor may have been beyond
@@ -1644,6 +1744,106 @@ mod tests {
         assert_eq!(s.selected_suggestion_idx(), 1);
         s.set_currently_playing(vec![audio("Spotify")]);
         assert_eq!(s.selected_suggestion_idx(), 0);
+    }
+
+    // --- Linear tests ---
+
+    fn linear_issue(identifier: &str) -> Item {
+        Item::LinearIssue(Arc::new(crate::model::LinearIssueRef::new(
+            identifier.into(),
+            "Fix login".into(),
+            format!("https://linear.app/acme/issue/{identifier}"),
+            Some("Todo".into()),
+            "Acme",
+        )))
+    }
+
+    fn linear_state() -> SwitcherState {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Mail", "Inbox"), win("VSCode", "main.rs")]);
+        s.set_browser_tabs(Vec::new());
+        s.set_linear(Some(Arc::from("ENG")), vec!["eng".into()]);
+        s
+    }
+
+    #[test]
+    fn create_row_is_last_when_linear_connected() {
+        let mut s = linear_state();
+        s.set_query("ma");
+        let last = &s.filtered().last().unwrap().item;
+        assert!(matches!(last, Item::CreateLinearIssue { title, team }
+            if &**title == "ma" && &**team == "ENG"));
+        assert!(matches!(s.selected(), Some(Item::Window(_))));
+    }
+
+    #[test]
+    fn create_row_hidden_without_account_or_query() {
+        let mut s = linear_state();
+        assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::CreateLinearIssue { .. })));
+        s.set_linear(None, Vec::new());
+        s.set_query("ma");
+        assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::CreateLinearIssue { .. })));
+    }
+
+    #[test]
+    fn create_row_hidden_for_eval_and_urls() {
+        let mut s = linear_state();
+        s.set_query("1+1");
+        assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::CreateLinearIssue { .. })));
+        s.set_query("https://example.com");
+        assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::CreateLinearIssue { .. })));
+    }
+
+    #[test]
+    fn lookup_target_requires_known_team() {
+        let mut s = linear_state();
+        s.set_query("eng-12");
+        assert_eq!(s.linear_lookup_target().as_deref(), Some("ENG-12"));
+        s.set_query("ops-12");
+        assert_eq!(s.linear_lookup_target(), None);
+        s.set_query("eng 12");
+        assert_eq!(s.linear_lookup_target(), None);
+    }
+
+    #[test]
+    fn found_issue_is_first_and_replaces_fallbacks() {
+        let mut s = linear_state();
+        s.set_query("eng-12");
+        assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::CreateLinearIssue { .. })));
+        s.set_linear_issue("ENG-12".into(), Some(linear_issue("ENG-12")));
+        assert!(matches!(s.filtered()[0].item, Item::LinearIssue(_)));
+        assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::AskLlm { .. })));
+        assert!(matches!(s.selected(), Some(Item::LinearIssue(_))));
+    }
+
+    #[test]
+    fn stale_issue_result_is_ignored() {
+        let mut s = linear_state();
+        s.set_query("eng-12");
+        s.set_query("eng-123");
+        s.set_linear_issue("ENG-12".into(), Some(linear_issue("ENG-12")));
+        assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::LinearIssue(_))));
+    }
+
+    #[test]
+    fn issue_arrival_keeps_cursor_on_its_row() {
+        let mut s = linear_state();
+        s.set_query("eng-12");
+        let n = s.filtered().len();
+        s.set_selected(n - 1);
+        let before = s.selected().cloned();
+        s.set_linear_issue("ENG-12".into(), Some(linear_issue("ENG-12")));
+        if let Some(before) = before.filter(|it| s.filtered().iter().any(|m| &m.item == it)) {
+            assert_eq!(s.selected(), Some(&before));
+        }
+    }
+
+    #[test]
+    fn dirs_take_focus_when_only_create_row_matches() {
+        let mut s = linear_state();
+        s.set_query("zzzz");
+        s.set_dirs(vec![dir("/zzzz")]);
+        assert_eq!(s.active_section(), Section::Dirs);
     }
 
     #[test]
