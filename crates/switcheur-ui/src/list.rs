@@ -58,6 +58,7 @@ pub fn render_row(
         Item::AskLlm { provider, .. } => tr(provider.i18n_key()),
         Item::OpenUrl(_) => tr("launcher.open_url"),
         Item::CreateLinearIssue { team, .. } => tr_sub("linear.create_issue", &[("team", team)]),
+        Item::LinearTeam(t) => tr_sub("linear.open_team", &[("team", &t.key)]),
         _ => item.primary().to_string(),
     };
     let secondary = item.secondary().map(str::to_string);
@@ -92,7 +93,9 @@ pub fn render_row(
             .child(openclaw.emoji.clone().unwrap())
             .into_any_element(),
         Item::AskLlm { provider, .. } => llm_icon(*provider),
-        Item::LinearIssue(_) | Item::CreateLinearIssue { .. } => linear_icon(),
+        Item::LinearIssue(_) | Item::LinearTeam(_) | Item::CreateLinearIssue { .. } => {
+            linear_icon()
+        }
         _ => match item.icon_path() {
             Some(path) => img(path.to_path_buf())
                 .w(px(ICON_SIZE))

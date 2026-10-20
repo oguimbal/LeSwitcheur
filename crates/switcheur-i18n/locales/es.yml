@@ -192,6 +192,7 @@ local_sources:
 
 linear:
   create_issue: "Crear una incidencia de Linear en %{team}"
+  open_team: "Abrir las incidencias de %{team}"
   create_failed: "Incidencia no creada: %{reason}"
   connect_failed: "No se pudo conectar: %{reason}"
   error_unauthorized: "clave API no válida o revocada"

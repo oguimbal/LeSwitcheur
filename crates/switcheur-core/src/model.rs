@@ -55,6 +55,8 @@ pub enum DirSource {
     WindowsFolders,
     /// Same walker as [`DirSource::WindowsFolders`] but also surfaces files.
     WindowsFiles,
+    /// Absolute path typed in the query.
+    Path,
 }
 
 /// Which browser a [`BrowserTabRef`] was scraped from. The enum shape lets
@@ -441,6 +443,38 @@ impl LinearIssueRef {
     }
 }
 
+/// A team of a connected Linear workspace; opening it shows its issues.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearTeamRef {
+    pub key: String,
+    pub name: String,
+    /// The team's "all issues" page.
+    pub url: String,
+    subtitle: String,
+}
+
+impl LinearTeamRef {
+    pub fn new(key: String, name: String, url: String, workspace: &str) -> Self {
+        let subtitle = [name.as_str(), workspace]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        Self {
+            key,
+            name,
+            url,
+            subtitle,
+        }
+    }
+
+    /// Exact key or name, ignoring case and surrounding spaces.
+    pub fn matches_exactly(&self, query: &str) -> bool {
+        let q = query.trim();
+        !q.is_empty() && (q.eq_ignore_ascii_case(&self.key) || q.to_lowercase() == self.name.to_lowercase())
+    }
+}
+
 /// Anything selectable in the switcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
@@ -471,6 +505,7 @@ pub enum Item {
     /// fuzzy-matched list — see [`crate::state::SwitcherState::set_currently_playing`].
     CurrentlyPlaying(Arc<AudioRowRef>),
     LinearIssue(Arc<LinearIssueRef>),
+    LinearTeam(Arc<LinearTeamRef>),
     /// "Create a Linear issue" with the query as title. `team` labels the
     /// default team; the host owns the team list and the actual target.
     CreateLinearIssue { title: Arc<str>, team: Arc<str> },
@@ -503,7 +538,9 @@ impl Item {
             // call to rank() can't surface it.
             Item::CurrentlyPlaying(_) => String::new(),
             // Placed by the state, never fuzzy-ranked.
-            Item::LinearIssue(_) | Item::CreateLinearIssue { .. } => String::new(),
+            Item::LinearIssue(_) | Item::LinearTeam(_) | Item::CreateLinearIssue { .. } => {
+                String::new()
+            }
         }
     }
 
@@ -528,6 +565,8 @@ impl Item {
                 .or_else(|| r.browser_tab.as_ref().map(|t| &*t.title))
                 .unwrap_or(&r.app_name),
             Item::LinearIssue(i) => &i.title,
+            // Resolved through i18n at render time.
+            Item::LinearTeam(t) => &t.key,
             // Resolved through i18n at render time.
             Item::CreateLinearIssue { team, .. } => team,
         }
@@ -577,6 +616,7 @@ impl Item {
                     None
                 }),
             Item::LinearIssue(i) => Some(&i.subtitle),
+            Item::LinearTeam(t) => Some(&t.subtitle),
             Item::CreateLinearIssue { title, .. } => Some(title),
             _ => None,
         }
@@ -594,7 +634,7 @@ impl Item {
             Item::Dir(_) => "dir",
             Item::BrowserTab(t) => t.browser.bundle_id(),
             Item::CurrentlyPlaying(r) => r.bundle_id.as_deref().unwrap_or(&r.app_name),
-            Item::LinearIssue(_) | Item::CreateLinearIssue { .. } => "linear",
+            Item::LinearIssue(_) | Item::LinearTeam(_) | Item::CreateLinearIssue { .. } => "linear",
         }
     }
 
@@ -610,7 +650,9 @@ impl Item {
             Item::Dir(_) => return '📁',
             Item::BrowserTab(_) => return 'C',
             Item::CurrentlyPlaying(r) => r.app_name.as_str(),
-            Item::LinearIssue(_) | Item::CreateLinearIssue { .. } => return 'L',
+            Item::LinearIssue(_) | Item::LinearTeam(_) | Item::CreateLinearIssue { .. } => {
+                return 'L'
+            }
         };
         name.chars().next().unwrap_or('?').to_ascii_uppercase()
     }
@@ -625,6 +667,7 @@ impl Item {
             Item::AskLlm { .. }
             | Item::OpenUrl(_)
             | Item::LinearIssue(_)
+            | Item::LinearTeam(_)
             | Item::CreateLinearIssue { .. } => None,
             Item::Dir(d) => d.icon_path.as_deref(),
             Item::BrowserTab(t) => t.icon_path.as_deref(),

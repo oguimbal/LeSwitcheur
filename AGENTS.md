@@ -182,6 +182,13 @@ If can't test a case: say so explicit, don't claim still work.
 41. **Zoxide focus** — query matching only dirs still moves focus to the dirs pane (create row doesn't count as a match).
 42. **Settings** — Connect a workspace → browser consent → back in settings, row "Workspace · email". Second click with `prompt=consent` → pick other workspace → two rows. Deny in browser → reason shown. Cancel / Esc stops the wait (port freed). API-key fallback still works. Remove drops the row.
 43. **Token refresh** — access token past 24 h: lookup/create still work, `linear-accounts.json` gets the rotated refresh token.
+44. **Team shortcut** — query exactly a team key or name (`per`, `Perso`, any case): top row "Open PER issues" → `https://linear.app/<urlKey>/team/PER/all`. Prefix (`pers`) → no row.
+45. **Only live member teams** — archived/retired teams and teams you're not in never show (create popover, team rows, lookups). Cache from an older build refetched at boot (`TEAMS_FORMAT`).
+
+### Typed paths
+
+46. **Absolute path** — `/Users/me/repos`, `~/repos`, `C:\Users`, `C:/Users`, quoted or with `\ ` escapes: path row first, then entries of its folder starting with the last component (children after a trailing separator, dotfiles only for a `.` prefix), max 8. Enter → folder in default file manager / file in default app. Right (caret at end, or list focused) → Open With popover. Missing path → normal ranking. Dirs pane stays empty while the query is a path.
+47. **Path completion** — `~/repos-my/les`: grey rest of the first candidate after the caret (only when typed plainly, caret at end). Tab → first candidate, Tab again cycles, Shift-Tab backwards, any edit ends the cycle. No separator appended to folders: the user types `/` to step into the chosen one (then completion lists its children). Ghost aligned with the typed text (overlay mirrors the Input's 12 px inset + `text_sm`).
 
 ### Don't-do
 
@@ -226,11 +233,16 @@ If can't test a case: say so explicit, don't claim still work.
 
 - Settings → Linear → "Connect a workspace": OAuth 2 + PKCE, public app client id in `linear.rs` (no secret). Loopback redirect `http://127.0.0.1:47823/callback` (registered on the Linear app, listener bound *before* the browser opens, state checked, 10 min timeout, cancelled on Cancel / settings Esc). `prompt=consent` so a second click can pick another workspace. Scopes `read,issues:create`. Access token 24 h → `linear::authorize` refreshes 5 min early; refresh tokens rotate, so every caller writes `Authorized::refreshed` back to the store (`store_refreshed`) before anything else can fail. Remove = best-effort revoke.
 - Fallback "or paste an API key": personal key, header `Authorization: <key>` (no `Bearer`). One credential per workspace; reconnecting a workspace replaces it.
+- Teams = `viewer.teams` minus `archivedAt`/`retiredAt` (what Linear's sidebar shows). Bump `TEAMS_FORMAT` when that selection changes so caches refetch. Exact key/name query → `Item::LinearTeam` rows on top (suppress Ask-LLM).
 - Storage: `linear-accounts.json` (0600, config dir) = accounts (org id/name, user, access token or API key, OAuth refresh token + expiry, cached teams + fetch time) + team MRU. Nothing in `config.toml`. Teams refetched in background on panel open when > 6 h old.
 - Client: `switcheur-platform/src/linear.rs` (ureq, blocking, off UI thread). Lookup via documented `issue(id: "ENG-12")` (not-found = GraphQL error → `None`), creation via `issueCreate {teamId, title}`. Errors reduced to content-free codes; never log keys, `errors[].message`, or titles (`CreateLinearIssue` + `Confirmed(LinearIssue)` skipped by `handle_view_event` logging).
-- State: `SwitcherState::set_linear` (default team label + team keys). `linear_lookup_target` only for known keys → view emits `NeedsLinearIssue` once per identifier → host debounces (generation counter) → `set_linear_issue` (ignored if query moved on, cursor kept by identity). Found issue = row 0 and suppresses Ask-LLM rows. `CreateLinearIssue` row always last when connected (query non-empty, not URL/eval/identifier) so one Up from the input wraps onto it.
+- State: `SwitcherState::set_linear` (default team label + `LinearTeam` items, whose keys gate lookups). `linear_lookup_target` only for known keys → view emits `NeedsLinearIssue` once per identifier → host debounces (generation counter) → `set_linear_issue` (ignored if query moved on, cursor kept by identity). Found issue = row 0 and suppresses Ask-LLM rows. `CreateLinearIssue` row always last when connected (query non-empty, not URL/eval/identifier) so one Up from the input wraps onto it.
 - Team picker reuses the Open With popover window: `open_with_visible` / `current_open_with_count` / `open_with_anchor_y` branch on `linear_create_selected()`; anchor from a canvas probe on the create row. Host snapshots `TeamChoice`s at panel open (`AppState::linear_choices`), `CreateLinearIssue { team }` indexes it (0 = default/MRU).
 - Create: panel stays open with the instruction spinner (`InstructionPhase::Sending` doubles as the double-Enter latch); success → promote team, open issue URL, dismiss; failure → `linear_issue_failed`.
+
+## Typed paths
+
+- `switcheur-core/src/path.rs`: `detect` (query → path string) + `hits` (stat + `read_dir`, tilde via passed home). State: `path_target` → view emits `NeedsPathHits` once per path → host resolves on the background executor → `set_path_hits` (stale target ignored). Hits (`Item::Dir`, `DirSource::Path`) replace the ranking; the previous answer stays until the next lands (no flicker). Popover reuses the dirs-pane Open With flow via `SwitcherView::selected_fs_item` (list row or dirs pane), anchored by the same row probe as the Linear create row. Tab completion: `path::completions` (computed with the hits, up to 200 entries) → `SwitcherState::path_completions` / `path_ghost` (fresh answer only); the view's `complete_path` runs before pane switching in `FocusNextPane`/`FocusPrevPane` (single-line `Input` propagates Tab) and keeps `path_cycle` while the query equals the candidate it wrote. Ghost = absolutely positioned overlay over the `Input`, typed text transparent then muted rest.
 
 ## Key files
 

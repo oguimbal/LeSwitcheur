@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{App, AppContext, AsyncApp, Entity};
-use switcheur_core::{Item, LinearIssueRef};
+use switcheur_core::{Item, LinearIssueRef, LinearTeamRef};
 use switcheur_platform::linear::{self, Account, LinearError, Store, TeamChoice};
 use switcheur_ui::open_with_popover::OpenWithEntry;
 use switcheur_ui::settings_view::{LinearAccountRow, SettingsView};
@@ -46,9 +46,20 @@ pub(crate) fn configure_view(state: &AppState, view: &mut SwitcherView, cx: &mut
     let store = state.linear.borrow();
     let choices = store.team_choices();
     let several_workspaces = store.accounts.len() > 1;
-    let mut keys: Vec<String> = choices.iter().map(|c| c.team.key.clone()).collect();
-    keys.sort();
-    keys.dedup();
+    let teams: Vec<Item> = store
+        .accounts
+        .iter()
+        .flat_map(|a| {
+            a.teams.iter().map(|t| {
+                Item::LinearTeam(Arc::new(LinearTeamRef::new(
+                    t.key.clone(),
+                    t.name.clone(),
+                    format!("https://linear.app/{}/team/{}/all", a.url_key, t.key),
+                    if several_workspaces { &a.name } else { "" },
+                )))
+            })
+        })
+        .collect();
     let default_label = choices.first().map(|c| short_label(c, several_workspaces));
     let entries = choices
         .iter()
@@ -65,7 +76,7 @@ pub(crate) fn configure_view(state: &AppState, view: &mut SwitcherView, cx: &mut
     drop(store);
     *state.linear_choices.borrow_mut() = choices;
     *state.linear_entries.borrow_mut() = entries;
-    view.set_linear(default_label, keys, count, cx);
+    view.set_linear(default_label, teams, count, cx);
 }
 
 fn short_label(c: &TeamChoice, several_workspaces: bool) -> String {

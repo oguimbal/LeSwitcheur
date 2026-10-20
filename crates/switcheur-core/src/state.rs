@@ -62,6 +62,12 @@ pub struct SwitcherState {
     /// Populated alongside `eval_result` in `set_query` and consumed in
     /// `rerank` to render the "Open URL" launcher row.
     detected_url: Option<Arc<str>>,
+    /// Absolute path typed in the query (`crate::path::detect`).
+    detected_path: Option<String>,
+    /// Latest answer for a path query: the path it answers, its rows (shown
+    /// in place of the ranking, kept until the next answer lands so typing
+    /// doesn't flicker) and its Tab completions.
+    path_hits: Option<(String, Vec<Item>, Vec<String>)>,
     llm_provider_order: Vec<LlmProvider>,
     ask_llm_enabled: bool,
     /// When the Dirs pane is active and the user has pressed Right (or clicked
@@ -80,6 +86,8 @@ pub struct SwitcherState {
     /// Upper-case team keys of the connected workspaces. Only identifiers
     /// with one of these prefixes are looked up.
     linear_team_keys: Vec<String>,
+    /// `Item::LinearTeam` rows, shown when the query is a team key or name.
+    linear_teams: Vec<Item>,
     /// Last lookup result, keyed by the identifier it answers.
     linear_issue: Option<(String, Item)>,
 }
@@ -102,6 +110,8 @@ impl SwitcherState {
             matcher: FuzzyMatcher::new(),
             eval_result: None,
             detected_url: None,
+            detected_path: None,
+            path_hits: None,
             llm_provider_order: LlmProvider::default_order(),
             ask_llm_enabled: true,
             open_with_index: None,
@@ -110,6 +120,7 @@ impl SwitcherState {
             selected_suggestion: 0,
             linear_create_team: None,
             linear_team_keys: Vec::new(),
+            linear_teams: Vec::new(),
             linear_issue: None,
         }
     }
@@ -163,14 +174,56 @@ impl SwitcherState {
 
     /// Linear integration: `create_team` labels the default team of the
     /// "Create a Linear issue" row (`None` = no account connected);
-    /// `team_keys` gates which identifiers get looked up.
-    pub fn set_linear(&mut self, create_team: Option<Arc<str>>, team_keys: Vec<String>) {
+    /// `teams` (`Item::LinearTeam`) gate which identifiers get looked up
+    /// and open on an exact key/name query.
+    pub fn set_linear(&mut self, create_team: Option<Arc<str>>, teams: Vec<Item>) {
+        debug_assert!(teams.iter().all(|it| matches!(it, Item::LinearTeam(_))));
         self.linear_create_team = create_team;
-        self.linear_team_keys = team_keys
-            .into_iter()
-            .map(|k| k.to_ascii_uppercase())
+        self.linear_team_keys = teams
+            .iter()
+            .filter_map(|it| match it {
+                Item::LinearTeam(t) => Some(t.key.to_ascii_uppercase()),
+                _ => None,
+            })
             .collect();
+        self.linear_teams = teams;
         self.rerank();
+    }
+
+    /// Absolute path the host should resolve for the current query.
+    pub fn path_target(&self) -> Option<&str> {
+        self.detected_path.as_deref()
+    }
+
+    /// Existing entries (`Item::Dir`) and Tab completions
+    /// ([`crate::path::completions`]) for `target`, ignored once the query
+    /// moved on.
+    pub fn set_path_hits(&mut self, target: String, hits: Vec<Item>, completions: Vec<String>) {
+        debug_assert!(hits.iter().all(|it| matches!(it, Item::Dir(_))));
+        if self.detected_path.as_deref() != Some(target.as_str()) {
+            return;
+        }
+        self.path_hits = Some((target, hits, completions));
+        self.rerank();
+    }
+
+    /// Tab completions for the current path query, once its answer landed.
+    pub fn path_completions(&self) -> Option<&[String]> {
+        match &self.path_hits {
+            Some((target, _, completions)) if self.detected_path.as_ref() == Some(target) => {
+                Some(completions)
+            }
+            _ => None,
+        }
+    }
+
+    /// Grey rest of the first completion, when the query is typed plainly
+    /// (no quotes or escapes, so the suffix lines up with the text).
+    pub fn path_ghost(&self) -> Option<&str> {
+        if self.detected_path.as_deref() != Some(self.query.as_str()) {
+            return None;
+        }
+        crate::path::ghost(&self.query, self.path_completions()?)
     }
 
     /// Identifier (`ENG-123`) the host should look up for the current
@@ -599,7 +652,11 @@ impl SwitcherState {
         // URL detection short-circuits eval — a pasted URL is never an
         // expression, and running the JS engine on it is pure overhead.
         self.detected_url = crate::url::detect(&self.query).map(Arc::from);
-        self.eval_result = if self.detected_url.is_some() {
+        self.detected_path = crate::path::detect(&self.query);
+        if self.detected_path.is_none() {
+            self.path_hits = None;
+        }
+        self.eval_result = if self.detected_url.is_some() || self.detected_path.is_some() {
             None
         } else {
             crate::math::try_eval(&self.query)
@@ -817,6 +874,25 @@ impl SwitcherState {
             self.active_section = Section::Windows;
             return;
         }
+        if let Some((_, hits, _)) = self.path_hits.as_ref().filter(|(_, hits, _)| !hits.is_empty()) {
+            self.filtered = hits
+                .iter()
+                .map(|item| MatchResult {
+                    item: item.clone(),
+                    score: 0,
+                    indices: Vec::new(),
+                })
+                .collect();
+            self.filtered_programs.clear();
+            self.selected_program = 0;
+            if reset == RerankReset::ResetSelection {
+                self.selected_idx = 0;
+                self.open_with_index = None;
+                self.active_section = Section::Windows;
+            }
+            self.selected_idx = self.selected_idx.min(self.filtered.len() - 1);
+            return;
+        }
         self.filtered = self.matcher.rank(&self.query, &self.items);
         let window_count = self.filtered.len();
         let local_matches = if self.query.trim().is_empty() {
@@ -847,6 +923,12 @@ impl SwitcherState {
             (Some(target), Some((identifier, item))) if target == identifier => Some(item.clone()),
             _ => None,
         };
+        let team_hits: Vec<Item> = self
+            .linear_teams
+            .iter()
+            .filter(|it| matches!(it, Item::LinearTeam(t) if t.matches_exactly(&self.query)))
+            .cloned()
+            .collect();
         let mut tab_count = 0usize;
         if self.browser_tabs_integration && self.query_long_enough_for_browser_tabs() {
             if let Some(cache) = &self.browser_tabs_cache {
@@ -876,6 +958,7 @@ impl SwitcherState {
             && self.dirs.is_empty()
             && !browser_tabs_pending
             && linear_hit.is_none()
+            && team_hits.is_empty()
         {
             let query: Arc<str> = Arc::from(self.query.as_str());
             self.filtered
@@ -889,6 +972,16 @@ impl SwitcherState {
                         indices: Vec::new(),
                     }
                 }));
+        }
+        for (i, item) in team_hits.into_iter().enumerate() {
+            self.filtered.insert(
+                i,
+                MatchResult {
+                    item,
+                    score: 0,
+                    indices: Vec::new(),
+                },
+            );
         }
         if let Some(item) = linear_hit {
             self.filtered.insert(
@@ -1758,12 +1851,39 @@ mod tests {
         )))
     }
 
+    fn linear_team(key: &str, name: &str) -> Item {
+        Item::LinearTeam(Arc::new(crate::model::LinearTeamRef::new(
+            key.into(),
+            name.into(),
+            format!("https://linear.app/acme/team/{key}/all"),
+            "Acme",
+        )))
+    }
+
     fn linear_state() -> SwitcherState {
         let mut s = SwitcherState::new();
         s.set_items(vec![win("Mail", "Inbox"), win("VSCode", "main.rs")]);
         s.set_browser_tabs(Vec::new());
-        s.set_linear(Some(Arc::from("ENG")), vec!["eng".into()]);
+        s.set_linear(
+            Some(Arc::from("ENG")),
+            vec![linear_team("ENG", "Engineering"), linear_team("PER", "Perso")],
+        );
         s
+    }
+
+    #[test]
+    fn exact_team_key_or_name_offers_the_team() {
+        let mut s = linear_state();
+        for q in ["per", "PER", "perso", " Perso "] {
+            s.set_query(q);
+            assert!(
+                matches!(&s.filtered()[0].item, Item::LinearTeam(t) if t.key == "PER"),
+                "{q}"
+            );
+            assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::AskLlm { .. })));
+        }
+        s.set_query("pers");
+        assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::LinearTeam(_))));
     }
 
     #[test]
@@ -1858,5 +1978,47 @@ mod tests {
         assert_eq!(s.selected_program_idx(), last);
         s.move_up();
         assert_eq!(s.selected_program_idx(), last - 1);
+    }
+
+    #[test]
+    fn path_hits_replace_the_ranking_until_the_query_leaves_paths() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Finder", "Users")]);
+        s.set_query("/Users/me");
+        assert_eq!(s.path_target(), Some("/Users/me"));
+        assert!(s.eval_result().is_none());
+        s.set_path_hits("/Users/other".into(), vec![dir("/Users/other")], Vec::new());
+        assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::Dir(_))));
+        s.set_path_hits(
+            "/Users/me".into(),
+            vec![dir("/Users/me"), dir("/Users/meta")],
+            vec!["/Users/meta".into()],
+        );
+        assert_eq!(s.path_ghost(), Some("ta"));
+        assert_eq!(s.filtered().len(), 2);
+        assert_eq!(s.selected(), Some(&dir("/Users/me")));
+        // Next keystroke: previous hits stay until the new answer lands.
+        s.set_query("/Users/met");
+        assert_eq!(s.filtered().len(), 2);
+        assert_eq!(s.path_completions(), None);
+        assert_eq!(s.path_ghost(), None);
+        s.set_path_hits("/Users/met".into(), vec![dir("/Users/meta")], vec!["/Users/meta".into()]);
+        assert_eq!(s.path_ghost(), Some("a"));
+        s.set_query(" /Users/met");
+        assert_eq!(s.path_ghost(), None);
+        s.set_query("/Users/met");
+        assert_eq!(s.selected(), Some(&dir("/Users/meta")));
+        s.set_query("users");
+        assert_eq!(s.path_target(), None);
+        assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::Dir(_))));
+    }
+
+    #[test]
+    fn missing_path_falls_back_to_the_ranking() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("Finder", "nope")]);
+        s.set_query("/nope");
+        s.set_path_hits("/nope".into(), Vec::new(), Vec::new());
+        assert!(s.filtered().iter().all(|m| !matches!(m.item, Item::Dir(_))));
     }
 }

@@ -67,6 +67,10 @@ const THANKS_HEIGHT: f32 = 380.0;
 /// advances on every opening of the panel; when it hits this threshold the
 /// next open renders the in-panel support card instead of the result list.
 const NAG_EVERY_N_USES: u32 = 50;
+/// Rows offered for a typed absolute path: the path itself + completions.
+const PATH_HITS_MAX: usize = 8;
+/// Folder entries Tab can cycle through.
+const PATH_COMPLETIONS_MAX: usize = 200;
 /// Public-facing site origin. Used as a base for API endpoints.
 const LICENSE_SITE: &str = "https://leswitcheur.app";
 /// Buy-a-licence page. Opens in the user's browser when they click "Buy a
@@ -532,6 +536,7 @@ fn main() -> Result<()> {
         spawn_app_activation_loop(cx, state.clone());
         spawn_panel_watch_loop(cx, state.clone());
         spawn_update_checker(cx, state.clone());
+        linear::refresh_stale_accounts(&state, cx);
         spawn_url_scheme_loop(cx, state.clone(), url_rx);
         #[cfg(target_os = "macos")]
         spawn_install_drift_watcher(cx, state);
@@ -1089,6 +1094,7 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
             | Item::CurrentlyPlaying(_)
             | Item::LocalSource(_)
             | Item::LinearIssue(_)
+            | Item::LinearTeam(_)
             | Item::CreateLinearIssue { .. } => { /* Cmd+Tab cycles only ever carry Window/App items */ }
         }
     }
@@ -1103,6 +1109,7 @@ fn confirm_pending_cycle(state: &AppState, pc: PendingCycle) {
         | Item::CurrentlyPlaying(_)
         | Item::LocalSource(_)
         | Item::LinearIssue(_)
+        | Item::LinearTeam(_)
         | Item::CreateLinearIssue { .. } => {
             tracing::warn!("unexpected non-window/app item in Cmd+Tab cycle");
             Ok(())
@@ -1776,6 +1783,48 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             .detach();
             return;
         }
+        SwitcherViewEvent::NeedsPathHits(target) => {
+            let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
+            let Some(entity) = entity_opt else {
+                return;
+            };
+            let weak = entity.downgrade();
+            let target = target.clone();
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                let target_for_task = target.clone();
+                let (items, completions) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+                        let hits = switcheur_core::path::hits(
+                            &target_for_task,
+                            home.as_deref(),
+                            PATH_COMPLETIONS_MAX,
+                        );
+                        let completions = switcheur_core::path::completions(&target_for_task, &hits);
+                        let items: Vec<Item> = hits
+                            .rows()
+                            .take(PATH_HITS_MAX)
+                            .map(|(path, is_dir)| {
+                                let icon = switcheur_platform::icon_for_path(path, *is_dir);
+                                Item::Dir(Arc::new(switcheur_core::DirRef::with_kind(
+                                    path.clone(),
+                                    switcheur_core::DirSource::Path,
+                                    *is_dir,
+                                    icon,
+                                )))
+                            })
+                            .collect();
+                        (items, completions)
+                    })
+                    .await;
+                let _ = weak.update(cx, |view, cx| {
+                    view.set_path_hits(target, items, completions, cx)
+                });
+            })
+            .detach();
+            return;
+        }
         SwitcherViewEvent::QueryChanged(query) => {
             // The view emits QueryChanged on every keystroke when the dirs
             // pane is enabled. Spawn the subprocess on the background
@@ -1796,8 +1845,9 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             // Spotlight otherwise disagree: zoxide returns its top
             // frecency list, Spotlight returns nothing. Uniform "no
             // query means no suggestions" is less surprising, and keeps
-            // the pane visually quiet when the switcher first opens.
-            if query.trim().is_empty() {
+            // the pane visually quiet when the switcher first opens. A typed
+            // absolute path is answered in the list (`NeedsPathHits`).
+            if query.trim().is_empty() || switcheur_core::path::detect(&query).is_some() {
                 // Still bump the gen so any in-flight task's late
                 // delivery doesn't overwrite this empty state.
                 let my_gen = state.dir_query_gen.get().wrapping_add(1);
@@ -1928,6 +1978,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                     | Item::CurrentlyPlaying(_)
                     | Item::LocalSource(_)
                     | Item::LinearIssue(_)
+                    | Item::LinearTeam(_)
                     | Item::CreateLinearIssue { .. } => {
                         // The audio row's underlying app/window picks up
                         // recency through the activation NSNotification —
@@ -1978,6 +2029,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                 Item::BrowserTab(t) => state.platform.activate_browser_tab(t),
                 Item::CurrentlyPlaying(row) => activate_currently_playing(row, state),
                 Item::LinearIssue(issue) => state.platform.open_url(&issue.url),
+                Item::LinearTeam(team) => state.platform.open_url(&team.url),
                 Item::LocalSource(_) => unreachable!("handled asynchronously above"),
                 // The view sends these as `CreateLinearIssue` instead.
                 Item::CreateLinearIssue { .. } => Ok(()),
@@ -2010,6 +2062,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
         | SwitcherViewEvent::TogglePlayPause(_)
         | SwitcherViewEvent::SendInstruction(_)
         | SwitcherViewEvent::NeedsLinearIssue(_)
+        | SwitcherViewEvent::NeedsPathHits(_)
         | SwitcherViewEvent::CreateLinearIssue { .. } => unreachable!("handled above"),
     };
 
@@ -2223,12 +2276,10 @@ fn activate_open_with(sel_idx: usize, state: &AppState, cx: &mut App) {
         return;
     };
     let selected: Option<(std::path::PathBuf, bool)> = cx.update_entity(&switcher, |v, _cx| {
-        v.dirs()
-            .get(v.selected_dir_idx())
-            .and_then(|it| match it {
-                Item::Dir(d) => Some((d.path.clone(), d.is_dir)),
-                _ => None,
-            })
+        v.selected_fs_item().and_then(|it| match it {
+            Item::Dir(d) => Some((d.path.clone(), d.is_dir)),
+            _ => None,
+        })
     });
     let Some((path, is_dir)) = selected else {
         return;
@@ -2289,8 +2340,7 @@ fn active_open_with_entries(
         return state.linear_entries.borrow().clone();
     }
     let is_dir = cx.update_entity(switcher, |v, _cx| {
-        v.dirs()
-            .get(v.selected_dir_idx())
+        v.selected_fs_item()
             .and_then(|it| match it {
                 Item::Dir(d) => Some(d.is_dir),
                 _ => None,

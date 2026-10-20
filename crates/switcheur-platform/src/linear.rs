@@ -36,6 +36,8 @@ const TOKEN_REFRESH_MARGIN: u64 = 300;
 const STORE_FILE: &str = "linear-accounts.json";
 /// Page where the user creates a personal API key.
 pub const API_KEY_SETTINGS_URL: &str = "https://linear.app/settings/account/security";
+/// Bump when the cached team list changes meaning: forces a refetch.
+const TEAMS_FORMAT: u32 = 1;
 /// Teams are re-fetched in the background past this age.
 pub const TEAMS_MAX_AGE: Duration = Duration::from_secs(6 * 3600);
 
@@ -66,6 +68,8 @@ pub struct Account {
     pub teams: Vec<Team>,
     #[serde(default)]
     pub teams_fetched_at: u64,
+    #[serde(default)]
+    pub teams_format: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,7 +82,8 @@ pub struct OAuthTokens {
 
 impl Account {
     pub fn teams_stale(&self) -> bool {
-        now_secs().saturating_sub(self.teams_fetched_at) > TEAMS_MAX_AGE.as_secs()
+        self.teams_format != TEAMS_FORMAT
+            || now_secs().saturating_sub(self.teams_fetched_at) > TEAMS_MAX_AGE.as_secs()
     }
 }
 
@@ -232,8 +237,8 @@ fn fetch_account(secret: &str, oauth: Option<OAuthTokens>) -> Result<Account, Li
     };
     let data = graphql(
         &authorization,
-        "query { viewer { name email } organization { id name urlKey } \
-         teams(first: 250) { nodes { id key name } } }",
+        "query { viewer { name email teams(first: 250) { nodes \
+         { id key name archivedAt retiredAt } } } organization { id name urlKey } }",
         json!({}),
     )?;
     let mut account = parse_account(&data, secret)?;
@@ -479,11 +484,14 @@ fn parse_account(data: &Value, api_key: &str) -> Result<Account, LinearError> {
     let user = Some(str_at(&viewer["email"]))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| str_at(&viewer["name"]));
-    let mut teams: Vec<Team> = data["teams"]["nodes"]
+    // The viewer's own teams, minus archived/retired ones: what Linear's
+    // sidebar shows.
+    let mut teams: Vec<Team> = viewer["teams"]["nodes"]
         .as_array()
         .map(|nodes| {
             nodes
                 .iter()
+                .filter(|n| n["archivedAt"].is_null() && n["retiredAt"].is_null())
                 .filter_map(|n| serde_json::from_value(n.clone()).ok())
                 .collect()
         })
@@ -498,6 +506,7 @@ fn parse_account(data: &Value, api_key: &str) -> Result<Account, LinearError> {
         oauth: None,
         teams,
         teams_fetched_at: now_secs(),
+        teams_format: TEAMS_FORMAT,
     })
 }
 
@@ -640,24 +649,29 @@ mod tests {
             oauth: None,
             teams,
             teams_fetched_at: 0,
+            teams_format: TEAMS_FORMAT,
         }
     }
 
     #[test]
     fn account_parses_viewer_org_and_teams() {
         let data = json!({
-            "viewer": { "name": "Me", "email": "me@example.com" },
-            "organization": { "id": "org1", "name": "Acme", "urlKey": "acme" },
-            "teams": { "nodes": [
-                { "id": "t2", "key": "OPS", "name": "Ops" },
-                { "id": "t1", "key": "ENG", "name": "Engineering" }
-            ] }
+            "viewer": { "name": "Me", "email": "me@example.com", "teams": { "nodes": [
+                { "id": "t2", "key": "OPS", "name": "Ops", "archivedAt": null, "retiredAt": null },
+                { "id": "t1", "key": "ENG", "name": "Engineering" },
+                { "id": "t3", "key": "OLD", "name": "Old", "retiredAt": "2025-01-01T00:00:00Z" },
+                { "id": "t4", "key": "ARC", "name": "Arc", "archivedAt": "2025-01-01T00:00:00Z" }
+            ] } },
+            "organization": { "id": "org1", "name": "Acme", "urlKey": "acme" }
         });
         let a = parse_account(&data, "lin_api_x").unwrap();
         assert_eq!(a.id, "org1");
         assert_eq!(a.user, "me@example.com");
         assert_eq!(a.teams.iter().map(|t| t.key.as_str()).collect::<Vec<_>>(), ["ENG", "OPS"]);
         assert!(!a.teams_stale());
+        let mut old = a.clone();
+        old.teams_format = 0;
+        assert!(old.teams_stale());
     }
 
     #[test]

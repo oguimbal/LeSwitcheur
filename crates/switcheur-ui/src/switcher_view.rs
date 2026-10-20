@@ -97,6 +97,9 @@ pub enum SwitcherViewEvent {
     /// The query is an identifier (`ENG-123`) of a connected Linear team.
     /// Host answers through [`SwitcherView::set_linear_issue`].
     NeedsLinearIssue(String),
+    /// The query became an absolute path; the host answers with
+    /// [`SwitcherView::set_path_hits`].
+    NeedsPathHits(String),
     /// Create a Linear issue titled `title` in the host's team choice
     /// `team` (0 = default, MRU first). The panel stays open; the host
     /// opens the issue and closes it, or calls
@@ -214,10 +217,16 @@ pub struct SwitcherView {
     linear_team_count: usize,
     /// Identifier of the last `NeedsLinearIssue`, so each is asked once.
     linear_lookup_requested: Option<String>,
-    /// Window-local Y of the create row's centre, probed while painting.
-    linear_row_center_y: Rc<Cell<Option<f32>>>,
+    /// Path of the last `NeedsPathHits`, so each is asked once.
+    path_lookup_requested: Option<String>,
+    /// Tab cycle over a typed path's completions: kept while the query is
+    /// still the candidate Tab last wrote.
+    path_cycle: Option<(Vec<String>, usize)>,
+    /// Window-local Y of the popover's row (Linear create row, or a path
+    /// row in the list), probed while painting.
+    row_center_y: Rc<Cell<Option<f32>>>,
     /// Anchor last handed to the host; a paint that moves it re-syncs.
-    linear_anchor_sent: Option<f32>,
+    row_anchor_sent: Option<f32>,
 }
 
 /// Cooldown between scan-failure retries. Long enough that a slow Chrome
@@ -265,23 +274,26 @@ impl SwitcherView {
             confirmed: false,
             linear_team_count: 0,
             linear_lookup_requested: None,
-            linear_row_center_y: Rc::new(Cell::new(None)),
-            linear_anchor_sent: None,
+            path_lookup_requested: None,
+            path_cycle: None,
+            row_center_y: Rc::new(Cell::new(None)),
+            row_anchor_sent: None,
         }
     }
 
     /// Linear integration. `default_team` labels the create row (`None`
-    /// when no account is connected), `team_keys` gates issue lookups,
-    /// `team_count` sizes the team popover.
+    /// when no account is connected), `teams` (`Item::LinearTeam`) gate
+    /// issue lookups and open on an exact key/name, `team_count` sizes the
+    /// team popover.
     pub fn set_linear(
         &mut self,
         default_team: Option<String>,
-        team_keys: Vec<String>,
+        teams: Vec<Item>,
         team_count: usize,
         cx: &mut Context<Self>,
     ) {
         self.linear_team_count = team_count;
-        self.state.set_linear(default_team.map(Arc::from), team_keys);
+        self.state.set_linear(default_team.map(Arc::from), teams);
         cx.notify();
     }
 
@@ -311,10 +323,79 @@ impl SwitcherView {
             && matches!(self.state.selected(), Some(Item::CreateLinearIssue { .. }))
     }
 
+    /// Existing files/folders for the typed path `target`.
+    pub fn set_path_hits(
+        &mut self,
+        target: String,
+        hits: Vec<Item>,
+        completions: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.set_path_hits(target, hits, completions);
+        self.scroll_selection_into_view();
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
+        self.emit_height_delta_if_changed(cx);
+        cx.notify();
+    }
+
+    /// Shell-style Tab on a typed path: complete to the first candidate,
+    /// then cycle (`forward` = Tab, else Shift-Tab). False when the query is
+    /// not a path, so Tab keeps switching panes.
+    fn complete_path(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.state.path_target().is_none() || !self.is_input_focused(window, cx) {
+            return false;
+        }
+        let value = self.input.read(cx).value().to_string();
+        let (candidates, index) = match self.path_cycle.take() {
+            Some((candidates, index)) if candidates.get(index) == Some(&value) => {
+                let n = candidates.len();
+                (candidates, if forward { (index + 1) % n } else { (index + n - 1) % n })
+            }
+            _ => {
+                let Some(candidates) = self.state.path_completions().filter(|c| !c.is_empty()) else {
+                    return true;
+                };
+                let index = if forward { 0 } else { candidates.len() - 1 };
+                (candidates.to_vec(), index)
+            }
+        };
+        let next = candidates[index].clone();
+        // A single candidate completes once; typing the separator then
+        // steps into it.
+        if candidates.len() > 1 {
+            self.path_cycle = Some((candidates, index));
+        }
+        self.input.update(cx, |s, cx| s.set_value(next, window, cx));
+        self.sync_query(cx);
+        true
+    }
+
+    /// Grey completion shown after the typed path, caret at the end.
+    fn path_ghost(&self, window: &Window, cx: &App) -> Option<(String, SharedString)> {
+        let ghost = self.state.path_ghost()?;
+        let input = self.input.read(cx);
+        let value = input.value();
+        let cycling = matches!(&self.path_cycle, Some((c, i)) if c.get(*i).map(String::as_str) == Some(value.as_ref()));
+        if cycling || input.cursor() < value.len() || !input.focus_handle(cx).is_focused(window) {
+            return None;
+        }
+        Some((value.to_string(), SharedString::from(ghost.to_string())))
+    }
+
+    /// Selected file/folder row, from the dirs pane or from a typed path.
+    pub fn selected_fs_item(&self) -> Option<&Item> {
+        self.state.selected().filter(|it| matches!(it, Item::Dir(_)))
+    }
+
+    /// True when a typed path's file/folder row is selected in the list.
+    fn list_dir_selected(&self) -> bool {
+        self.state.active_section() == Section::Windows && self.selected_fs_item().is_some()
+    }
+
     /// Window-local Y of the row the popover points at.
     pub fn open_with_anchor_y(&self) -> Option<f32> {
-        if self.linear_create_selected() {
-            return self.linear_row_center_y.get();
+        if self.linear_create_selected() || self.list_dir_selected() {
+            return self.row_center_y.get();
         }
         self.dirs_panel_top_y
             .get()
@@ -339,7 +420,7 @@ impl SwitcherView {
 
     /// Rows moved under the team popover: let the host re-anchor or hide it.
     fn emit_linear_popover_sync(&mut self, cx: &mut Context<Self>) {
-        if self.linear_team_count > 1 {
+        if self.linear_team_count > 1 || self.state.path_target().is_some() {
             cx.emit(SwitcherViewEvent::OpenWithStateChanged);
         }
     }
@@ -479,12 +560,7 @@ impl SwitcherView {
         if self.linear_create_selected() {
             return self.linear_team_count.saturating_sub(1);
         }
-        let is_file = self
-            .state
-            .dirs()
-            .get(self.state.selected_dir_idx())
-            .map(|it| matches!(it, Item::Dir(d) if !d.is_dir))
-            .unwrap_or(false);
+        let is_file = matches!(self.selected_fs_item(), Some(Item::Dir(d)) if !d.is_dir);
         if is_file {
             self.open_with_file_count
         } else {
@@ -527,6 +603,7 @@ impl SwitcherView {
         self.nag_phase == NagPhase::Hidden
             && !self.input_only
             && (self.linear_create_selected()
+                || self.list_dir_selected()
                 || (self.state.active_section() == Section::Dirs && self.state.dirs_visible()))
             && self.current_open_with_count() > 0
     }
@@ -659,6 +736,8 @@ impl SwitcherView {
         self.local_focus_failed = false;
         self.confirmed = false;
         self.linear_lookup_requested = None;
+        self.path_lookup_requested = None;
+        self.path_cycle = None;
         if self.dirs_enabled {
             cx.emit(SwitcherViewEvent::QueryChanged(String::new()));
         }
@@ -1221,8 +1300,8 @@ impl SwitcherView {
         }
     }
 
-    fn on_focus_next_pane(&mut self, _: &FocusNextPane, _: &mut Window, cx: &mut Context<Self>) {
-        if self.nag_phase != NagPhase::Hidden {
+    fn on_focus_next_pane(&mut self, _: &FocusNextPane, window: &mut Window, cx: &mut Context<Self>) {
+        if self.nag_phase != NagPhase::Hidden || self.complete_path(true, window, cx) {
             return;
         }
         if self.state.active_section() == Section::Dirs {
@@ -1236,8 +1315,8 @@ impl SwitcherView {
         cx.notify();
     }
 
-    fn on_focus_prev_pane(&mut self, _: &FocusPrevPane, _: &mut Window, cx: &mut Context<Self>) {
-        if self.nag_phase != NagPhase::Hidden {
+    fn on_focus_prev_pane(&mut self, _: &FocusPrevPane, window: &mut Window, cx: &mut Context<Self>) {
+        if self.nag_phase != NagPhase::Hidden || self.complete_path(false, window, cx) {
             return;
         }
         if self.state.active_section() == Section::Dirs {
@@ -1304,8 +1383,14 @@ impl SwitcherView {
         // In the Dirs pane (input not focused), Right enters the "Open
         // With" popover when one is available.
         let owc = self.current_open_with_count();
-        let linear_row = self.linear_create_selected() && !self.is_input_focused(window, cx);
-        if (self.state.active_section() == Section::Dirs || linear_row)
+        let input_focused = self.is_input_focused(window, cx);
+        let caret_at_end = !input_focused || {
+            let input = self.input.read(cx);
+            input.cursor() >= input.value().len()
+        };
+        let list_row = (self.linear_create_selected() && !input_focused)
+            || (self.list_dir_selected() && caret_at_end);
+        if (self.state.active_section() == Section::Dirs || list_row)
             && owc > 0
             && self.state.open_with_index().is_none()
         {
@@ -1432,6 +1517,13 @@ impl SwitcherView {
                 cx.emit(SwitcherViewEvent::NeedsLinearIssue(identifier));
             }
         }
+        let path_target = self.state.path_target().map(str::to_string);
+        if path_target != self.path_lookup_requested {
+            self.path_lookup_requested = path_target.clone();
+            if let Some(target) = path_target {
+                cx.emit(SwitcherViewEvent::NeedsPathHits(target));
+            }
+        }
         self.emit_linear_popover_sync(cx);
         self.emit_height_delta_if_changed(cx);
         cx.notify();
@@ -1450,21 +1542,22 @@ impl Render for SwitcherView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let filtered_count = self.state.filtered().len();
-        self.linear_row_center_y.set(None);
+        self.row_center_y.set(None);
         // Selection/scroll events reach the host before this paint fills the
         // probe: hand it the fresh anchor once the frame is out.
-        if self.linear_team_count > 1 && self.linear_create_selected() {
+        if (self.linear_team_count > 1 && self.linear_create_selected()) || self.list_dir_selected() {
             cx.on_next_frame(window, |this, _window, cx| {
-                let y = this.linear_row_center_y.get();
-                if y.is_some() && y != this.linear_anchor_sent {
-                    this.linear_anchor_sent = y;
+                let y = this.row_center_y.get();
+                if y.is_some() && y != this.row_anchor_sent {
+                    this.row_anchor_sent = y;
                     cx.emit(SwitcherViewEvent::OpenWithStateChanged);
                 }
             });
         } else {
-            self.linear_anchor_sent = None;
+            self.row_anchor_sent = None;
         }
         let query_empty = self.input.read(cx).value().is_empty();
+        let path_ghost = self.path_ghost(window, cx);
         let nag_phase = self.nag_phase;
         // When a math/JS evaluation result is displayed and no items matched,
         // suppress the "no results" panel entirely — the eval value alone is
@@ -1518,10 +1611,15 @@ impl Render for SwitcherView {
                                 &theme,
                                 &openclaw_row,
                             );
-                            if matches!(mr.item, Item::CreateLinearIssue { .. }) {
+                            let anchors_popover = match mr.item {
+                                Item::CreateLinearIssue { .. } => true,
+                                Item::Dir(_) => window_active && i == selected,
+                                _ => false,
+                            };
+                            if anchors_popover {
                                 row = row
                                     .relative()
-                                    .child(row_center_probe(this.linear_row_center_y.clone()));
+                                    .child(row_center_probe(this.row_center_y.clone()));
                             }
                             (i, is_window, row)
                         })
@@ -1638,7 +1736,27 @@ impl Render for SwitcherView {
                     .child(
                         div()
                             .flex_1()
-                            .child(Input::new(&self.input).appearance(false).bordered(false)),
+                            .relative()
+                            .child(Input::new(&self.input).appearance(false).bordered(false))
+                            .children(path_ghost.map(|(typed, ghost)| {
+                                // Laid out like the Input's own text (medium
+                                // size: 12 px inset, text_sm), the typed part
+                                // invisible so the grey rest starts at the caret.
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .left(px(12.0))
+                                    .right_0()
+                                    .flex()
+                                    .items_center()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_sm()
+                                    .line_height(gpui::rems(1.25))
+                                    .child(div().text_color(gpui::transparent_black()).child(typed))
+                                    .child(div().text_color(theme.muted).child(ghost))
+                            })),
                     )
                     .children(render_instruction_status(
                         &self.instruction_phase,
@@ -1740,7 +1858,7 @@ impl Render for SwitcherView {
 }
 
 /// Zero-area canvas recording its row's vertical centre (window-local) on
-/// every paint; anchors the team popover with scrolling accounted for.
+/// every paint; anchors the Open With / team popover with scrolling accounted for.
 fn row_center_probe(cell: Rc<Cell<Option<f32>>>) -> impl IntoElement {
     canvas(
         move |bounds, _w, _cx| {

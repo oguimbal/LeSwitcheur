@@ -253,6 +253,7 @@ openclaw:
 
 linear:
   create_issue: "Créer un ticket Linear dans %{team}"
+  open_team: "Ouvrir les tickets de %{team}"
   create_failed: "Ticket non créé : %{reason}"
   connect_failed: "Connexion impossible : %{reason}"
   error_unauthorized: "accès invalide ou révoqué, reconnectez le workspace"

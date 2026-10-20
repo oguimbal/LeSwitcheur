@@ -192,6 +192,7 @@ local_sources:
 
 linear:
   create_issue: "在 %{team} 中创建 Linear 议题"
+  open_team: "打开 %{team} 的议题"
   create_failed: "议题未创建：%{reason}"
   connect_failed: "无法连接：%{reason}"
   error_unauthorized: "API 密钥无效或已撤销"

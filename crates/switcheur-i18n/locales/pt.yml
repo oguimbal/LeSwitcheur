@@ -192,6 +192,7 @@ local_sources:
 
 linear:
   create_issue: "Criar uma issue do Linear em %{team}"
+  open_team: "Abrir as issues de %{team}"
   create_failed: "Issue não criada: %{reason}"
   connect_failed: "Não foi possível conectar: %{reason}"
   error_unauthorized: "chave de API inválida ou revogada"

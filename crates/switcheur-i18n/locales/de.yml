@@ -192,6 +192,7 @@ local_sources:
 
 linear:
   create_issue: "Linear-Issue in %{team} erstellen"
+  open_team: "Issues von %{team} öffnen"
   create_failed: "Issue nicht erstellt: %{reason}"
   connect_failed: "Verbindung fehlgeschlagen: %{reason}"
   error_unauthorized: "ungültiger oder widerrufener API-Schlüssel"

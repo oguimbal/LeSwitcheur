@@ -12,6 +12,7 @@ pub mod matcher;
 pub mod js;
 pub mod math;
 pub mod model;
+pub mod path;
 pub mod sort;
 pub mod state;
 pub mod url;
@@ -23,7 +24,7 @@ pub use config::{
 pub use exclusions::{ExclusionFilter, ExclusionRule};
 pub use matcher::{FuzzyMatcher, MatchResult};
 pub use model::{
-    AppRef, AudioRowRef, Browser, BrowserTabRef, DirRef, DirSource, Item, LinearIssueRef,
+    AppRef, AudioRowRef, Browser, BrowserTabRef, DirRef, DirSource, Item, LinearIssueRef, LinearTeamRef,
     LlmProvider, LocalSourceRef, PlaybackState, ProgramRef, WindowRef,
 };
 pub use sort::{sort_items, RecencyTracker, SortOrder};
