@@ -178,21 +178,7 @@ pub fn request(path: &Path, envelope: &Envelope, timeout: Duration) -> io::Resul
     let mut stream = connect(path, deadline)?;
     write_frame(&mut stream, envelope, deadline)?;
     let response = read_frame(&mut stream, deadline)?;
-    response.check(&envelope.source)?;
-    if response.method == "error" {
-        return Err(invalid(format!(
-            "local source: {}",
-            response
-                .payload
-                .get("code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown_error")
-        )));
-    }
-    if response.method != envelope.method {
-        return Err(invalid("unexpected response method"));
-    }
-    Ok(response)
+    crate::check_response(envelope, response)
 }
 
 struct Binding {

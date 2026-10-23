@@ -183,7 +183,8 @@ pub struct SwitcherView {
     /// current switcher session? One-shot per open, mirroring the
     /// `browser_tabs_requested` latch. Reset in `set_items`.
     currently_playing_requested: bool,
-    local_focus_failed: bool,
+    /// i18n key of the line shown when handing a pick to another app failed.
+    action_error: Option<&'static str>,
     /// Number of *selectable* rows in the "Open With" popover for folder
     /// rows — alternative folder openers, default excluded. Host sets this
     /// whenever its detected-apps list changes. When zero (and the current
@@ -263,7 +264,7 @@ impl SwitcherView {
             browser_tabs_requested: false,
             browser_tabs_retry_after: None,
             currently_playing_requested: false,
-            local_focus_failed: false,
+            action_error: None,
             open_with_folder_count: 0,
             open_with_file_count: 0,
             dirs_panel_top_y: Rc::new(Cell::new(None)),
@@ -560,6 +561,11 @@ impl SwitcherView {
         if self.linear_create_selected() {
             return self.linear_team_count.saturating_sub(1);
         }
+        // A Lena folder not on disk has no path for folder openers; a Lena
+        // file keeps "Show in …", which Lena itself performs.
+        if matches!(self.selected_fs_item(), Some(Item::Dir(d)) if d.is_dir && d.local_path().is_none()) {
+            return 0;
+        }
         let is_file = matches!(self.selected_fs_item(), Some(Item::Dir(d)) if !d.is_dir);
         if is_file {
             self.open_with_file_count
@@ -733,7 +739,7 @@ impl SwitcherView {
         // so any emit from here is swallowed.
         self.state.clear_suggestions();
         self.currently_playing_requested = false;
-        self.local_focus_failed = false;
+        self.action_error = None;
         self.confirmed = false;
         self.linear_lookup_requested = None;
         self.path_lookup_requested = None;
@@ -818,6 +824,28 @@ impl SwitcherView {
         cx.notify();
     }
 
+    pub fn set_lena_icon(&mut self, id: &str, icon: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.state.set_lena_icon(id, icon);
+        cx.notify();
+    }
+
+    pub fn lena_dirs(&self) -> Vec<Item> {
+        self.state.lena_dirs()
+    }
+
+    /// Replace the Lena rows below the local dirs once Lena answers.
+    pub fn set_lena_dirs(&mut self, rows: Vec<Item>, cx: &mut Context<Self>) {
+        self.state.set_lena_dirs(rows);
+        cx.emit(SwitcherViewEvent::OpenWithStateChanged);
+        cx.notify();
+    }
+
+    /// Show the "Ask Lena AI" row (a signed-in Lena answered).
+    pub fn set_lena_ask(&mut self, available: bool, cx: &mut Context<Self>) {
+        self.state.set_lena_ask(available);
+        cx.notify();
+    }
+
     /// Deliver the off-thread browser-tab scan back into the state. Rerank
     /// fires automatically so the tabs immediately populate the fallback
     /// tier (or step aside for the LLM row if none match).
@@ -836,7 +864,22 @@ impl SwitcherView {
     }
 
     pub fn local_source_focus_failed(&mut self, cx: &mut Context<Self>) {
-        self.local_focus_failed = true;
+        self.handoff_failed("local_sources.focus_failed", cx);
+    }
+
+    /// Lena did not take the pick: `stale` = its result list changed since
+    /// the search (restart or forgotten id).
+    pub fn lena_failed(&mut self, stale: bool, cx: &mut Context<Self>) {
+        self.handoff_failed(if stale { "lena.stale" } else { "lena.failed" }, cx);
+        if stale {
+            // Fresh ids for the next pick.
+            let query = self.state.query().to_string();
+            cx.emit(SwitcherViewEvent::QueryChanged(query));
+        }
+    }
+
+    fn handoff_failed(&mut self, key: &'static str, cx: &mut Context<Self>) {
+        self.action_error = Some(key);
         // The panel stays open: let the user pick again.
         self.confirmed = false;
         cx.notify();
@@ -1703,14 +1746,14 @@ impl Render for SwitcherView {
                     )
                 },
             )
-            .when(self.local_focus_failed, |root| {
+            .when_some(self.action_error, |root, key| {
                 root.child(
                     div()
                         .px_3()
                         .py_1()
                         .text_size(px(11.0))
                         .text_color(theme.muted)
-                        .child(tr("local_sources.focus_failed")),
+                        .child(tr(key)),
                 )
             })
             .children(if nag_phase == NagPhase::Hidden && !self.input_only {
@@ -2173,7 +2216,8 @@ fn render_dirs_panel(
                 theme,
                 &OpenClawRow::default(),
             );
-            if removable {
+            let from_lena = matches!(item, Item::Dir(d) if d.source == switcheur_core::DirSource::Lena);
+            if removable && !from_lena {
                 row = row.child(render_dir_remove_button(i, theme, cx));
             }
             row.id(("switcher-dir-row", i))

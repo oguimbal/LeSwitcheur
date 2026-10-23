@@ -72,6 +72,38 @@ pub fn icon_for_path(path: &Path, is_dir: bool) -> Option<PathBuf> {
     }
 }
 
+/// Type icon for a file name without touching the disk (the file may not
+/// exist locally, e.g. a Lena hit). Shares the per-extension cache with
+/// [`icon_for_path`]: both resolve the LaunchServices type icon.
+pub fn icon_for_file_name(name: &Path) -> Option<PathBuf> {
+    let ext = name
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let key = if ext.is_empty() {
+        "ext__none".to_string()
+    } else {
+        format!("ext_{ext}")
+    };
+    let out = cache_dir()?.join(format!("{}.png", sanitize(&key)));
+    if out.exists() {
+        return Some(out);
+    }
+    #[allow(deprecated)]
+    let image = NSWorkspace::sharedWorkspace().iconForFileType(&NSString::from_str(&ext));
+    let written = image_png_bytes(&image).and_then(|png| {
+        fs::write(&out, png).with_context(|| format!("write {}", out.display()))
+    });
+    match written {
+        Ok(()) => Some(out),
+        Err(e) => {
+            tracing::debug!("type icon extract failed: {e:#}");
+            None
+        }
+    }
+}
+
 /// Path to the cached PNG of the system's generic folder icon, used by every
 /// row in the right-side dirs panel. We extract from `NSImageNameFolder`
 /// rather than `iconForFile` on a sample directory — `/Applications` and
@@ -132,7 +164,10 @@ fn extract_png_bytes(bundle_path: &str) -> Result<Vec<u8>> {
     let ns_path = NSString::from_str(bundle_path);
     let workspace = NSWorkspace::sharedWorkspace();
     let image: Retained<NSImage> = workspace.iconForFile(&ns_path);
+    image_png_bytes(&image)
+}
 
+fn image_png_bytes(image: &NSImage) -> Result<Vec<u8>> {
     let tiff = image
         .TIFFRepresentation()
         .ok_or_else(|| anyhow!("no TIFF representation"))?;

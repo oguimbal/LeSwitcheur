@@ -1,6 +1,6 @@
 //! Domain types describing what the switcher can switch to.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,18 @@ pub enum DirSource {
     WindowsFiles,
     /// Absolute path typed in the query.
     Path,
+    /// Lena search hit; opened through Lena (see [`DirRef::lena`]).
+    Lena,
+}
+
+/// Opaque handle of a Lena hit, echoed back to the Lena instance that
+/// returned it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LenaTarget {
+    pub instance: String,
+    pub id: String,
+    /// Local copy Lena reported, if it is on disk without downloading.
+    pub local: Option<PathBuf>,
 }
 
 /// Which browser a [`BrowserTabRef`] was scraped from. The enum shape lets
@@ -236,6 +248,10 @@ pub struct DirRef {
     /// Cached PNG of the macOS folder icon, populated by the host. `None`
     /// falls back to the `📁` placeholder so non-macOS targets keep building.
     pub icon_path: Option<PathBuf>,
+    /// Set for [`DirSource::Lena`] rows. `path` is then the local copy when
+    /// Lena reported one, else a display-only `folder/name`; check
+    /// [`DirRef::local_path`] before touching the file system.
+    pub lena: Option<LenaTarget>,
     basename: String,
     parent: String,
 }
@@ -264,8 +280,40 @@ impl DirRef {
             source,
             is_dir,
             icon_path,
+            lena: None,
             basename,
             parent,
+        }
+    }
+
+    /// Lena hit: `name` + Lena's display `folder` (`L:\\Projets`, `Lena/Projets`).
+    pub fn lena(
+        target: LenaTarget,
+        name: String,
+        folder: String,
+        is_dir: bool,
+        icon_path: Option<PathBuf>,
+    ) -> Self {
+        let path = target
+            .local
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(&folder).join(&name));
+        Self {
+            path,
+            source: DirSource::Lena,
+            is_dir,
+            icon_path,
+            lena: Some(target),
+            basename: name,
+            parent: folder,
+        }
+    }
+
+    /// Real file-system path, `None` for a Lena hit not on disk.
+    pub fn local_path(&self) -> Option<&Path> {
+        match &self.lena {
+            Some(target) if target.local.is_none() => None,
+            _ => Some(&self.path),
         }
     }
 
@@ -312,6 +360,9 @@ pub enum LlmProvider {
     /// Self-hosted OpenClaw gateway. Unlike the others it doesn't open a
     /// chat: the query is sent as an instruction to a configured session.
     OpenClaw,
+    /// Lena desktop assistant, reached over local IPC. Listed only while a
+    /// signed-in Lena is running.
+    Lena,
 }
 
 impl LlmProvider {
@@ -325,6 +376,7 @@ impl LlmProvider {
             LlmProvider::ChatGpt,
             LlmProvider::Perplexity,
             LlmProvider::OpenClaw,
+            LlmProvider::Lena,
         ]
     }
 
@@ -336,6 +388,7 @@ impl LlmProvider {
             LlmProvider::ChatGpt => "ChatGPT",
             LlmProvider::Perplexity => "Perplexity",
             LlmProvider::OpenClaw => "OpenClaw",
+            LlmProvider::Lena => "Lena",
         }
     }
 
@@ -347,6 +400,7 @@ impl LlmProvider {
             LlmProvider::ChatGpt => "llm.ask_chatgpt",
             LlmProvider::Perplexity => "llm.ask_perplexity",
             LlmProvider::OpenClaw => "llm.send_instruction",
+            LlmProvider::Lena => "llm.ask_lena",
         }
     }
 
@@ -358,6 +412,7 @@ impl LlmProvider {
             LlmProvider::ChatGpt => 'G',
             LlmProvider::Perplexity => 'P',
             LlmProvider::OpenClaw => 'O',
+            LlmProvider::Lena => 'L',
         }
     }
 }

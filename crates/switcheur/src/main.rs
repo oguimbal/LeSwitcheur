@@ -50,6 +50,7 @@ use switcheur_ui::{
 };
 use tracing_subscriber::EnvFilter;
 
+mod lena;
 mod linear;
 mod openclaw;
 mod tray;
@@ -475,6 +476,7 @@ fn main() -> Result<()> {
             open_with_entries: Rc::new(RefCell::new(Vec::new())),
             open_with_file_entries: Rc::new(RefCell::new(Vec::new())),
             dir_query_gen: Rc::new(Cell::new(0)),
+            lena: Rc::new(RefCell::new(None)),
             hotkey_record_session: Rc::new(RefCell::new(None)),
             tray: Rc::new(RefCell::new(None)),
         };
@@ -640,6 +642,8 @@ struct AppState {
     /// dir-source queries whose results arrive after a newer keystroke can
     /// drop their output (and avoid clearing the spinner prematurely).
     dir_query_gen: Rc<Cell<u64>>,
+    /// Signed-in Lena from the last panel's probe (`None` = absent / signed out).
+    lena: Rc<RefCell<Option<switcheur_platform::lena::Info>>>,
     /// HID-tap session driving the "record a system-reserved hotkey" flow
     /// in Settings/Onboarding. Started when the user clicks Record while
     /// Input Monitoring is granted; dropped on Cancel/capture so the run
@@ -1356,7 +1360,8 @@ fn open_switcher_with_items(
     // a backend and its tool is actually available. The view emits
     // QueryChanged events only when on, so the host's source.query() call
     // below stays cheap when off.
-    let dirs_enabled = state.dir_source.borrow().is_some();
+    let has_local_dirs = state.dir_source.borrow().is_some();
+    let lena_info = lena::ready(state);
     let dirs_removable = state
         .dir_source
         .borrow()
@@ -1386,7 +1391,7 @@ fn open_switcher_with_items(
         let entity = cx.new(|cx| {
             let mut view = SwitcherView::new(input_state.clone(), cx);
             view.set_theme(theme, cx);
-            view.set_dirs_enabled(dirs_enabled, cx);
+            lena::apply(&mut view, lena_info.as_ref(), has_local_dirs, cx);
             view.set_dirs_removable(dirs_removable, cx);
             view.set_browser_tabs_integration(browser_tabs_enabled, cx);
             view.set_items(items_for_builder, cx);
@@ -1477,6 +1482,8 @@ fn open_switcher_with_items(
         entity.update(cx, |view, cx| view.request_currently_playing(cx));
     });
 
+    let _ = cx.update(|cx| lena::probe(state, &entity, cx));
+
     for definition in switcheur_platform::local_sources::SOURCES {
         let source = definition.id;
         let weak = entity.downgrade();
@@ -1537,10 +1544,11 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             | SwitcherViewEvent::CreateLinearIssue { .. }
             | SwitcherViewEvent::Confirmed(Item::LinearIssue(_))
             | SwitcherViewEvent::Confirmed(Item::AskLlm {
-                provider: switcheur_core::LlmProvider::OpenClaw,
+                provider: switcheur_core::LlmProvider::OpenClaw | switcheur_core::LlmProvider::Lena,
                 ..
             })
-    ) {
+    ) && !matches!(ev, SwitcherViewEvent::Confirmed(Item::Dir(d)) if d.lena.is_some())
+    {
         tracing::info!(?ev, "switcher view event");
     }
 
@@ -1558,6 +1566,18 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             // The panel stays open (spinner) until Linear answers.
             close_open_with_popover(state, cx);
             linear::create(title.clone(), *team, state, cx);
+            return;
+        }
+        SwitcherViewEvent::Confirmed(Item::Dir(d)) if d.lena.is_some() => {
+            let target = d.lena.clone().expect("guarded");
+            lena::confirm(lena::Pick::Open { target, reveal: false }, state, cx);
+            return;
+        }
+        SwitcherViewEvent::Confirmed(Item::AskLlm {
+            provider: switcheur_core::LlmProvider::Lena,
+            query,
+        }) => {
+            lena::confirm(lena::Pick::Ask(query.to_string()), state, cx);
             return;
         }
         SwitcherViewEvent::Confirmed(Item::LocalSource(target)) => {
@@ -1648,7 +1668,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             return;
         }
         SwitcherViewEvent::RemoveDirRequested(d) => {
-            let Some(source) = state.dir_source.borrow().clone() else {
+            let Some(source) = state.dir_source.borrow().clone().filter(|_| d.lena.is_none()) else {
                 return;
             };
             if !source.supports_remove() {
@@ -1832,9 +1852,12 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             // is implicit via a per-view generation counter inside the view
             // itself — here we just deliver the freshest result we can
             // compute.
-            let Some(source) = state.dir_source.borrow().clone() else {
+            let source = state.dir_source.borrow().clone();
+            let lena_search = lena::ready(state).is_some_and(|i| i.can("search"));
+            let lena_thumbnails = lena::ready(state).is_some_and(|i| i.can("thumbnail"));
+            if source.is_none() && !lena_search {
                 return;
-            };
+            }
             let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
             let Some(entity) = entity_opt else {
                 return;
@@ -1868,6 +1891,7 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
             // even while the debounce is holding. Turned back off when
             // the hits land (or the update window has gone stale).
             let _ = cx.update_entity(&entity, |view, cx| view.set_dirs_loading(true, cx));
+            let state_for_task = state.clone();
             cx.spawn(async move |cx: &mut AsyncApp| {
                 // 150 ms debounce so a fast typist doesn't fire a
                 // subprocess per keystroke. Zoxide queries are ~5 ms on a
@@ -1878,46 +1902,103 @@ fn handle_view_event(ev: &SwitcherViewEvent, state: &AppState, cx: &mut App) {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(150))
                     .await;
-                let source_for_task = source.clone();
-                let query_for_task = query.clone();
-                let hits = cx
-                    .background_executor()
-                    .spawn(async move { source_for_task.query(&query_for_task, 8) })
-                    .await;
-                let label = match source.id() {
-                    DirSourceId::Spotlight => switcheur_core::DirSource::Spotlight,
-                    DirSourceId::WindowsFolders => switcheur_core::DirSource::WindowsFolders,
-                    DirSourceId::WindowsFiles => switcheur_core::DirSource::WindowsFiles,
-                    _ => switcheur_core::DirSource::Zoxide,
-                };
-                // Resolve icons on the worker so the synchronous AppKit
-                // calls don't run on the GPUI main thread. Folders share
-                // one generic manila icon (OnceLock-cached); files get
-                // per-extension LaunchServices icons (per-extension cache
-                // on disk — the first .pdf hit writes a PNG, every later
-                // .pdf reuses it).
-                let items: Vec<Item> = hits
-                    .into_iter()
-                    .map(|h| {
-                        let icon = switcheur_platform::icon_for_path(&h.path, h.is_dir);
-                        Item::Dir(Arc::new(switcheur_core::DirRef::with_kind(
-                            h.path, label, h.is_dir, icon,
-                        )))
-                    })
-                    .collect();
-                // Drop stale results: a later keystroke bumped `gen_cell`
-                // while we were waiting. Leaving the spinner on also lets
-                // the freshest task's `set_dirs_loading(false)` turn it
-                // off atomically with its results.
                 if gen_cell.get() != my_gen {
                     return;
                 }
-                let _ = weak.update(cx, |view, cx| {
-                    if view.dirs_enabled() {
-                        view.set_dirs(items, cx);
-                    }
-                    view.set_dirs_loading(false, cx);
+                // Lena answers in 1-2.5 s: start it now, show it below the
+                // local hits whenever it lands.
+                let lena_task = lena_search.then(|| {
+                    let query = query.clone();
+                    cx.background_executor()
+                        .spawn(async move { lena::search(&query, lena_thumbnails) })
                 });
+                if let Some(source) = source {
+                    let query_for_task = query.clone();
+                    let source_for_task = source.clone();
+                    let hits = cx
+                        .background_executor()
+                        .spawn(async move { source_for_task.query(&query_for_task, 8) })
+                        .await;
+                    let label = match source.id() {
+                        DirSourceId::Spotlight => switcheur_core::DirSource::Spotlight,
+                        DirSourceId::WindowsFolders => switcheur_core::DirSource::WindowsFolders,
+                        DirSourceId::WindowsFiles => switcheur_core::DirSource::WindowsFiles,
+                        _ => switcheur_core::DirSource::Zoxide,
+                    };
+                    // Resolve icons on the worker so the synchronous AppKit
+                    // calls don't run on the GPUI main thread. Folders share
+                    // one generic manila icon (OnceLock-cached); files get
+                    // per-extension LaunchServices icons (per-extension cache
+                    // on disk — the first .pdf hit writes a PNG, every later
+                    // .pdf reuses it).
+                    let items: Vec<Item> = hits
+                        .into_iter()
+                        .map(|h| {
+                            let icon = switcheur_platform::icon_for_path(&h.path, h.is_dir);
+                            Item::Dir(Arc::new(switcheur_core::DirRef::with_kind(
+                                h.path, label, h.is_dir, icon,
+                            )))
+                        })
+                        .collect();
+                    // Drop stale results: a later keystroke bumped `gen_cell`
+                    // while we were waiting. Leaving the spinner on also lets
+                    // the freshest task's `set_dirs_loading(false)` turn it
+                    // off atomically with its results.
+                    if gen_cell.get() != my_gen {
+                        return;
+                    }
+                    let lena_pending = lena_task.is_some();
+                    let _ = weak.update(cx, |view, cx| {
+                        if view.dirs_enabled() {
+                            // Previous Lena rows stay until the new answer lands.
+                            let mut items = items;
+                            if lena_pending {
+                                items.extend(view.lena_dirs());
+                            }
+                            view.set_dirs(items, cx);
+                        }
+                        if !lena_pending {
+                            view.set_dirs_loading(false, cx);
+                        }
+                    });
+                }
+                let Some(lena_task) = lena_task else {
+                    return;
+                };
+                let result = lena_task.await;
+                if gen_cell.get() != my_gen {
+                    return;
+                }
+                let Some(entity) = weak.upgrade() else {
+                    return;
+                };
+                let thumbnails = cx.update(|cx| {
+                    let hits = match result {
+                        Ok(hits) => hits,
+                        Err(error) => {
+                            lena::search_failed(&error, &state_for_task, &entity, cx);
+                            lena::Hits {
+                                items: Vec::new(),
+                                thumbnails: Vec::new(),
+                            }
+                        }
+                    };
+                    entity.update(cx, |view, cx| {
+                        if view.dirs_enabled() {
+                            view.set_lena_dirs(hits.items, cx);
+                        }
+                        view.set_dirs_loading(false, cx);
+                    });
+                    hits.thumbnails
+                });
+                let gen_for_thumbnails = gen_cell.clone();
+                lena::fetch_thumbnails(
+                    thumbnails,
+                    entity.downgrade(),
+                    move || gen_for_thumbnails.get() == my_gen,
+                    cx,
+                )
+                .await;
             })
             .detach();
             return;
@@ -2275,6 +2356,16 @@ fn activate_open_with(sel_idx: usize, state: &AppState, cx: &mut App) {
     let Some(switcher) = state.current.borrow().as_ref().cloned_entity() else {
         return;
     };
+    // A Lena hit not on disk: only "Show in …" exists, and Lena performs it.
+    let lena_target = cx.update_entity(&switcher, |v, _cx| match v.selected_fs_item() {
+        Some(Item::Dir(d)) if d.local_path().is_none() => d.lena.clone(),
+        _ => None,
+    });
+    if let Some(target) = lena_target {
+        close_open_with_popover(state, cx);
+        lena::confirm(lena::Pick::Open { target, reveal: true }, state, cx);
+        return;
+    }
     let selected: Option<(std::path::PathBuf, bool)> = cx.update_entity(&switcher, |v, _cx| {
         v.selected_fs_item().and_then(|it| match it {
             Item::Dir(d) => Some((d.path.clone(), d.is_dir)),
@@ -3067,13 +3158,14 @@ fn handle_settings_event(
             // for Disabled or for a source whose tool isn't installed —
             // same silent-degrade as boot-time.
             let built = build_dir_source(*id);
-            let enabled = built.is_some();
             let removable = built.as_ref().map(|s| s.supports_remove()).unwrap_or(false);
             *state.dir_source.borrow_mut() = built;
+            let has_local_dirs = state.dir_source.borrow().is_some();
+            let lena_info = lena::ready(state);
             let entity_opt = state.current.borrow().as_ref().map(|s| s.entity.clone());
             if let Some(entity) = entity_opt {
                 entity.update(cx, |view, cx| {
-                    view.set_dirs_enabled(enabled, cx);
+                    lena::apply(view, lena_info.as_ref(), has_local_dirs, cx);
                     view.set_dirs_removable(removable, cx);
                 });
             }

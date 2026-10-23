@@ -45,6 +45,7 @@ pub fn open_llm(provider: LlmProvider, prompt: &str) -> Result<()> {
         LlmProvider::OpenClaw => {
             Err(anyhow!("OpenClaw instructions go through crate::openclaw"))
         }
+        LlmProvider::Lena => Err(anyhow!("Lena questions go through crate::lena")),
     }
 }
 

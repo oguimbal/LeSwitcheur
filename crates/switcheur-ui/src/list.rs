@@ -7,7 +7,7 @@ use gpui::{
     div, hsla, img, px, rgb, svg, AnyElement, Div, IntoElement, ParentElement, SharedString,
     Styled,
 };
-use switcheur_core::{Item, LlmProvider, MatchResult, PlaybackState};
+use switcheur_core::{DirSource, Item, LlmProvider, MatchResult, PlaybackState};
 use switcheur_i18n::{tr, tr_sub};
 
 use crate::theme::Theme;
@@ -92,6 +92,11 @@ pub fn render_row(
             .text_size(px(20.0))
             .child(openclaw.emoji.clone().unwrap())
             .into_any_element(),
+        Item::AskLlm {
+            provider: LlmProvider::Lena,
+            ..
+        } => lena_icon(ICON_SIZE),
+        Item::Dir(d) if d.source == DirSource::Lena && d.icon_path.is_none() => lena_icon(ICON_SIZE),
         Item::AskLlm { provider, .. } => llm_icon(*provider),
         Item::LinearIssue(_) | Item::LinearTeam(_) | Item::CreateLinearIssue { .. } => {
             linear_icon()
@@ -164,6 +169,21 @@ pub fn render_row(
                     .text_size(px(9.0))
                     .text_color(theme.foreground)
                     .child(glyph),
+            )
+            .into_any_element()
+    } else if matches!(item, Item::Dir(d) if d.source == DirSource::Lena && d.icon_path.is_some()) {
+        // Lena folder: system folder icon, Lena mark in the corner.
+        div()
+            .relative()
+            .w(px(ICON_SIZE))
+            .h(px(ICON_SIZE))
+            .child(base_icon)
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(-3.0))
+                    .right(px(-3.0))
+                    .child(lena_icon(OVERLAY_SIZE)),
             )
             .into_any_element()
     } else if matches!(item, Item::BrowserTab(_)) {
@@ -286,12 +306,20 @@ fn llm_icon(provider: LlmProvider) -> AnyElement {
         LlmProvider::ChatGpt => ("llm_icons/chatgpt.svg", 0x10A37F),
         LlmProvider::Perplexity => ("llm_icons/perplexity.svg", 0x20808D),
         LlmProvider::OpenClaw => ("llm_icons/openclaw.svg", 0xE5484D),
+        LlmProvider::Lena => return lena_icon(ICON_SIZE),
     };
     svg()
         .path(asset)
         .w(px(ICON_SIZE))
         .h(px(ICON_SIZE))
         .text_color(rgb(color))
+        .into_any_element()
+}
+
+fn lena_icon(size: f32) -> AnyElement {
+    img("llm_icons/lena.png")
+        .w(px(size))
+        .h(px(size))
         .into_any_element()
 }
 

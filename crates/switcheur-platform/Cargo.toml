@@ -25,6 +25,9 @@ ed25519-dalek = { workspace = true }
 base64 = { workspace = true }
 ureq = { workspace = true }
 sha2 = "0.10"
+# PNG encode of HICON-derived BGRA buffers (Windows icons) and Lena thumbnail
+# decode / downscale.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 url = "2"
 getrandom = { version = "0.2", features = ["std"] }
 
@@ -50,8 +53,6 @@ windows = { workspace = true, features = [
 global-hotkey = { workspace = true }
 directories = { workspace = true }
 auto-launch = { workspace = true }
-# PNG encode of HICON-derived BGRA buffers — used by `icons::write_png`.
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = { workspace = true }

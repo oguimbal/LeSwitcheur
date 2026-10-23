@@ -179,7 +179,7 @@ If can't test a case: say so explicit, don't claim still work.
 38. **Create, one team** — any query: last row "Create a Linear issue in ENG"; Enter → spinner in input row, issue created, opened in browser, panel closes. Double Enter creates one issue.
 39. **Create, several teams** — select create row: team popover beside it (default greyed). Right enters, Up/Down, Enter/click creates in that team; next panel's default = last used team.
 40. **Create failure** — revoked key / offline: panel stays, query kept, red error line; Enter retries.
-41. **Zoxide focus** — query matching only dirs still moves focus to the dirs pane (create row doesn't count as a match).
+41. **Zoxide focus** — query matching only dirs still moves focus to the dirs pane (create row and Ask rows don't count as a match). Ask rows stay listed next to dir matches. Lena hits never move focus (they land seconds later).
 42. **Settings** — Connect a workspace → browser consent → back in settings, row "Workspace · email". Second click with `prompt=consent` → pick other workspace → two rows. Deny in browser → reason shown. Cancel / Esc stops the wait (port freed). API-key fallback still works. Remove drops the row.
 43. **Token refresh** — access token past 24 h: lookup/create still work, `linear-accounts.json` gets the rotated refresh token.
 44. **Team shortcut** — query exactly a team key or name (`per`, `Perso`, any case): top row "Open PER issues" → `https://linear.app/<urlKey>/team/PER/all`. Prefix (`pers`) → no row.
@@ -189,6 +189,14 @@ If can't test a case: say so explicit, don't claim still work.
 
 46. **Absolute path** — `/Users/me/repos`, `~/repos`, `C:\Users`, `C:/Users`, quoted or with `\ ` escapes: path row first, then entries of its folder starting with the last component (children after a trailing separator, dotfiles only for a `.` prefix), max 8. Enter → folder in default file manager / file in default app. Right (caret at end, or list focused) → Open With popover. Missing path → normal ranking. Dirs pane stays empty while the query is a path.
 47. **Path completion** — `~/repos-my/les`: grey rest of the first candidate after the caret (only when typed plainly, caret at end). Tab → first candidate, Tab again cycles, Shift-Tab backwards, any edit ends the cycle. No separator appended to folders: the user types `/` to step into the chosen one (then completion lists its children). Ghost aligned with the typed text (overlay mirrors the Input's 12 px inset + `text_sm`).
+
+### Lena
+
+48. **Lena absent / signed out** — no Lena rows, no "Ask Lena AI", no log spam, local dir source unchanged.
+49. **Lena hits** — `devis`: file rows show their type icon (Excel, PDF…) with a Lena badge, replaced by the Lena thumbnail when one exists; local dirs first, Lena rows appended 1-2.5 s later without moving the pane cursor; spinner until Lena answers. Enter → Lena opens the file (panel closes on ack). Folder → Lena opens it in Finder/Explorer, no Open With popover. File → Right → "Show in …" → Lena reveals it.
+50. **Stale pick** — restart Lena with the panel open, Enter on a Lena row: panel stays, "outdated" line, results re-fetched; next Enter works.
+51. **Ask Lena AI** — query with no match: row listed with the other AI rows (only when signed in); Enter → Lena search window in assistant mode, frontmost (macOS 14+ yield via `info.pid`; Windows `AllowSetForegroundWindow`).
+52. **Windows pipe** — same cases over `\\.\pipe\oliv-local-sources-<session>-lena`.
 
 ### Don't-do
 
@@ -239,6 +247,16 @@ If can't test a case: say so explicit, don't claim still work.
 - State: `SwitcherState::set_linear` (default team label + `LinearTeam` items, whose keys gate lookups). `linear_lookup_target` only for known keys → view emits `NeedsLinearIssue` once per identifier → host debounces (generation counter) → `set_linear_issue` (ignored if query moved on, cursor kept by identity). Found issue = row 0 and suppresses Ask-LLM rows. `CreateLinearIssue` row always last when connected (query non-empty, not URL/eval/identifier) so one Up from the input wraps onto it.
 - Team picker reuses the Open With popover window: `open_with_visible` / `current_open_with_count` / `open_with_anchor_y` branch on `linear_create_selected()`; anchor from a canvas probe on the create row. Host snapshots `TeamChoice`s at panel open (`AppState::linear_choices`), `CreateLinearIssue { team }` indexes it (0 = default/MRU).
 - Create: panel stays open with the instruction spinner (`InstructionPhase::Sending` doubles as the double-Enter latch); success → promote team, open issue URL, dismiss; failure → `linear_issue_failed`.
+
+## Lena provider
+
+- Lena's desktop UI process serves source `lena` on the local-source transport (Unix socket / Windows named pipe, see `crates/local-source-ipc/README.md`). Request-only (`info`, `search`, `open`, `show_search`, `ask`), so it is **not** in `local_sources::SOURCES` (no `list` polling). Contract: `lena-mono/docs/search.md`, section "Lena comme source de LeSwitcheur".
+- Client: `switcheur-platform/src/lena.rs` (bounds: ≤ 50 hits, unique ids, id/name/folder ≤ 1024 bytes, `path` absolute). Timeouts: info 750 ms, search 3 s (Lena answers in 0.9-2.5 s), open/ask 3 s. `cargo run -p switcheur-platform --example probe_lena -- search devis` talks to a running Lena.
+- Host: `crates/switcheur/src/lena.rs`. `info` probed in the background at each panel open; the panel is built from the previous answer (`AppState::lena`, signed-in only). Ask rows are no longer suppressed by dir matches. Signed in → dirs pane enabled even without a local dir source, `LlmProvider::Lena` row shown (`SwitcherState::set_lena_ask`, keeps the cursor). `signed_out` or a disconnect on search drops the cache.
+- `QueryChanged`: after the 150 ms debounce, Lena search starts in parallel with the local source; local rows land first (`set_dirs`, previous Lena rows kept below), Lena rows replaced when the answer arrives (`set_lena_dirs`, same generation check). Rows are `Item::Dir` with `DirSource::Lena` + `DirRef::lena` (opaque `LenaTarget`); `path` is display-only unless Lena gave a local copy, so use `DirRef::local_path()` before any file-system call. Icon = type icon from the name (`icon_for_name`, no disk access) or the folder icon, with a Lena badge. No zoxide ✕ on Lena rows.
+- Picks (Enter, Ask row, "Show in …") go through `lena::confirm`: `hand_over_focus(info.pid)` (macOS 14+ `yieldActivationToApplication:`, Windows `AllowSetForegroundWindow`), request off the UI thread, panel closed on ack. Error → panel stays with a line; `stale` (Lena restarted or forgot the id) also re-runs the search.
+- Thumbnails (capability `thumbnail`, hit flag `thumbnail` = the type may have one, `none` is common): fetched one at a time after the hits land while the dirs generation holds, decoded + downscaled to 64 px PNG, cached by id hash in `<cache>/lena-thumbnails/` (not pruned; ~5 KB each), then `set_lena_icon` swaps the row icon (Lena badge kept). Cached thumbnails are used straight away on the next search.
+- Never log queries, file names or Lena error messages, only error codes.
 
 ## Typed paths
 

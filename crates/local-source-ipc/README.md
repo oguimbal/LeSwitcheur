@@ -15,9 +15,16 @@ exclusive lock while owning its endpoint and reclaims a stale socket on restart.
 The client never launches a source and never reads its on-disk session storage.
 No network port is opened.
 
-Windows currently returns no local results. A future named-pipe transport can
-reuse the contract, validation and source adapters without changing search/UI.
-It must restrict access to the current user and preserve the same bounds.
+On Windows a source serves the named pipe
+`\\.\pipe\oliv-local-sources-<session-id>-<source>` (session id of the
+calling process, so RDS sessions stay apart). The server's DACL grants only the
+current user and it rejects remote clients (`PIPE_REJECT_REMOTE_CLIENTS`). The
+client (`windows.rs`) connects at identification level and refuses a pipe whose
+server process belongs to another user. Framing, bounds and deadlines are the
+ones below. AgentsMon does not serve a pipe yet, so Windows lists no sessions.
+
+`error` responses surface as `io::Error` carrying a `RemoteError`;
+`remote_code(&error)` returns the code.
 
 Each connection carries one request and one response. A frame is a four-byte
 unsigned big-endian length followed by UTF-8 JSON, at most 1 MiB. Overall client

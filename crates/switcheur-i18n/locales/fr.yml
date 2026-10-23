@@ -111,6 +111,7 @@ llm:
   ask_chatgpt: "Demander à ChatGPT"
   ask_mistral: "Demander à Le Chat"
   ask_perplexity: "Demander à Perplexity"
+  ask_lena: "Demander à Lena AI"
 
 launcher:
   open_url: "Ouvrir le lien"
@@ -264,3 +265,7 @@ linear:
   error_denied: "accès refusé dans le navigateur"
   error_timed_out: "pas de réponse du navigateur"
   error_port_in_use: "port 47823 déjà utilisé"
+
+lena:
+  failed: "Lena n’a pas pu ouvrir ce résultat."
+  stale: "Résultats Lena périmés : relancés, réessayez."

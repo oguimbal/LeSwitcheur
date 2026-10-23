@@ -99,6 +99,7 @@ llm:
   ask_chatgpt: "Preguntar a ChatGPT"
   ask_mistral: "Preguntar a Le Chat"
   ask_perplexity: "Preguntar a Perplexity"
+  ask_lena: "Preguntar a Lena AI"
 
 launcher:
   open_url: "Abrir URL"
@@ -203,3 +204,7 @@ linear:
   error_denied: "acceso denegado en el navegador"
   error_timed_out: "sin respuesta del navegador"
   error_port_in_use: "el puerto 47823 ya está en uso"
+
+lena:
+  failed: "Lena no pudo abrir este resultado."
+  stale: "Los resultados de Lena estaban desactualizados: actualizados, inténtalo de nuevo."

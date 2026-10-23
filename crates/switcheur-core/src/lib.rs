@@ -24,7 +24,7 @@ pub use config::{
 pub use exclusions::{ExclusionFilter, ExclusionRule};
 pub use matcher::{FuzzyMatcher, MatchResult};
 pub use model::{
-    AppRef, AudioRowRef, Browser, BrowserTabRef, DirRef, DirSource, Item, LinearIssueRef, LinearTeamRef,
+    AppRef, AudioRowRef, Browser, BrowserTabRef, DirRef, DirSource, Item, LenaTarget, LinearIssueRef, LinearTeamRef,
     LlmProvider, LocalSourceRef, PlaybackState, ProgramRef, WindowRef,
 };
 pub use sort::{sort_items, RecencyTracker, SortOrder};

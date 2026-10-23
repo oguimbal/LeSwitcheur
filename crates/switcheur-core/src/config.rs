@@ -744,6 +744,6 @@ mod tests {
         let mut c = Config::default();
         c.llm_provider_order = vec![LlmProvider::Claude];
         assert!(c.migrate_legacy_fields());
-        assert_eq!(c.llm_provider_order.last(), Some(&LlmProvider::OpenClaw));
+        assert_eq!(c.llm_provider_order.last(), Some(&LlmProvider::Lena));
     }
 }

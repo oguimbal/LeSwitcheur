@@ -105,6 +105,7 @@ impl LlmLauncher for WinPlatform {
             LlmProvider::OpenClaw => {
                 anyhow::bail!("OpenClaw instructions go through crate::openclaw")
             }
+            LlmProvider::Lena => anyhow::bail!("Lena questions go through crate::lena"),
         };
         let q = url_encode(prompt);
         let full = if q.is_empty() {

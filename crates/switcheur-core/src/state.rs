@@ -70,6 +70,8 @@ pub struct SwitcherState {
     path_hits: Option<(String, Vec<Item>, Vec<String>)>,
     llm_provider_order: Vec<LlmProvider>,
     ask_llm_enabled: bool,
+    /// A signed-in Lena answered `info` this panel: list its Ask row.
+    lena_ask: bool,
     /// When the Dirs pane is active and the user has pressed Right (or clicked
     /// a popover row), this tracks the selection inside the floating "Open
     /// With" popover. `None` means the popover is passive — shown next to the
@@ -114,6 +116,7 @@ impl SwitcherState {
             path_hits: None,
             llm_provider_order: LlmProvider::default_order(),
             ask_llm_enabled: true,
+            lena_ask: false,
             open_with_index: None,
             suggested_items: Vec::new(),
             local_sources: Vec::new(),
@@ -138,6 +141,18 @@ impl SwitcherState {
     pub fn set_ask_llm_enabled(&mut self, enabled: bool) {
         self.ask_llm_enabled = enabled;
         self.rerank();
+    }
+
+    /// Show or hide the "Ask Lena AI" row. Lena is probed after the panel
+    /// opens, so the cursor is kept.
+    pub fn set_lena_ask(&mut self, available: bool) {
+        if self.lena_ask == available {
+            return;
+        }
+        let selected = self.selected().cloned();
+        self.lena_ask = available;
+        self.rerank_inner(RerankReset::PreserveSelection);
+        self.restore_selection(selected);
     }
 
     /// Toggle the browser-tabs fallback tier. When disabled the state never
@@ -529,24 +544,59 @@ impl SwitcherState {
         if was_focus && self.dirs.is_empty() {
             self.active_section = Section::Windows;
         }
-        // The "Ask LLM" fallback is suppressed when dirs are present, so the
-        // right pane can take over the full width. Rerank when dirs toggle
-        // between empty and non-empty so the fallback rows appear/disappear.
         if presence_changed {
-            self.rerank();
+            self.rerank_inner(RerankReset::PreserveSelection);
         }
-        // When the left list has nothing to show but dirs do, move keyboard
-        // focus there so Enter activates a dir row without a manual Tab.
-        let only_create_row = self
+        // When the left list only holds fallback rows (Ask AI, create a
+        // Linear issue) but dirs matched, move keyboard focus there so Enter
+        // activates a dir row without a manual Tab.
+        let only_fallback_rows = self
             .filtered
             .iter()
-            .all(|m| matches!(m.item, Item::CreateLinearIssue { .. }));
-        if only_create_row
+            .all(|m| matches!(m.item, Item::CreateLinearIssue { .. } | Item::AskLlm { .. }));
+        if only_fallback_rows
             && self.filtered_programs.is_empty()
-            && !self.dirs.is_empty()
+            && self.dirs.iter().any(|it| !is_lena(it))
             && self.active_section == Section::Windows
         {
             self.active_section = Section::Dirs;
+        }
+    }
+
+    /// Lena rows currently shown, kept below fresh local rows until Lena's
+    /// slower answer replaces them.
+    pub fn lena_dirs(&self) -> Vec<Item> {
+        self.dirs.iter().filter(|it| is_lena(it)).cloned().collect()
+    }
+
+    /// Swap a Lena row's icon for its thumbnail once fetched.
+    pub fn set_lena_icon(&mut self, id: &str, icon: std::path::PathBuf) {
+        for item in &mut self.dirs {
+            if let Item::Dir(d) = item {
+                if d.lena.as_ref().is_some_and(|t| t.id == id) {
+                    let mut updated = (**d).clone();
+                    updated.icon_path = Some(icon.clone());
+                    *item = Item::Dir(Arc::new(updated));
+                }
+            }
+        }
+    }
+
+    /// Replace the Lena rows below the local dirs without moving the pane
+    /// cursor (clamped if the pane shrank). Never takes keyboard focus: Lena
+    /// answers seconds after typing, when Enter may already target the left
+    /// list (e.g. "Ask Lena AI").
+    pub fn set_lena_dirs(&mut self, rows: Vec<Item>) {
+        self.dirs.retain(|it| !is_lena(it));
+        self.dirs.extend(rows);
+        if self.dirs.is_empty() {
+            self.selected_dir = 0;
+            self.open_with_index = None;
+            if self.active_section == Section::Dirs {
+                self.active_section = Section::Windows;
+            }
+        } else {
+            self.selected_dir = self.selected_dir.min(self.dirs.len() - 1);
         }
     }
 
@@ -955,14 +1005,18 @@ impl SwitcherState {
             && tab_count <= ASK_LLM_MAX_TABS
             && self.filtered_programs.is_empty()
             && self.eval_result.is_none()
-            && self.dirs.is_empty()
             && !browser_tabs_pending
             && linear_hit.is_none()
             && team_hits.is_empty()
         {
             let query: Arc<str> = Arc::from(self.query.as_str());
-            self.filtered
-                .extend(self.llm_provider_order.iter().copied().map(|provider| {
+            let lena_ask = self.lena_ask;
+            self.filtered.extend(
+                self.llm_provider_order
+                    .iter()
+                    .copied()
+                    .filter(|p| lena_ask || *p != LlmProvider::Lena)
+                    .map(|provider| {
                     MatchResult {
                         item: Item::AskLlm {
                             provider,
@@ -1032,6 +1086,10 @@ impl SwitcherState {
             }
         }
     }
+}
+
+fn is_lena(item: &Item) -> bool {
+    matches!(item, Item::Dir(d) if d.source == crate::model::DirSource::Lena)
 }
 
 /// Like [`same_target`], but a window keeps its identity across a title
@@ -1191,6 +1249,91 @@ mod tests {
         s.move_down();
         s.refresh_items(vec![win_id(1, "a")]);
         assert_eq!(s.selected_idx(), 0);
+    }
+
+    fn lena_hit(id: &str) -> Item {
+        Item::Dir(Arc::new(DirRef::lena(
+            crate::model::LenaTarget {
+                instance: "i".into(),
+                id: id.into(),
+                local: None,
+            },
+            format!("{id}.pdf"),
+            "Lena/Projets".into(),
+            false,
+            None,
+        )))
+    }
+
+    fn ask_providers(s: &SwitcherState) -> Vec<LlmProvider> {
+        s.filtered()
+            .iter()
+            .filter_map(|m| match &m.item {
+                Item::AskLlm { provider, .. } => Some(*provider),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lena_ask_row_only_while_lena_is_available() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("A", "alpha")]);
+        s.set_browser_tabs(Vec::new());
+        s.set_query("zzzzzz");
+        assert!(!ask_providers(&s).contains(&LlmProvider::Lena));
+        s.set_selected(2);
+        s.set_lena_ask(true);
+        assert_eq!(ask_providers(&s).last(), Some(&LlmProvider::Lena));
+        assert_eq!(s.selected_idx(), 2, "late Lena probe keeps the cursor");
+        s.set_lena_ask(false);
+        assert!(!ask_providers(&s).contains(&LlmProvider::Lena));
+    }
+
+    #[test]
+    fn ask_rows_stay_next_to_dir_matches() {
+        let mut s = SwitcherState::new();
+        s.set_items(vec![win("A", "alpha")]);
+        s.set_browser_tabs(Vec::new());
+        s.set_query("zzzzzz");
+        s.set_dirs(vec![dir("/zzzzzz")]);
+        assert!(!ask_providers(&s).is_empty());
+        assert_eq!(s.active_section(), Section::Dirs, "local dir match takes Enter");
+    }
+
+    #[test]
+    fn lena_hits_append_below_local_dirs_without_moving_the_cursor() {
+        let mut s = SwitcherState::new();
+        s.set_dirs(vec![dir("/a"), dir("/b")]);
+        s.focus_dirs();
+        s.set_selected_dir(1);
+        s.set_lena_dirs(vec![lena_hit("x"), lena_hit("y")]);
+        assert_eq!(s.dirs().len(), 4);
+        assert_eq!(s.selected_dir_idx(), 1);
+        assert_eq!(s.active_section(), Section::Dirs);
+        s.set_selected_dir(3);
+        s.set_lena_dirs(vec![lena_hit("z")]);
+        assert_eq!(s.dirs().len(), 3, "previous Lena rows are replaced");
+        assert_eq!(s.selected_dir_idx(), 2);
+        assert_eq!(s.lena_dirs().len(), 1);
+        s.set_lena_icon("z", PathBuf::from("/tmp/z.png"));
+        assert!(matches!(&s.dirs()[2], Item::Dir(d) if d.icon_path.as_deref() == Some(Path::new("/tmp/z.png"))));
+
+        let mut empty = SwitcherState::new();
+        empty.set_items(vec![win("A", "alpha")]);
+        empty.set_browser_tabs(Vec::new());
+        empty.set_query("zzzzzz");
+        empty.set_lena_dirs(vec![lena_hit("x")]);
+        assert!(empty.dirs_visible());
+        assert_eq!(empty.active_section(), Section::Windows, "late Lena hits leave focus on Ask rows");
+        assert!(matches!(empty.selected(), Some(Item::AskLlm { .. })));
+        match &empty.dirs()[0] {
+            Item::Dir(d) => {
+                assert_eq!((d.basename(), d.parent_display()), ("x.pdf", "Lena/Projets"));
+                assert!(d.local_path().is_none());
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

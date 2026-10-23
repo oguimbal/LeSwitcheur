@@ -223,6 +223,7 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+pub mod lena;
 pub mod linear;
 pub mod openclaw;
 pub mod zoxide;
@@ -337,6 +338,22 @@ pub fn icon_for_bundle(_bundle_path: &str, _bundle_id: &str) -> Option<std::path
 #[cfg(target_os = "macos")]
 pub fn icon_for_path(path: &std::path::Path, is_dir: bool) -> Option<std::path::PathBuf> {
     macos::icons::icon_for_path(path, is_dir)
+}
+
+/// Type icon from the name alone, for files that may not exist locally.
+#[cfg(target_os = "macos")]
+pub fn icon_for_name(name: &std::path::Path, is_dir: bool) -> Option<std::path::PathBuf> {
+    if is_dir {
+        macos::icons::folder_icon_path()
+    } else {
+        macos::icons::icon_for_file_name(name)
+    }
+}
+
+/// Windows resolves type icons without disk access already.
+#[cfg(not(target_os = "macos"))]
+pub fn icon_for_name(name: &std::path::Path, is_dir: bool) -> Option<std::path::PathBuf> {
+    icon_for_path(name, is_dir)
 }
 
 #[cfg(target_os = "windows")]

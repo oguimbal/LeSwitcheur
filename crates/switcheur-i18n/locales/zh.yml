@@ -99,6 +99,7 @@ llm:
   ask_chatgpt: "问 ChatGPT"
   ask_mistral: "问 Le Chat"
   ask_perplexity: "问 Perplexity"
+  ask_lena: "问 Lena AI"
 
 launcher:
   open_url: "打开链接"
@@ -203,3 +204,7 @@ linear:
   error_denied: "浏览器中拒绝了访问"
   error_timed_out: "浏览器无响应"
   error_port_in_use: "端口 47823 已被占用"
+
+lena:
+  failed: "Lena 无法打开此结果。"
+  stale: "Lena 结果已过期：已刷新，请重试。"

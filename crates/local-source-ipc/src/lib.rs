@@ -6,6 +6,8 @@ use std::io;
 
 #[cfg(unix)]
 pub mod unix;
+#[cfg(windows)]
+pub mod windows;
 
 pub const PROTOCOL: &str = "local-sources";
 pub const VERSION: u32 = 1;
@@ -151,6 +153,47 @@ pub struct Focus {
 
 pub fn invalid(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+}
+
+/// `error` response from a source. Carried inside the `io::Error` so callers
+/// can branch on the code (see [`remote_code`]).
+#[derive(Debug)]
+pub struct RemoteError(pub String);
+
+impl std::fmt::Display for RemoteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "local source: {}", self.0)
+    }
+}
+
+impl std::error::Error for RemoteError {}
+
+/// Code of an `error` response, `None` for transport or contract failures.
+pub fn remote_code(error: &io::Error) -> Option<&str> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<RemoteError>())
+        .map(|remote| remote.0.as_str())
+}
+
+/// Shared by every transport: contract first, then error / method checks.
+pub(crate) fn check_response(request: &Envelope, response: Envelope) -> io::Result<Envelope> {
+    response.check(&request.source)?;
+    if response.method == "error" {
+        let code = response
+            .payload
+            .get("code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown_error");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            RemoteError(code.chars().take(64).collect()),
+        ));
+    }
+    if response.method != request.method {
+        return Err(invalid("unexpected response method"));
+    }
+    Ok(response)
 }
 
 #[cfg(test)]
