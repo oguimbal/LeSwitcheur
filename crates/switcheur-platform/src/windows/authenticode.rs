@@ -104,3 +104,23 @@ unsafe fn enhanced_key_usages(
         .collect())
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsigned_binary_is_refused() {
+        let exe = std::env::current_exe().unwrap();
+        assert!(signed_by_oganbo(&exe).is_err());
+    }
+
+    /// `LESWITCHEUR_SIGNED_SETUP=<path to a released setup> cargo test`.
+    #[test]
+    fn released_setup_is_accepted() {
+        let Some(path) = std::env::var_os("LESWITCHEUR_SIGNED_SETUP") else {
+            return;
+        };
+        assert_eq!(signed_by_oganbo(std::path::Path::new(&path)), Ok(()));
+    }
+}
