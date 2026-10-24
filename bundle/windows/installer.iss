@@ -1,8 +1,8 @@
 ; Inno Setup script for the LeSwitcheur Windows installer.
 ;
 ; Built by .github/workflows/release.yml on tag push, alongside the macOS
-; .dmg and the existing portable .zip. Per-user install (no UAC), unsigned
-; for now (see TODO(signing) below).
+; .dmg and the existing portable .zip. Per-user install (no UAC), signed in CI
+; with Oganbo's Azure Artifact Signing identity (see Signed below).
 ;
 ; The app self-registers its `leswitcheur://` URL scheme and its
 ; "launch at login" Run key on first launch — see
@@ -67,10 +67,12 @@ CloseApplications=force
 RestartApplications=yes
 MinVersion=10.0
 
-; TODO(signing): when an EV/OV cert lands, add
-;   SignTool=signtool $f
-; here and configure the named "signtool" via /Ssigntool=... in CI. Until
-; then SmartScreen will warn on first download.
+; CI passes /DSigned and /Sazuresign=<bundle\windows\sign.ps1 $f>: Inno then
+; signs the setup and the uninstaller it embeds. Local builds stay unsigned.
+#ifdef Signed
+SignTool=azuresign
+SignedUninstaller=yes
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

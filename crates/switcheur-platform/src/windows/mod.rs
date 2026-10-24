@@ -9,6 +9,7 @@
 
 pub mod activate;
 pub mod app_policy;
+pub mod authenticode;
 pub mod file_manager;
 pub mod hotkey;
 pub mod icons;

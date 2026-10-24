@@ -3969,6 +3969,13 @@ fn apply_downloaded_update(path: &std::path::Path) -> bool {
         // /SILENT shows a small progress dialog but no wizard; combined with
         // CloseApplications=force + RestartApplications=yes in installer.iss
         // this kills us, swaps the .exe, and relaunches.
+        // Only run an installer Oganbo signed: the download URL comes from
+        // leswitcheur.app, which must not be enough to run code here.
+        if let Err(e) = switcheur_platform::windows::authenticode::signed_by_oganbo(path) {
+            tracing::warn!("refuse installer {}: {e}", path.display());
+            let _ = std::fs::remove_file(path);
+            return false;
+        }
         match std::process::Command::new(path)
             .args(["/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"])
             .spawn()

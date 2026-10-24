@@ -4,9 +4,13 @@ on:
   push:
     tags:
       - "v*"
+  # Dry run from master: builds and signs the Windows artifacts, uploads them
+  # to the run, publishes nothing.
+  workflow_dispatch:
 
 jobs:
   build-macos:
+    if: github.event_name == 'push'
     runs-on: macos-14
     permissions:
       contents: write
@@ -138,13 +142,22 @@ jobs:
   build-windows:
     # Windows build: produces (1) a portable `.zip` (stripped release `.exe`
     # statically linked against MSVCRT, no extra runtime DLLs, no installer)
-    # and (2) an Inno Setup `.exe` installer (per-user, no UAC). Neither is
-    # signed yet — early Windows builds ship as unsigned previews until we
-    # set up SignTool with an EV cert. The job appends both assets to the
-    # same GitHub Release the macOS job creates (softprops merges by tag).
+    # and (2) an Inno Setup `.exe` installer (per-user, no UAC). The exe, the
+    # setup and its uninstaller are signed with Oganbo's Azure Artifact
+    # Signing identity (same as Lena) through GitHub OIDC: the `windows-release`
+    # environment (tags `v*` + master only) is what the Entra federated
+    # credential trusts. The job appends both assets to the same GitHub
+    # Release the macOS job creates (softprops merges by tag).
     runs-on: windows-latest
+    environment: windows-release
     permissions:
       contents: write
+      id-token: write
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+      ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
     steps:
       - uses: actions/checkout@v4
 
@@ -155,23 +168,41 @@ jobs:
       - name: Build release binary
         run: cargo build --release -p switcheur
 
+      # A public build without the Oganbo signature would be refused by the
+      # updater and by Lena's installer, so missing configuration fails here.
+      - name: Install signing tools
+        shell: pwsh
+        run: bundle\windows\signing-tools.ps1 -Destination "$env:RUNNER_TEMP\signing-tools"
+
+      - name: Sign release binary
+        shell: pwsh
+        run: bundle\windows\sign.ps1 target\release\switcheur.exe
+
+      - name: Version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq 'push') {
+              $tag = "${{ github.ref_name }}"            # e.g. "v0.1.15"
+          } else {
+              $tag = "v0.0.0-dev"
+          }
+          "TAG=$tag" >> $env:GITHUB_ENV
+          "APP_VERSION=$($tag.TrimStart('v'))" >> $env:GITHUB_ENV
+
       - name: Stage portable zip
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          $tag = "${{ github.ref_name }}"
-          $stage = "dist\LeSwitcheur-$tag-windows-x86_64-portable"
+          $stage = "dist\LeSwitcheur-$env:TAG-windows-x86_64-portable"
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           Copy-Item target\release\switcheur.exe "$stage\LeSwitcheur.exe"
           Copy-Item LICENSE "$stage\LICENSE"
           Copy-Item README.md "$stage\README.md"
-          Compress-Archive -Path "$stage\*" -DestinationPath "dist\LeSwitcheur-$tag-windows-x86_64-portable.zip" -Force
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist\LeSwitcheur-$env:TAG-windows-x86_64-portable.zip" -Force
 
       - name: Build installer (Inno Setup)
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"      # e.g. "v0.1.15"
-          $ver = $tag.TrimStart('v')           # "0.1.15"
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\iscc.exe"
           if (-not (Test-Path $iscc)) {
               # Inno Setup 6 is preinstalled on the windows-latest runner image.
@@ -179,7 +210,9 @@ jobs:
               # release without the installer, which is worse than a CI failure.
               throw "ISCC not found at $iscc - runner image changed?"
           }
-          & $iscc /DAppVersion=$ver bundle\windows\installer.iss
+          # $q / $f are Inno's quote and quoted-file placeholders.
+          $sign = (Resolve-Path bundle\windows\sign.ps1).Path
+          & $iscc /DAppVersion=$env:APP_VERSION /DSigned ('/Sazuresign=pwsh -NoProfile -File $q' + $sign + '$q $f') bundle\windows\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "iscc failed: $LASTEXITCODE" }
           # Stable filename (no version) so /releases/latest/download/<name>
           # resolves across versions — matches the macOS LeSwitcheur.dmg.
@@ -187,7 +220,25 @@ jobs:
           if (-not (Test-Path $out)) { throw "expected $out" }
           Get-Item $out | Format-List Name,Length,LastWriteTime
 
+      - name: Verify signatures
+        shell: pwsh
+        run: |
+          $stage = "dist\LeSwitcheur-$env:TAG-windows-x86_64-portable"
+          bundle\windows\sign.ps1 -VerifyOnly "$stage\LeSwitcheur.exe" dist\LeSwitcheur-setup.exe
+          & $env:SIGNTOOL verify /pa /all dist\LeSwitcheur-setup.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool verify failed" }
+
+      - name: Upload dry-run artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-signed
+          path: |
+            dist/LeSwitcheur-${{ env.TAG }}-windows-x86_64-portable.zip
+            dist/LeSwitcheur-setup.exe
+
       - name: Publish GitHub Release (Windows artifacts)
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           files: |

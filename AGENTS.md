@@ -314,6 +314,14 @@ CI step (on tag push):
 
 If any signing/notarisation secret is missing, CI either falls back to ad-hoc (signing) or fails outright (notarisation). The fail-out is intentional — a public build without notarisation would mislead users.
 
+### Windows signing (Azure Artifact Signing, Oganbo)
+
+- `build-windows` signs `switcheur.exe`, `LeSwitcheur-setup.exe` and its uninstaller with Oganbo's Public Trust identity, the one Lena uses (`lena-mono/scripts/client-release/`, same pinned `Microsoft.Windows.SDK.BuildTools` + `Microsoft.ArtifactSigning.Client`). Scripts: `bundle/windows/signing-tools.ps1` (tools + metadata, `WorkloadIdentityCredential` only), `bundle/windows/sign.ps1` (fresh GitHub OIDC assertion per file, then Authenticode valid + timestamp + identity EKU check; `-VerifyOnly`). Inno signs through `SignTool=azuresign` when `/DSigned` is passed; local `iscc` builds stay unsigned.
+- Auth: GitHub environment `windows-release` (deployment refs `v*` tags + `master`) ↔ federated credential `leswitcheur-release` on Lena's Entra signing app (subject `repo:oguimbal/LeSwitcheur:environment:windows-release`). Repository variables (not secrets): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `ARTIFACT_SIGNING_ACCOUNT`, `ARTIFACT_SIGNING_PROFILE`. Missing → the job fails: an unsigned setup would be refused anyway.
+- Identity = EKU `1.3.6.1.4.1.311.97.520439368.510019483.389024596.527382922` (+ `1.3.6.1.4.1.311.97.1.0`), never a thumbprint: Artifact Signing leaf certificates rotate every few days. Pinned in `sign.ps1` and `switcheur-platform/src/windows/authenticode.rs`.
+- The Windows updater runs a downloaded setup only if `authenticode::signed_by_oganbo` accepts it (WinVerifyTrust, no lifetime-signing flag, validity from the timestamp), so whoever controls leswitcheur.app or the release URL cannot get code run. No extra hash: it would travel the same channel.
+- Dry run: Actions → release → Run workflow on master builds + signs, uploads artifact `windows-signed`, publishes nothing (macOS job skipped).
+
 ### Local notarisation (rare)
 
 `bundle/notarize.sh` also work locally via `xcrun notarytool` keychain profile `leswitcheur-notary` (override via `$NOTARYTOOL_PROFILE`). Used for one-off manual builds; not part of `just release`.
